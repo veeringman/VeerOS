@@ -1,5 +1,5 @@
 <!-- LOGO PLACEHOLDER -->
-![VeerOS Logo](./docs/VeerOS.png)
+![VeerOS Logo](./docs/VeerOS-Small.png)
 # VeerOS
 
 **VeerOS** is a lightweight, secure, and experimental operating system designed for embedded devices (ESP32 RISC-V).  
