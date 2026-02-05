@@ -36,7 +36,7 @@ Built in Rust, VeerOS explores modern OS concepts — secure boot, OTA updates, 
 /net          -> Networking stack
 /shell        -> Command interpreter
 /docs         -> Documentation
-
+```
 
 ## 📐 Architecture
 
