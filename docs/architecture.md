@@ -9,7 +9,7 @@ It cleanly separates **policy from mechanism**, allowing the same kernel core to
 
 The diagram below illustrates the layered design of VeerOS, from user programs down to physical hardware.
 
-![VeerOS Architecture Diagram](architecture.png)
+![VeerOS Architecture Diagram](veeros-arch.png)
 
 > 📌 The kernel core is fully portable Rust code.  
 > All architecture- and chip-specific logic is isolated behind well-defined abstraction layers.
