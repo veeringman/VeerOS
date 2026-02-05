@@ -1,0 +1,22 @@
+[package]
+name = "veeros"
+version = "0.1.0"
+edition = "2021"   # 2024 edition is not stable yet; use 2021
+
+[dependencies]
+# RISC-V runtime support
+riscv = "0.16"             # RISC-V intrinsics
+riscv-rt = "0.17"          # Runtime support for RISC-V
+panic-halt = "1.0"         # Panic handler for no_std
+
+# Networking and data structures
+smoltcp = { version = "0.12", default-features = false, features = ["proto-ipv4", "proto-ipv6"] }
+
+heapless = "0.9.2"          # No-std data structures
+embedded-hal = "1.0"        # Hardware abstraction layer
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

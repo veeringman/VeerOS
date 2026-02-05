@@ -1,0 +1,16 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arch_riscv = { path = "../arch_riscv", optional = true }
+arch_arm   = { path = "../arch_arm", optional = true }
+hal_esp32c3 = { path = "../hal_esp32c3", optional = true }
+hal_stm32   = { path = "../hal_stm32", optional = true }
+smoltcp = "0.11" # networking stack
+
+[features]
+riscv = ["arch_riscv", "hal_esp32c3"]
+arm   = ["arch_arm", "hal_stm32"]
+default = []

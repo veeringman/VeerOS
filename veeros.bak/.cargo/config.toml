@@ -1,0 +1,19 @@
+[build]
+target = "riscv32imc-unknown-none-elf"
+
+[target.riscv32imc-unknown-none-elf]
+linker = "riscv32-unknown-elf-gcc"
+rustflags = [
+  "-C", "link-arg=-nostartfiles",   # avoid GCC crt0.o
+  "-C", "link-arg=-nostdlib",       # avoid libc stubs
+  "-C", "link-arg=-Tmemory.x",      # use custom linker script
+  "-C", "target-feature=-f",        # force soft-float ABI
+]
+runner = "espflash --monitor"   # Automatically flash & open serial monitor
+
+[unstable]
+build-std = ["core", "alloc"]
+
+#[build]
+#target = "riscv32imc-unknown-none-elf"
+

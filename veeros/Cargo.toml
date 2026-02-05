@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "kernel",
+    "arch_riscv",
+    "arch_arm",
+    "hal_esp32c3",
+    "hal_stm32",
+    "userlib",
+    "veer_entry"
+]
