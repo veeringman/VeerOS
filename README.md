@@ -38,10 +38,10 @@ Built in Rust, VeerOS explores modern OS concepts — secure boot, OTA updates, 
 /docs         -> Documentation
 ```
 
-## 📐 Architecture
+## Architecture
 
-VeerOS uses a clean, portable, multi-architecture kernel design.
+VeerOS is built around a layered, multi-architecture design that separates
+portable kernel logic from hardware- and CPU-specific code.
 
-👉 **Read the full architecture overview:**  
-[VeerOS System Architecture](/docs/architecture.md)
+➡️ **Detailed design & diagram:** [Architecture Documentation](docs/architecture.md)
 
