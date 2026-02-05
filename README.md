@@ -9,9 +9,11 @@ Built in Rust, VeerOS explores modern OS concepts — secure boot, OTA updates, 
 ## ✨ Features
 - Secure Boot  
 - OTA Updates  
-- UEFI-like Bootloader  
-- Networking Stack  
-- SSH Access (planned)  
+- UEFI-like Bootloader
+- Process Model and Threads
+- Networking Stack
+- Virtual Memory
+- SSH Access
 - Rust-based Kernel  
 
 ---
@@ -20,9 +22,9 @@ Built in Rust, VeerOS explores modern OS concepts — secure boot, OTA updates, 
 - [x] Bootloader with menu  
 - [x] Secure boot verification  
 - [x] OTA slot + fallback kernel  
-- [ ] TCP/IP stack  
-- [ ] SSH daemon  
-- [ ] Filesystem + shell  
+- [x] TCP/IP stack  
+- [x] SSH daemon  
+- [x]Filesystem + shell  
 
 ---
 
