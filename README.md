@@ -24,7 +24,7 @@ Built in Rust, VeerOS explores modern OS concepts — secure boot, OTA updates, 
 - [x] OTA slot + fallback kernel  
 - [x] TCP/IP stack  
 - [x] SSH daemon  
-- [x]Filesystem + shell  
+- [x] Filesystem + shell  
 
 ---
 
