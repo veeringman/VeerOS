@@ -1,7 +1,7 @@
 <!-- LOGO PLACEHOLDER -->
 ![VeerOS Logo](./docs/veeros.logo.png)
 
-**VeerOS** is a lightweight, secure, and experimental operating system designed for embedded devices (ESP32 RISC-V) to start with and to be extended to multi-architectures in future.
+**VeerOS** is a lightweight, secure, and experimental operating system designed for embedded devices (ESP32 RISC-V) to start with and to be extended to multi-architecture drsigb in future.
 Built in Rust, VeerOS explores modern OS concepts — secure boot, OTA updates, and remote management — while staying minimal and educational.
 
 ---
