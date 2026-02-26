@@ -1,0 +1,16 @@
+[package]
+name = "distributions"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["minimal"]
+minimal = []
+app = []
+real-time = []
+full = ["app", "real-time"]
+
+[dependencies]

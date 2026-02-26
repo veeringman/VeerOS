@@ -1,0 +1,25 @@
+[package]
+name = "kernel-esp32"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["esp32c3", "dist-minimal"]
+esp32c3 = ["bsp-esp32-riscv/esp32c3"]
+esp32c6 = ["bsp-esp32-riscv/esp32c6"]
+esp32h2 = ["bsp-esp32-riscv/esp32h2"]
+
+dist-minimal = ["microkernel/dist-minimal"]
+dist-app = ["microkernel/dist-app"]
+dist-rt = ["microkernel/dist-rt"]
+dist-full = ["microkernel/dist-full"]
+
+[dependencies]
+arch = { path = "../arch" }
+microkernel = { path = "../microkernel", default-features = false }
+bsp-esp32-riscv = { path = "../bsp-esp32-riscv", default-features = false }
+shell = { path = "../shell" }
+panic-halt = "1.0"

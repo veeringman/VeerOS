@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/microkernel",
+    "crates/arch",
+    "crates/bsp-esp32-riscv",
+    "crates/bsp-qemu-virt",
+    "crates/distributions",
+    "crates/kernel-esp32",
+    "crates/kernel-qemu-virt",
+    "crates/shell",
+    "crates/veeros-demo",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["VeerOS Contributors"]
+repository = "https://github.com/veeringman/VeerOS"
+
+[workspace.dependencies]
+bitflags = "2.6"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -1,0 +1,5 @@
+[alias]
+check-all = "check --workspace --all-targets"
+check-esp32c3 = "check -p bsp-esp32-riscv --target riscv32imc-unknown-none-elf"
+check-kernel-esp32c3 = "check -p kernel-esp32 --target riscv32imc-unknown-none-elf"
+check-kernel-qemu = "check -p kernel-qemu-virt --target riscv32imc-unknown-none-elf"

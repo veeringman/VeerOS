@@ -1,0 +1,16 @@
+[package]
+name = "bsp-esp32-riscv"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["esp32c3"]
+esp32c3 = []
+esp32c6 = []
+esp32h2 = []
+
+[dependencies]
+arch = { path = "../arch" }
