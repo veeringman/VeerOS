@@ -51,6 +51,20 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [ ] Optional app runtime service
 - [ ] Optional real-time scheduling service
 
+## Phase 5 — Remote Access (SSH / Equivalent)
+- [x] `NetworkDevice` trait in `arch` crate (transport-agnostic NIC abstraction)
+- [x] VIRTIO-NET MMIO driver in `bsp-qemu-virt` (probes QEMU virt slots)
+- [x] `net` crate — smoltcp TCP/IP stack integration + `DeviceAdapter` PHY bridge
+- [x] `TcpSerial` — implements `Serial` trait over a TCP socket (shell-over-TCP)
+- [x] Network listener task in `kernel-qemu-virt` (auto-probes NIC, listens on port 2323)
+- [x] `MAX_TASKS` bumped to 16 (supports idle + shell + net + future sessions)
+- [x] QEMU launch instructions with `-device virtio-net-device` + user-net port forwarding
+- [ ] Lightweight SSH-compatible server (or custom encrypted shell protocol)
+- [ ] Authentication model (key-based or password)
+- [ ] Remote shell session multiplexing (attach shell task to network socket)
+- [x] QEMU user-net or TAP networking for development/testing
+- [ ] ESP32 Wi-Fi driver integration for real-hardware remote access
+
 ## Phase 4 — Distribution Profiles
 - [ ] `minimal` distribution build recipe
 - [ ] `app` distribution build recipe
@@ -65,3 +79,5 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - 2026-02-26: Phase 2 complete — added IPC mailbox module, RISC-V trap entry/exit via global_asm!, Rust trap dispatcher with timer-tick context switch and ecall handler. All builds clean.
 - 2026-02-27: Phase 3 shell — added Serial RX to arch + ESP32 UART, built interactive shell crate, host demo binary (veeros-demo) with raw terminal. Shell task registered in ESP32 kernel boot. Full boot → shell verified via `cargo run -p veeros-demo`.
 - 2026-02-26: Preemptive multitasking — `_veer_start_first_task` asm loads TaskContext + mret with MPIE=1/MPP=M into first task. Timer ISR (1ms CLINT tick) preempts shell↔idle via round-robin scheduler. Named TCBs, `uptime` and `tasks` shell commands. QEMU poweroff on `exit`. All builds clean.
+- 2026-03-10: Phase 5 kickoff — remote shell over TCP. Added `NetworkDevice` trait to arch, VIRTIO-NET MMIO driver in QEMU BSP, `net` crate (smoltcp TCP/IP + `TcpSerial` Serial-over-TCP bridge), network listener task in kernel-qemu-virt (port 2323). MAX_TASKS bumped to 16. All kernels (ESP32 + QEMU) build clean with 0 warnings. QEMU launch instructions with `-device virtio-net-device` + hostfwd documented.
+- 2026-03-10: Fixed VIRTIO MMIO v2 (modern) driver — rewrote virtio_net.rs with contiguous page-aligned VqRegion, split desc/avail/used pointers, VIRTIO_F_VERSION_1 feature negotiation. Fixed TcpSerial to use `may_recv()`/`may_send()` for proper remote-close detection (was stuck in CLOSE_WAIT). Fixed socket re-listen with `abort()` to skip TIME_WAIT. Remote shell fully working: banner, commands (`help`, `tasks`, `uptime`, `sysinfo`, `logo`), and sequential reconnections all verified over TCP.

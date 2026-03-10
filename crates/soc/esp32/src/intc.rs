@@ -15,19 +15,19 @@ use arch::InterruptController;
 // ---------------------------------------------------------------------------
 
 /// INTERRUPT_CORE0 base (interrupt matrix).
-#[cfg(feature = "esp32c3")]
+#[cfg(feature = "c3")]
 const INTC_BASE: usize = 0x600C_2000;
 
-#[cfg(feature = "esp32c6")]
+#[cfg(feature = "c6")]
 const INTC_BASE: usize = 0x600C_2000;
 
-#[cfg(feature = "esp32h2")]
+#[cfg(feature = "h2")]
 const INTC_BASE: usize = 0x600C_2000;
 
 #[cfg(all(
-    not(feature = "esp32c3"),
-    not(feature = "esp32c6"),
-    not(feature = "esp32h2"),
+    not(feature = "c3"),
+    not(feature = "c6"),
+    not(feature = "h2"),
 ))]
 const INTC_BASE: usize = 0x600C_2000;
 

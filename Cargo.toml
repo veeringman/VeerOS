@@ -1,13 +1,23 @@
 [workspace]
 members = [
-    "crates/microkernel",
+    # ── Layer 0: Architecture traits ──────────────────────
     "crates/arch",
-    "crates/bsp-esp32-riscv",
-    "crates/bsp-qemu-virt",
+
+    # ── Layer 1: SoC drivers ─────────────────────────────
+    "crates/soc/esp32",
+    "crates/soc/qemu_virt",
+
+    # ── Layer 2: Kernel binaries (one per board) ─────────
+    "crates/kernel/xiao_esp32c6",
+    "crates/kernel/qemu_virt",
+
+    # ── Shared OS components ─────────────────────────────
+    "crates/microkernel",
     "crates/distributions",
-    "crates/kernel-esp32",
-    "crates/kernel-qemu-virt",
+    "crates/net",
     "crates/shell",
+
+    # ── Demo / test ──────────────────────────────────────
     "crates/veeros-demo",
 ]
 resolver = "2"
@@ -20,6 +30,7 @@ repository = "https://github.com/veeringman/VeerOS"
 
 [workspace.dependencies]
 bitflags = "2.6"
+smoltcp = { version = "0.11", default-features = false, features = ["proto-ipv4", "socket-tcp", "medium-ethernet"] }
 
 [profile.dev]
 panic = "abort"

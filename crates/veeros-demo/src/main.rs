@@ -132,6 +132,9 @@ fn main() {
         scheduler: "minimal",
         get_uptime_ticks: None,
         get_task_list: None,
+        get_mem_info: None,
+        get_driver_list: None,
+        wifi_cmd: None,
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);

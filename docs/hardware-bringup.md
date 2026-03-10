@@ -80,3 +80,45 @@ VeerOS>
 - **Garbled text**: ROM default baud is usually 115200; mismatch causes garble.
 - **Watchdog reset loop**: disable RTC WDT in `init_cpu()` before banner.
 - **QEMU hangs on exit**: ensure `qemu_poweroff()` writes `0x5555u32` to `0x100000`.
+
+## QEMU Networking — Remote Shell
+
+VeerOS includes a TCP remote shell (port 2323). To launch QEMU with
+networking enabled:
+
+### Build
+```bash
+cargo build -p kernel-qemu-virt --target riscv32imc-unknown-none-elf --release
+```
+
+### Run with user-net (port 2323 forwarded to host 12323)
+```bash
+qemu-system-riscv32 -nographic -machine virt \
+    -bios none \
+    -kernel target/riscv32imc-unknown-none-elf/release/kernel-qemu-virt \
+    -device virtio-net-device,netdev=net0 \
+    -netdev user,id=net0,hostfwd=tcp::12323-:2323
+```
+
+### Connect from host
+```bash
+# From another terminal:
+nc localhost 12323
+# or
+telnet localhost 12323
+```
+
+You should see the VeerOS shell prompt over the network. The UART
+console remains available as usual for local access.
+
+### Memory map (QEMU virt, with networking)
+| Region | Start | Usage |
+|--------|-------|-------|
+| VIRTIO-NET MMIO | 0x1000_1000–0x1000_8000 | Network device (probed) |
+
+### Troubleshooting
+- **`[net] no VIRTIO-NET device found`**: ensure `-device virtio-net-device` is
+  passed to QEMU.
+- **Connection refused on port 12323**: verify the `hostfwd` argument in `-netdev`.
+- **Shell hangs after connect**: the net task must get CPU time; ensure the
+  scheduler has ≥ 3 tasks (idle + shell + net).

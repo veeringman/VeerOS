@@ -141,3 +141,30 @@ impl TaskContext {
 pub trait MemoryModel {
     fn page_size_bytes(&self) -> usize;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Network device
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Architecture-neutral network device interface.
+///
+/// A BSP implements this for its NIC (VIRTIO-NET, Wi-Fi radio, etc.).
+/// The network stack (`smoltcp`) consumes these methods to send/receive
+/// Ethernet frames.
+pub trait NetworkDevice {
+    /// Maximum transmission unit (bytes of payload the device can carry).
+    fn mtu(&self) -> usize { 1514 }
+
+    /// Returns `true` when at least one received frame is pending.
+    fn has_rx(&self) -> bool;
+
+    /// Receive a single Ethernet frame into `buf`.
+    /// Returns the number of bytes written, or 0 if nothing was available.
+    fn recv(&self, buf: &mut [u8]) -> usize;
+
+    /// Transmit an Ethernet frame from `buf[..len]`.
+    fn send(&self, buf: &[u8]);
+
+    /// The device's MAC address.
+    fn mac_address(&self) -> [u8; 6];
+}

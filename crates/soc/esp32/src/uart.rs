@@ -14,19 +14,19 @@ use arch::Serial;
 // Base addresses per chip variant
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "esp32c3")]
+#[cfg(feature = "c3")]
 const UART0_BASE: usize = 0x6000_0000;
 
-#[cfg(feature = "esp32c6")]
+#[cfg(feature = "c6")]
 const UART0_BASE: usize = 0x6000_0000;
 
-#[cfg(feature = "esp32h2")]
+#[cfg(feature = "h2")]
 const UART0_BASE: usize = 0x6000_0000;
 
 #[cfg(all(
-    not(feature = "esp32c3"),
-    not(feature = "esp32c6"),
-    not(feature = "esp32h2"),
+    not(feature = "c3"),
+    not(feature = "c6"),
+    not(feature = "h2"),
 ))]
 const UART0_BASE: usize = 0x6000_0000; // sensible default
 

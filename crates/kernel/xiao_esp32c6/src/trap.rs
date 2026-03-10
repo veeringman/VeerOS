@@ -116,6 +116,57 @@ _veer_trap_entry:
     lw  x2, 8(sp)
 
     mret
+
+# ─────────────────────────────────────────────────────────────────
+# Start-first-task: load a TaskContext and mret into user code.
+#   a0 = pointer to TaskContext
+# ─────────────────────────────────────────────────────────────────
+.section .text._veer_start_first_task
+.global  _veer_start_first_task
+.balign  4
+
+_veer_start_first_task:
+    mv    sp, a0
+
+    lw    t0, 128(sp)
+    csrw  mepc, t0
+    lw    t0, 132(sp)
+    csrw  mstatus, t0
+
+    lw  x1,   4(sp)
+    lw  x3,  12(sp)
+    lw  x4,  16(sp)
+    lw  x5,  20(sp)
+    lw  x6,  24(sp)
+    lw  x7,  28(sp)
+    lw  x8,  32(sp)
+    lw  x9,  36(sp)
+    lw  x10, 40(sp)
+    lw  x11, 44(sp)
+    lw  x12, 48(sp)
+    lw  x13, 52(sp)
+    lw  x14, 56(sp)
+    lw  x15, 60(sp)
+    lw  x16, 64(sp)
+    lw  x17, 68(sp)
+    lw  x18, 72(sp)
+    lw  x19, 76(sp)
+    lw  x20, 80(sp)
+    lw  x21, 84(sp)
+    lw  x22, 88(sp)
+    lw  x23, 92(sp)
+    lw  x24, 96(sp)
+    lw  x25, 100(sp)
+    lw  x26, 104(sp)
+    lw  x27, 108(sp)
+    lw  x28, 112(sp)
+    lw  x29, 116(sp)
+    lw  x30, 120(sp)
+    lw  x31, 124(sp)
+
+    lw  x2, 8(sp)
+
+    mret
 "#
 );
 
@@ -125,8 +176,9 @@ _veer_trap_entry:
 
 #[allow(dead_code)]
 const MCAUSE_INTERRUPT_BIT: usize = 1 << 31;
+/// ESP32-C3: SYSTIMER fires on CPU interrupt line 1 (not standard mcause 7).
 #[allow(dead_code)]
-const MCAUSE_MACHINE_TIMER: usize = 7;
+const SYSTIMER_CPU_INT_CODE: usize = 1;
 #[allow(dead_code)]
 const MCAUSE_ECALL_MMODE: usize = 11;
 
@@ -155,7 +207,7 @@ pub unsafe extern "C" fn _veer_trap_dispatch(ctx: *mut TaskContext) -> *mut Task
 #[cfg(target_arch = "riscv32")]
 unsafe fn handle_interrupt(ctx: *mut TaskContext, code: usize) -> *mut TaskContext {
     match code {
-        MCAUSE_MACHINE_TIMER => handle_timer_tick(ctx),
+        SYSTIMER_CPU_INT_CODE => handle_timer_tick(ctx),
         _ => ctx,
     }
 }

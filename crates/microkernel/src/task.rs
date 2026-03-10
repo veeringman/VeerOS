@@ -13,7 +13,7 @@ use arch::TaskContext;
 // ---------------------------------------------------------------------------
 
 /// Maximum number of concurrent tasks.
-pub const MAX_TASKS: usize = 8;
+pub const MAX_TASKS: usize = 16;
 
 /// Default stack size per task (bytes). Boards can override at link time.
 pub const DEFAULT_STACK_SIZE: usize = 2048;

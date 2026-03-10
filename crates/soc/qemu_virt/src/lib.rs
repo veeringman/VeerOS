@@ -11,6 +11,7 @@ use arch::Platform;
 
 pub mod clint;
 pub mod uart;
+pub mod virtio_net;
 
 pub struct QemuVirt;
 

@@ -1,172 +1,121 @@
 # VeerOS Architecture
 
-VeerOS is a **Rust-native, multi-architecture operating system** designed for portability, security, and developer ergonomics.  
-It cleanly separates **policy from mechanism**, allowing the same kernel core to run across RISC-V, ARM, and future architectures.
+VeerOS is a **Rust-native, bare-metal operating system** targeting RISC-V
+microcontrollers.  It cleanly separates **SoC drivers from kernel logic**
+using a three-layer crate hierarchy, making it straightforward to add new
+boards without rewriting the OS.
 
 ---
 
-## High-Level Architecture Overview
+## Crate Hierarchy
 
-The diagram below illustrates the layered design of VeerOS, from user programs down to physical hardware.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Layer 0 — arch                                                     │
+│  Trait definitions: Platform, Serial, InterruptController,          │
+│  TickTimer, NetworkDevice, TaskContext, Console                     │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ implements
+┌──────────────────────────▼──────────────────────────────────────────┐
+│  Layer 1 — SoC drivers                                              │
+│  ┌────────────────────┐  ┌──────────────────────┐                   │
+│  │  soc-esp32          │  │  soc-qemu-virt        │                  │
+│  │  • uart  (UART0)   │  │  • uart  (NS16550)    │                  │
+│  │  • intc  (INTC)    │  │  • clint (mtime)      │                  │
+│  │  • systimer        │  │  • virtio_net          │                  │
+│  │  • wdt  (C3/C6/H2) │  │                       │                  │
+│  │  • wifi             │  │                       │                  │
+│  │  • mem  (map const) │  │                       │                  │
+│  └────────────────────┘  └──────────────────────┘                   │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ used by
+┌──────────────────────────▼──────────────────────────────────────────┐
+│  Layer 2 — Kernel binaries (one per board)                          │
+│  ┌─────────────────────────┐  ┌─────────────────────────┐          │
+│  │ kernel-xiao-esp32c6     │  │ kernel-qemu-virt         │          │
+│  │ • _start assembly       │  │ • _start assembly        │          │
+│  │ • watchdog disable      │  │ • CLINT timer setup      │          │
+│  │ • scheduler + tasks     │  │ • scheduler + tasks      │          │
+│  │ • shell (UART)          │  │ • shell (UART + TCP)     │          │
+│  │ • linker: xiao-esp32c6.x│  │ • linker: qemu-virt.x   │          │
+│  └─────────────────────────┘  └─────────────────────────┘          │
+└─────────────────────────────────────────────────────────────────────┘
 
-![VeerOS Architecture Diagram](veeros-arch.png)
+  Shared OS components (used by all kernels):
+    microkernel  — Scheduler, PoolAllocator, Heap, DriverRegistry
+    shell        — Interactive command shell (ShellEnv callbacks)
+    net          — smoltcp integration, TcpSerial, auth
+```
 
-> 📌 The kernel core is fully portable Rust code.  
-> All architecture- and chip-specific logic is isolated behind well-defined abstraction layers.
+### Adding a new board
 
----
+1. **Same SoC family** — add a new kernel crate under `crates/kernel/`,
+   depend on the existing SoC crate, provide a board-specific linker script.
 
-## User Space
-
-### User Programs
-
-VeerOS applications are written as **normal Rust programs**, without exposing low-level OS details.
-
-- Entry point defined using `#[veer_entry]`
-- Familiar APIs: `println!`, `TcpListener`, `spawn_thread`
-- Fully portable across CPU architectures
-
-Developers never interact with registers, traps, or linker scripts.
-
----
-
-### Userlib Layer (`veeros_userlib`)
-
-The user library provides **ergonomic Rust APIs** built on top of syscalls.
-
-- Syscall wrappers:
-  - `write()`, `exit()`, `yield()`, `socket()`
-- Idiomatic Rust interfaces:
-  - `println!`, `TcpStream`, `TcpListener`
-- Hides:
-  - `no_std`, `no_main`
-  - `extern "C"` boilerplate
-
-This layer delivers a clean developer experience without sacrificing control.
-
----
-
-## Kernel Boundary
-
-### Syscall Interface
-
-The syscall layer defines a **portable ABI** between user space and the kernel.
-
-- Trap handler dispatches by syscall number
-- ABI convention:
-  - Syscall number → `a7`
-  - Arguments → `a0..a6`
-  - Return value → `a0`
-- Unified syscall table:
-  - `write`, `exit`, `yield`, `socket`, etc.
-
-This is the **only layer aware of calling conventions**.
+2. **New SoC** — create a SoC crate under `crates/soc/` implementing the
+   `arch` traits, then add the kernel crate.
 
 ---
 
-## Kernel Space
+## Workspace layout
 
-### Kernel Core
-
-The kernel core contains **pure Rust logic**, independent of architecture or hardware.
-
-- Scheduler:
-  - Round-robin
-  - Priority-based
-  - Preemptive
-- Process & thread model:
-  - TCBs
-  - Kernel/user stacks
-  - Execution states
-- Memory management:
-  - Allocators
-  - PMP (RISC-V) / MPU (ARM) isolation
-- Networking:
-  - `smoltcp` integrated at kernel level
-- Filesystem (planned):
-  - Virtual filesystem abstraction
-
-The kernel core depends **only on traits**, never on registers or peripherals.
+```
+crates/
+  arch/                     # Layer 0: architecture-neutral traits
+  soc/
+    esp32/                  # Layer 1: ESP32 RISC-V family (C3/C6/H2 via features)
+    qemu_virt/              # Layer 1: QEMU virt RISC-V 32-bit machine
+  kernel/
+    xiao_esp32c6/           # Layer 2: kernel for Seeed XIAO ESP32-C6
+    qemu_virt/              # Layer 2: kernel for QEMU virt
+  microkernel/              # Shared: scheduler, allocator, driver registry
+  shell/                    # Shared: interactive shell
+  net/                      # Shared: smoltcp networking, TCP serial, auth
+  distributions/            # Build profiles (minimal, app, rt, full)
+```
 
 ---
 
-### Architecture Abstraction Layer (AAL)
+## ESP32 variant support
 
-The AAL isolates **CPU-specific behavior** behind Rust traits.
+The `soc-esp32` crate uses Cargo features to handle variant differences:
 
-- Defines interfaces such as:
-  - `Arch::init_traps()`
-  - `Arch::context_switch()`
-- Architecture implementations:
-  - **RISC-V**: CSRs, `mtvec`, PMP
-  - **ARM**: exception vectors, MPU
-- Future targets:
-  - x86
-  - MIPS
-  - SMP architectures
+| Feature | SoC       | SRAM   | Address space            | Target triple              |
+|---------|-----------|--------|--------------------------|----------------------------|
+| `c3`    | ESP32-C3  | 400 KB | Split IRAM/DRAM          | riscv32imc-unknown-none-elf |
+| `c6`    | ESP32-C6  | 512 KB | Unified @ 0x4080_0000    | riscv32imc-unknown-none-elf |
+| `h2`    | ESP32-H2  | 320 KB | Unified @ 0x4080_0000    | riscv32imc-unknown-none-elf |
 
-Adding a new architecture means implementing the AAL — no kernel rewrite required.
+Shared peripherals (UART0, SYSTIMER, INTC) use the same base addresses.
+Variant-specific code (WDT registers, memory map constants) is `#[cfg]`-gated.
 
 ---
 
-### Hardware Abstraction Layer (HAL)
+## Boot sequence (ESP32-C6)
 
-HAL abstracts **peripherals and SoC functionality**.
+1. ROM bootloader loads ELF from SPI flash into HP SRAM at `0x4080_0000`
+2. `_start` (assembly): disable interrupts, set stack pointer, zero BSS
+3. `_rust_start`: disable watchdogs, init console, init heap
+4. Register drivers (UART, INTC, SYSTIMER)
+5. Install trap vector, configure interrupt controller
+6. Start SYSTIMER tick (1 ms)
+7. Create tasks: idle (priority 0), shell (priority 1)
+8. `_veer_start_first_task` → `mret` into first runnable task
 
-- Peripheral traits:
-  - `Timer::start()`
-  - `Uart::write_byte()`
-  - `Wifi::send_frame()`
-- Chip-specific HAL crates:
-  - `hal_esp32c3`
-  - `hal_stm32`
-  - `hal_rp2040`
-- Kernel interacts only with HAL traits
+## Boot sequence (QEMU virt)
 
-This guarantees clean separation between kernel logic and hardware details.
-
----
-
-### Hardware / SoC Drivers
-
-Driver implementations live in chip-specific crates.
-
-- ESP32-C3:
-  - Wi-Fi radio
-  - Packet buffers
-- STM32:
-  - Ethernet MAC
-- RP2040:
-  - USB controller
-
-Each driver implements HAL traits and remains isolated from the kernel core.
-
----
-
-## Physical Hardware
-
-VeerOS currently targets and scales across:
-
-- **ESP32-C3** (RISC-V, Wi-Fi)
-- **STM32** (ARM Cortex-M, Ethernet)
-- **RP2040** (ARM Cortex-M0+, USB)
-- Future platforms:
-  - ARMv8
-  - RISC-V SMP
-  - Advanced SoCs
+Same flow, but uses CLINT timer instead of SYSTIMER, and adds a network
+listener task for remote TCP shell over VIRTIO-NET.
 
 ---
 
 ## Key Design Principles
 
-- **Portability**  
-  Kernel core is pure Rust and depends only on HAL/AAL traits.
-
-- **Extensibility**  
-  New chips via HAL crates, new CPUs via AAL crates.
-
-- **Developer Experience**  
-  Write normal Rust programs with `#[veer_entry]`.
+- **Portability** — kernel logic depends only on `arch` traits, never on
+  register addresses.
+- **Extensibility** — new SoC = new crate implementing traits; new board =
+  new kernel crate with linker script.
+- **Minimalism** — each layer does one thing; no unnecessary abstractions.
 
 - **Networking-First**  
   `smoltcp` integrated directly into the kernel.

@@ -42,6 +42,12 @@ pub struct ShellEnv {
     pub get_uptime_ticks: Option<fn() -> u64>,
     /// Optional callback: write the task table to the given writer.
     pub get_task_list: Option<fn(&mut dyn core::fmt::Write)>,
+    /// Optional callback: write memory pool stats to the given writer.
+    pub get_mem_info: Option<fn(&mut dyn core::fmt::Write)>,
+    /// Optional callback: write registered driver list to the given writer.
+    pub get_driver_list: Option<fn(&mut dyn core::fmt::Write)>,
+    /// Optional callback: handle `wifi <subcommand> <args>` and write output.
+    pub wifi_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -185,6 +191,9 @@ impl Shell {
             "sysinfo" | "info" => self.cmd_sysinfo(con),
             "uptime" => self.cmd_uptime(con),
             "tasks" | "ps" => self.cmd_tasks(con),
+            "meminfo" | "mem" | "free" => self.cmd_meminfo(con),
+            "drivers" | "lsdrv" => self.cmd_drivers(con),
+            "wifi" => self.cmd_wifi(con, args),
             "clear" | "cls" => self.cmd_clear(con),
             "echo" => self.cmd_echo(con, args),
             "logo" => self.cmd_logo(con),
@@ -214,6 +223,9 @@ impl Shell {
         let _ = writeln!(con, "  uptime     Kernel uptime (ticks)");
         let _ = writeln!(con, "  tasks      List running tasks");
         let _ = writeln!(con, "  uname      Print system name");
+        let _ = writeln!(con, "  meminfo    Memory pool statistics");
+        let _ = writeln!(con, "  drivers    List registered drivers");
+        let _ = writeln!(con, "  wifi       Wi-Fi (scan/list/set/connect/status)");
         let _ = writeln!(con, "  clear      Clear the screen");
         let _ = writeln!(con, "  echo       Echo arguments");
         let _ = writeln!(con, "  logo       Display VeerOS logo");
@@ -264,6 +276,35 @@ impl Shell {
             f(con as &mut dyn core::fmt::Write);
         } else {
             let _ = writeln!(con, "  task list: not available (host demo)");
+        }
+    }
+
+    fn cmd_meminfo<S: Serial>(&self, con: &mut Console<S>) {
+        if let Some(f) = self.env.get_mem_info {
+            f(con as &mut dyn core::fmt::Write);
+        } else {
+            let _ = writeln!(con, "  meminfo: not available (no allocator)");
+        }
+    }
+
+    fn cmd_drivers<S: Serial>(&self, con: &mut Console<S>) {
+        if let Some(f) = self.env.get_driver_list {
+            f(con as &mut dyn core::fmt::Write);
+        } else {
+            let _ = writeln!(con, "  drivers: not available");
+        }
+    }
+
+    fn cmd_wifi<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        if let Some(f) = self.env.wifi_cmd {
+            // Split "set MySSID MyPass" into sub="set", rest="MySSID MyPass"
+            let (sub, rest) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => (args, ""),
+            };
+            f(sub, rest, con as &mut dyn core::fmt::Write);
+        } else {
+            let _ = writeln!(con, "  wifi: not available on this platform");
         }
     }
 

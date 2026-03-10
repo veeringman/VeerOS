@@ -1,5 +1,7 @@
 [alias]
 check-all = "check --workspace --all-targets"
-check-esp32c3 = "check -p bsp-esp32-riscv --target riscv32imc-unknown-none-elf"
-check-kernel-esp32c3 = "check -p kernel-esp32 --target riscv32imc-unknown-none-elf"
+check-soc-esp32 = "check -p soc-esp32 --target riscv32imc-unknown-none-elf"
+check-kernel-esp32c6 = "check -p kernel-xiao-esp32c6 --target riscv32imc-unknown-none-elf"
 check-kernel-qemu = "check -p kernel-qemu-virt --target riscv32imc-unknown-none-elf"
+build-esp32c6 = "build --release -p kernel-xiao-esp32c6 --target riscv32imc-unknown-none-elf"
+build-qemu = "build --release -p kernel-qemu-virt --target riscv32imc-unknown-none-elf"

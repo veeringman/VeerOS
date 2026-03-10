@@ -1,0 +1,22 @@
+[package]
+name = "kernel-xiao-esp32c6"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VeerOS kernel for the Seeed XIAO ESP32-C6 board"
+
+[features]
+default = ["dist-minimal"]
+dist-minimal = ["microkernel/dist-minimal"]
+dist-app = ["microkernel/dist-app"]
+dist-rt = ["microkernel/dist-rt"]
+dist-full = ["microkernel/dist-full"]
+
+[dependencies]
+arch = { path = "../../arch" }
+microkernel = { path = "../../microkernel", default-features = false }
+soc-esp32 = { path = "../../soc/esp32", default-features = false, features = ["c6"] }
+shell = { path = "../../shell" }
+panic-halt = "1.0"

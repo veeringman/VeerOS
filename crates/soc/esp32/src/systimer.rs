@@ -14,19 +14,19 @@ use arch::TickTimer;
 // Base address
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "esp32c3")]
+#[cfg(feature = "c3")]
 const SYSTIMER_BASE: usize = 0x6002_3000;
 
-#[cfg(feature = "esp32c6")]
+#[cfg(feature = "c6")]
 const SYSTIMER_BASE: usize = 0x6002_3000;
 
-#[cfg(feature = "esp32h2")]
+#[cfg(feature = "h2")]
 const SYSTIMER_BASE: usize = 0x6002_3000;
 
 #[cfg(all(
-    not(feature = "esp32c3"),
-    not(feature = "esp32c6"),
-    not(feature = "esp32h2"),
+    not(feature = "c3"),
+    not(feature = "c6"),
+    not(feature = "h2"),
 ))]
 const SYSTIMER_BASE: usize = 0x6002_3000;
 
@@ -37,12 +37,8 @@ const SYSTIMER_BASE: usize = 0x6002_3000;
 /// Main configuration register.
 const CONF_REG: usize = 0x00;
 
-/// Unit 0 value registers (52-bit counter split across two words).
-const UNIT0_VALUE_HI: usize = 0x04;
-const UNIT0_VALUE_LO: usize = 0x08;
-
-/// Issue a read of the counter into the value registers.
-const UNIT0_OP: usize = 0x0C;
+/// Trigger a snapshot of unit 0 counter into the value registers.
+const UNIT0_OP: usize = 0x04;
 
 /// Comparator 0 target value (high / low) for periodic alarm.
 const TARGET0_HI: usize = 0x24;
@@ -51,9 +47,16 @@ const TARGET0_LO: usize = 0x28;
 /// Comparator 0 period for periodic mode (26-bit).
 const TARGET0_CONF: usize = 0x2C;
 
+/// Write to apply comparator 0 config (load trigger).
+const COMP0_LOAD: usize = 0x48;
+
+/// Unit 0 value registers (52-bit counter split across two words).
+const UNIT0_VALUE_HI: usize = 0x54;
+const UNIT0_VALUE_LO: usize = 0x58;
+
 /// Comparator 0 interrupt enable / clear.
-const INT_ENA: usize = 0x68;
-const INT_CLR: usize = 0x70;
+const INT_ENA: usize = 0x64;
+const INT_CLR: usize = 0x6C;
 
 /// SYSTIMER clock: 16 MHz.
 const TICKS_PER_US: u32 = 16;
@@ -88,8 +91,8 @@ impl SysTimer {
     fn read_counter_raw(&self) -> u64 {
         // Trigger a snapshot of unit 0 into the value registers.
         unsafe { mmio_write(SYSTIMER_BASE + UNIT0_OP, 1 << 30) };
-        // Short delay for value to latch.
-        for _ in 0..3 {
+        // Wait for the value to be valid (bit 29).
+        while unsafe { mmio_read(SYSTIMER_BASE + UNIT0_OP) } & (1 << 29) == 0 {
             core::hint::spin_loop();
         }
         let lo = unsafe { mmio_read(SYSTIMER_BASE + UNIT0_VALUE_LO) } as u64;
@@ -103,13 +106,16 @@ impl TickTimer for SysTimer {
         let ticks = period_us.saturating_mul(TICKS_PER_US);
 
         unsafe {
-            // Enable SYSTIMER clock (bit 0 of CONF).
+            // Enable SYSTIMER clock (bit 0) and unit 0 counter (bit 24).
             let conf = mmio_read(SYSTIMER_BASE + CONF_REG);
-            mmio_write(SYSTIMER_BASE + CONF_REG, conf | 1);
+            mmio_write(SYSTIMER_BASE + CONF_REG, conf | (1 << 0) | (1 << 24));
 
             // Set comparator 0 period mode with the computed tick count.
             // Bit 30 = period mode enable.
             mmio_write(SYSTIMER_BASE + TARGET0_CONF, (1 << 30) | (ticks & 0x03FF_FFFF));
+
+            // Apply comparator 0 config by writing to COMP0_LOAD.
+            mmio_write(SYSTIMER_BASE + COMP0_LOAD, 1);
 
             // Enable comparator 0 interrupt (bit 0 of INT_ENA).
             mmio_write(SYSTIMER_BASE + INT_ENA, 1);

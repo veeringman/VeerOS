@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod alloc;
+pub mod driver;
 pub mod ipc;
 pub mod task;
 

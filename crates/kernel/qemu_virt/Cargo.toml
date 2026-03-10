@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+description = "VeerOS kernel for the QEMU virt RISC-V 32-bit machine"
 
 [features]
 default = ["dist-minimal"]
@@ -14,8 +15,10 @@ dist-rt = ["microkernel/dist-rt"]
 dist-full = ["microkernel/dist-full"]
 
 [dependencies]
-arch = { path = "../arch" }
-microkernel = { path = "../microkernel", default-features = false }
-bsp-qemu-virt = { path = "../bsp-qemu-virt" }
-shell = { path = "../shell" }
+arch = { path = "../../arch" }
+microkernel = { path = "../../microkernel", default-features = false }
+soc-qemu-virt = { path = "../../soc/qemu_virt" }
+net = { path = "../../net" }
+shell = { path = "../../shell" }
+smoltcp = { workspace = true }
 panic-halt = "1.0"
