@@ -1,8 +1,10 @@
 #![no_std]
 
 pub mod alloc;
+pub mod dispatch;
 pub mod driver;
 pub mod ipc;
+pub mod syscall;
 pub mod task;
 
 use arch::Platform;

@@ -14,7 +14,11 @@ use soc_esp32::{
 use microkernel::Kernel;
 use microkernel::alloc::Heap;
 use microkernel::driver::{DriverCaps, DriverRegistry, MemRegion};
-use microkernel::task::{Scheduler, TaskState};
+use microkernel::ipc::Ipc;
+use microkernel::task::Scheduler;
+#[cfg(feature = "shell")]
+use microkernel::task::TaskState;
+#[cfg(feature = "shell")]
 use shell::{Shell, ShellEnv};
 
 use panic_halt as _;
@@ -55,6 +59,16 @@ unsafe impl Sync for HeapCell {}
 static HEAP: HeapCell = HeapCell(UnsafeCell::new(Heap::new()));
 
 // ---------------------------------------------------------------------------
+// IPC mailboxes
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub(crate) struct IpcCell(pub UnsafeCell<Ipc>);
+unsafe impl Sync for IpcCell {}
+#[allow(dead_code)]
+pub(crate) static IPC: IpcCell = IpcCell(UnsafeCell::new(Ipc::new()));
+
+// ---------------------------------------------------------------------------
 // Static timer handle (used by the trap dispatcher to ack interrupts)
 // ---------------------------------------------------------------------------
 
@@ -75,11 +89,43 @@ static DRIVERS: RegistryCell = RegistryCell(UnsafeCell::new(DriverRegistry::new(
 // Wi-Fi manager (config store + state machine)
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "wifi")]
 use soc_esp32::wifi::WifiManager;
 
+#[cfg(feature = "wifi")]
 struct WifiCell(UnsafeCell<WifiManager>);
+#[cfg(feature = "wifi")]
 unsafe impl Sync for WifiCell {}
+#[cfg(feature = "wifi")]
 static WIFI: WifiCell = WifiCell(UnsafeCell::new(WifiManager::new()));
+
+// ---------------------------------------------------------------------------
+// BLE manager
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ble")]
+use soc_esp32::ble::BleManager;
+
+#[cfg(feature = "ble")]
+struct BleCell(UnsafeCell<BleManager>);
+#[cfg(feature = "ble")]
+unsafe impl Sync for BleCell {}
+#[cfg(feature = "ble")]
+static BLE: BleCell = BleCell(UnsafeCell::new(BleManager::new()));
+
+// ---------------------------------------------------------------------------
+// IEEE 802.15.4 (ZigBee / Thread) manager
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ieee802154")]
+use soc_esp32::ieee802154::RadioManager;
+
+#[cfg(feature = "ieee802154")]
+struct RadioCell(UnsafeCell<RadioManager>);
+#[cfg(feature = "ieee802154")]
+unsafe impl Sync for RadioCell {}
+#[cfg(feature = "ieee802154")]
+static RADIO_802154: RadioCell = RadioCell(UnsafeCell::new(RadioManager::new()));
 
 /// RISC-V initial mstatus: MPIE=1 so mret enables interrupts, MPP=M-mode.
 const INITIAL_MSTATUS: usize = (1 << 7) | (3 << 11);
@@ -109,10 +155,13 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
 // ---------------------------------------------------------------------------
 
 /// Stack for the shell task (4 KiB — needs room for the line buffer, etc.).
+#[cfg(feature = "shell")]
 #[repr(align(16))]
 struct ShellStack([u8; 4096]);
+#[cfg(feature = "shell")]
 static SHELL_STACK: ShellStack = ShellStack([0u8; 4096]);
 
+#[cfg(feature = "shell")]
 fn shell_task() -> ! {
     let serial = default_serial();
     let mut con = Console::new(serial);
@@ -124,7 +173,18 @@ fn shell_task() -> ! {
         get_task_list: Some(write_task_list),
         get_mem_info: Some(write_mem_info),
         get_driver_list: Some(write_driver_list),
+        #[cfg(feature = "wifi")]
         wifi_cmd: Some(wifi_command),
+        #[cfg(not(feature = "wifi"))]
+        wifi_cmd: None,
+        #[cfg(feature = "ble")]
+        bt_cmd: Some(bt_command),
+        #[cfg(not(feature = "ble"))]
+        bt_cmd: None,
+        #[cfg(feature = "ieee802154")]
+        zigbee_cmd: Some(zigbee_command),
+        #[cfg(not(feature = "ieee802154"))]
+        zigbee_cmd: None,
     };
     let mut sh = Shell::new(env);
     loop {
@@ -232,6 +292,39 @@ pub extern "C" fn _rust_start() -> ! {
     }
     let _ = writeln!(con, "[boot] driver registry: 3 drivers registered");
 
+    // ── register BLE driver ──────────────────────────────
+    #[cfg(feature = "ble")]
+    {
+        unsafe {
+            let reg = &mut *DRIVERS.0.get();
+            let _ = reg.register("ble", DriverCaps {
+                mmio_regions: 1,
+                uses_interrupts: true,
+                uses_dma: false,
+                uses_network: false,
+            });
+        }
+        let _ = writeln!(con, "[boot] BLE 5.0 driver registered");
+    }
+
+    // ── register IEEE 802.15.4 driver ────────────────────
+    #[cfg(feature = "ieee802154")]
+    {
+        unsafe {
+            let reg = &mut *DRIVERS.0.get();
+            let drv = reg.register("ieee802154", DriverCaps {
+                mmio_regions: 1,
+                uses_interrupts: true,
+                uses_dma: false,
+                uses_network: true,
+            });
+            if let Ok(id) = drv {
+                reg.grant_mmio(id, MemRegion::new(0x600A_3000, 0x1000)).ok();
+            }
+        }
+        let _ = writeln!(con, "[boot] IEEE 802.15.4 (ZigBee/Thread) driver registered");
+    }
+
     // ── install trap vector (RISC-V only) ────────────────────
     #[cfg(target_arch = "riscv32")]
     {
@@ -275,13 +368,17 @@ pub extern "C" fn _rust_start() -> ! {
         }
 
         // Shell task (priority 1).
-        let sb = SHELL_STACK.0.as_ptr() as usize;
-        let st = sb + SHELL_STACK.0.len();
-        if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1) {
-            sched.tasks[idx].context.status = INITIAL_MSTATUS;
+        #[cfg(feature = "shell")]
+        {
+            let sb = SHELL_STACK.0.as_ptr() as usize;
+            let st = sb + SHELL_STACK.0.len();
+            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1) {
+                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            }
         }
     }
     let _ = writeln!(con, "[boot] idle task registered");
+    #[cfg(feature = "shell")]
     let _ = writeln!(con, "[boot] shell task registered");
 
     // ── start the first task (never returns) ─────────────────
@@ -304,7 +401,10 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let _ = ctx_ptr;
             drop(con);
+            #[cfg(feature = "shell")]
             shell_task();
+            #[cfg(not(feature = "shell"))]
+            idle_task();
         }
     }
 }
@@ -313,22 +413,26 @@ pub extern "C" fn _rust_start() -> ! {
 // Scheduler / driver query callbacks (injected into ShellEnv)
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "shell")]
 fn get_uptime_ticks() -> u64 {
     unsafe { (*SCHEDULER.0.get()).ticks }
 }
 
+#[cfg(feature = "shell")]
 fn write_mem_info(w: &mut dyn core::fmt::Write) {
     unsafe {
         (*HEAP.0.get()).write_stats(w);
     }
 }
 
+#[cfg(feature = "shell")]
 fn write_driver_list(w: &mut dyn core::fmt::Write) {
     unsafe {
         (*DRIVERS.0.get()).write_list(w);
     }
 }
 
+#[cfg(feature = "shell")]
 fn write_task_list(w: &mut dyn core::fmt::Write) {
     let sched = unsafe { &*SCHEDULER.0.get() };
     let _ = writeln!(w, "  ID  STATE     PRI  NAME");
@@ -354,6 +458,7 @@ fn write_task_list(w: &mut dyn core::fmt::Write) {
 ///   connect                 — attempt to join the AP
 ///   disconnect              — leave the AP
 ///   status                  — show current state
+#[cfg(feature = "wifi")]
 fn wifi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
     let mgr = unsafe { &mut *WIFI.0.get() };
 
@@ -414,4 +519,190 @@ fn wifi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "    wifi status                Current state");
         }
     }
+}
+
+/// Shell callback for `bt <sub> <args>`.
+///
+/// Subcommands:
+///   scan                  — scan for nearby BLE devices
+///   list                  — show last scan results
+///   advertise <name>      — start advertising as <name>
+///   stop                  — stop advertising
+///   status                — show BLE state
+#[cfg(feature = "ble")]
+fn bt_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    let mgr = unsafe { &mut *BLE.0.get() };
+
+    match sub {
+        "scan" => {
+            let _ = write!(w, "  Scanning for BLE devices...");
+            match mgr.scan() {
+                Ok(n) => {
+                    let _ = writeln!(w, " found {} device(s)", n);
+                    mgr.write_scan_results(w);
+                }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
+            }
+        }
+        "list" | "ls" => {
+            mgr.write_scan_results(w);
+        }
+        "advertise" | "adv" => {
+            if args.is_empty() {
+                let _ = writeln!(w, "  usage: bt advertise <name>");
+                return;
+            }
+            match mgr.advertise(args.as_bytes()) {
+                Ok(()) => {
+                    let _ = writeln!(w, "  Advertising as '{}'", args);
+                }
+                Err(e) => {
+                    let _ = writeln!(w, "  Failed to start advertising: {}", e);
+                }
+            }
+        }
+        "stop" => {
+            mgr.stop();
+            let _ = writeln!(w, "  Advertising stopped.");
+        }
+        "status" | "info" | "" => {
+            mgr.write_status(w);
+        }
+        _ => {
+            let _ = writeln!(w, "  bt subcommands:");
+            let _ = writeln!(w, "    bt scan                    Scan for BLE devices");
+            let _ = writeln!(w, "    bt list                    Show last scan results");
+            let _ = writeln!(w, "    bt advertise <name>        Start advertising");
+            let _ = writeln!(w, "    bt stop                    Stop advertising");
+            let _ = writeln!(w, "    bt status                  Current BLE state");
+        }
+    }
+}
+
+/// Shell callback for `zigbee <sub> <args>`.
+///
+/// Subcommands:
+///   init                — initialise the 802.15.4 radio
+///   channel <11-26>     — set the operating channel
+///   panid <0xNNNN>      — set the PAN ID
+///   scan                — scan for 802.15.4 networks
+///   list                — show last scan results
+///   send <data>         — transmit a test frame
+///   status              — show radio state
+#[cfg(feature = "ieee802154")]
+fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    let mgr = unsafe { &mut *RADIO_802154.0.get() };
+
+    match sub {
+        "init" => {
+            let _ = write!(w, "  Initialising 802.15.4 radio...");
+            match mgr.init() {
+                Ok(()) => {
+                    let _ = writeln!(w, " done");
+                }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
+            }
+        }
+        "channel" | "ch" => {
+            if args.is_empty() {
+                let _ = writeln!(w, "  Current channel: {}", mgr.driver().channel());
+                return;
+            }
+            match args.parse::<u8>() {
+                Ok(ch) => match mgr.set_channel(ch) {
+                    Ok(()) => {
+                        let _ = writeln!(w, "  Channel set to {}", ch);
+                    }
+                    Err(e) => {
+                        let _ = writeln!(w, "  Error: {}", e);
+                    }
+                },
+                Err(_) => {
+                    let _ = writeln!(w, "  Invalid channel number (must be 11-26)");
+                }
+            }
+        }
+        "panid" => {
+            if args.is_empty() {
+                let _ = writeln!(w, "  Current PAN ID: 0x{:04X}", mgr.driver().pan_id());
+                return;
+            }
+            // Parse hex with optional 0x prefix
+            let hex_str = args.strip_prefix("0x").or_else(|| args.strip_prefix("0X")).unwrap_or(args);
+            match u16::from_str_radix(hex_str, 16) {
+                Ok(pan_id) => {
+                    mgr.set_pan_id(pan_id);
+                    let _ = writeln!(w, "  PAN ID set to 0x{:04X}", pan_id);
+                }
+                Err(_) => {
+                    let _ = writeln!(w, "  Invalid PAN ID (use hex, e.g. 0x1234)");
+                }
+            }
+        }
+        "scan" => {
+            let _ = write!(w, "  Scanning 802.15.4 channels...");
+            match mgr.scan() {
+                Ok(n) => {
+                    let _ = writeln!(w, " found {} network(s)", n);
+                    mgr.write_scan_results(w);
+                }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
+            }
+        }
+        "list" | "ls" => {
+            mgr.write_scan_results(w);
+        }
+        "send" | "tx" => {
+            if args.is_empty() {
+                let _ = writeln!(w, "  usage: zigbee send <data>");
+                return;
+            }
+            match mgr.send(args.as_bytes()) {
+                Ok(()) => {
+                    let _ = writeln!(w, "  Frame sent ({} bytes)", args.len());
+                }
+                Err(e) => {
+                    let _ = writeln!(w, "  TX failed: {}", e);
+                }
+            }
+        }
+        "status" | "info" | "" => {
+            mgr.write_status(w);
+        }
+        _ => {
+            let _ = writeln!(w, "  zigbee subcommands:");
+            let _ = writeln!(w, "    zigbee init                Init the 802.15.4 radio");
+            let _ = writeln!(w, "    zigbee channel <11-26>     Set/show channel");
+            let _ = writeln!(w, "    zigbee panid <0xNNNN>      Set/show PAN ID");
+            let _ = writeln!(w, "    zigbee scan                Scan for networks");
+            let _ = writeln!(w, "    zigbee list                Show last scan results");
+            let _ = writeln!(w, "    zigbee send <data>         Transmit test frame");
+            let _ = writeln!(w, "    zigbee status              Current radio state");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Console I/O callbacks (used by the syscall dispatcher)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub(crate) fn console_write_byte(b: u8) {
+    let serial = default_serial();
+    let mut con = Console::new(serial);
+    let _ = con.write_str(unsafe {
+        core::str::from_utf8_unchecked(core::slice::from_ref(&b))
+    });
+}
+
+#[allow(dead_code)]
+pub(crate) fn console_read_byte() -> u8 {
+    // Blocking read not yet supported on ESP32 — return 0xFF (no data).
+    0xFF
 }

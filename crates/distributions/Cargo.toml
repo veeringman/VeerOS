@@ -5,12 +5,49 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+description = "VeerOS distribution profile definitions and bundling matrix"
 
 [features]
-default = ["minimal"]
-minimal = []
-app = []
-real-time = []
-full = ["app", "real-time"]
+default = ["dist-minimal"]
+
+# ── Distribution profiles ────────────────────────────────────
+# Each profile selects a scheduler mode + default set of components.
+#
+#   dist-minimal  — bare scheduler (round-robin) + IPC + syscalls.
+#                   No shell, no networking, no userlib samples.
+#                   Suitable for deeply embedded / sensor nodes.
+#
+#   dist-app      — minimal + shell + networking + userlib.
+#                   General-purpose interactive / connected target.
+#
+#   dist-rt       — minimal + priority scheduler + real-time caps.
+#                   Hard-real-time workloads, motor control, etc.
+#
+#   dist-full     — app + rt — everything bundled.
+#
+dist-minimal = []
+dist-app     = []
+dist-rt      = []
+dist-full    = ["dist-app", "dist-rt"]
+
+# ── Optional component flags ─────────────────────────────────
+# These map 1-to-1 to optional `dep:` dependencies in kernel binaries.
+# They exist here as documentation / workspace-level anchors.
+#
+#   shell        — interactive REPL shell
+#   net          — TCP/IP networking (smoltcp)
+#   userlib      — user-space runtime library
+#   samples      — userlib demo tasks (hello, timer, ipc-tx, ipc-rx)
+#   wifi         — Wi-Fi driver (ESP32 only)
+#   ble          — BLE 5.0 radio (ESP32-C6 / H2)
+#   ieee802154   — IEEE 802.15.4 / ZigBee / Thread radio (ESP32-C6 / H2)
+#
+shell      = []
+net        = []
+userlib    = []
+samples    = ["userlib"]
+wifi       = []
+ble        = []
+ieee802154 = []
 
 [dependencies]

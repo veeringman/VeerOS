@@ -8,19 +8,30 @@
 #![no_main]
 
 mod trap;
+#[cfg(feature = "samples")]
+mod samples;
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 
-use arch::{Console, NetworkDevice, TickTimer};
+use arch::{Console, TickTimer};
+#[cfg(feature = "net")]
+use arch::NetworkDevice;
 use soc_qemu_virt::{default_serial, system_timer, clint::Clint, QemuVirt};
 use microkernel::Kernel;
 use microkernel::alloc::Heap;
 use microkernel::driver::{DriverCaps, DriverRegistry, MemRegion};
-use microkernel::task::{Scheduler, TaskState};
+use microkernel::ipc::Ipc;
+use microkernel::task::Scheduler;
+#[cfg(feature = "shell")]
+use microkernel::task::TaskState;
+#[cfg(feature = "net")]
 use net::{NetStack, NetStorage, TcpSerial};
+#[cfg(feature = "shell")]
 use shell::{Shell, ShellEnv};
+#[cfg(feature = "net")]
 use smoltcp::iface::SocketSet;
+#[cfg(feature = "net")]
 use smoltcp::wire::{IpCidr, Ipv4Address};
 
 use panic_halt as _;
@@ -54,6 +65,16 @@ static mut HEAP_REGION: HeapRegion = HeapRegion([0u8; HEAP_SIZE]);
 struct HeapCell(UnsafeCell<Heap>);
 unsafe impl Sync for HeapCell {}
 static HEAP: HeapCell = HeapCell(UnsafeCell::new(Heap::new()));
+
+// ---------------------------------------------------------------------------
+// IPC mailboxes
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub(crate) struct IpcCell(pub UnsafeCell<Ipc>);
+unsafe impl Sync for IpcCell {}
+#[allow(dead_code)]
+pub(crate) static IPC: IpcCell = IpcCell(UnsafeCell::new(Ipc::new()));
 
 // ---------------------------------------------------------------------------
 // Driver registry
@@ -96,10 +117,30 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
 // Shell task
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "shell")]
 #[repr(align(16))]
 struct ShellStack([u8; 8192]);
+#[cfg(feature = "shell")]
 static SHELL_STACK: ShellStack = ShellStack([0u8; 8192]);
 
+// ---------------------------------------------------------------------------
+// Sample task stacks (userlib tests)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "samples")]
+#[repr(align(16))]
+struct SampleStack([u8; 4096]);
+
+#[cfg(feature = "samples")]
+static HELLO_STACK: SampleStack = SampleStack([0u8; 4096]);
+#[cfg(feature = "samples")]
+static TIMER_STACK: SampleStack = SampleStack([0u8; 4096]);
+#[cfg(feature = "samples")]
+static IPC_TX_STACK: SampleStack = SampleStack([0u8; 4096]);
+#[cfg(feature = "samples")]
+static IPC_RX_STACK: SampleStack = SampleStack([0u8; 4096]);
+
+#[cfg(feature = "shell")]
 fn shell_task() -> ! {
     let serial = default_serial();
     let mut con = Console::new(serial);
@@ -112,6 +153,8 @@ fn shell_task() -> ! {
         get_mem_info: Some(write_mem_info),
         get_driver_list: Some(write_driver_list),
         wifi_cmd: None,
+        bt_cmd: None,
+        zigbee_cmd: None,
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);
@@ -124,38 +167,53 @@ fn shell_task() -> ! {
 // ---------------------------------------------------------------------------
 // Network / remote-shell task
 // ---------------------------------------------------------------------------
+#[cfg(feature = "net")]
 /// TCP port for VeerOS remote shell (like SSH, unencrypted for now).
 const REMOTE_SHELL_PORT: u16 = 2323;
 
+#[cfg(feature = "net")]
 /// FNV-1a hash of the remote shell password.
 /// Default: "veeros" — override by changing this constant.
 const REMOTE_PASSWORD_HASH: u32 = net::auth::fnv1a(b"veeros");
 
+#[cfg(feature = "net")]
 /// QEMU user-net default: guest is 10.0.2.15, gateway 10.0.2.2.
 const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
+#[cfg(feature = "net")]
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 
+#[cfg(feature = "net")]
 #[repr(align(16))]
 struct NetStack0([u8; 8192]);
+#[cfg(feature = "net")]
 static NET_TASK_STACK: NetStack0 = NetStack0([0u8; 8192]);
 
+#[cfg(feature = "net")]
 // Static smoltcp socket-set storage (one socket for the listener).
 static mut SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 4] =
     [smoltcp::iface::SocketStorage::EMPTY; 4];
+#[cfg(feature = "net")]
 static mut NET_STORAGE: NetStorage = NetStorage::new();
 
+#[cfg(feature = "net")]
 // The network stack and socket set are stored globally so the poll_fn
 // callback (called from TcpSerial) can drive them.
 struct NetCell(UnsafeCell<Option<NetStack<soc_qemu_virt::virtio_net::VirtioNet>>>);
+#[cfg(feature = "net")]
 unsafe impl Sync for NetCell {}
+#[cfg(feature = "net")]
 static NET: NetCell = NetCell(UnsafeCell::new(None));
 
+#[cfg(feature = "net")]
 struct SocketSetCell(UnsafeCell<Option<SocketSet<'static>>>);
+#[cfg(feature = "net")]
 unsafe impl Sync for SocketSetCell {}
+#[cfg(feature = "net")]
 static SOCKETS: SocketSetCell = SocketSetCell(UnsafeCell::new(None));
 
 /// Global poll function handed to TcpSerial so it can drive the stack
 /// while blocking on read_byte / write_byte.
+#[cfg(feature = "net")]
 fn net_poll() {
     unsafe {
         if let (Some(stack), Some(sockets)) =
@@ -174,6 +232,7 @@ fn net_poll() {
 /// 3. Listens on REMOTE_SHELL_PORT.
 /// 4. On connection → runs a shell session over TCP.
 /// 5. When the client disconnects, loops back to listen.
+#[cfg(feature = "net")]
 fn net_task() -> ! {
     // ── early console for log messages ───────────────────────
     let serial = default_serial();
@@ -267,22 +326,31 @@ fn net_task() -> ! {
             let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll);
             let mut tcp_con = Console::new(tcp_serial);
 
-            if net::auth::login_prompt(&mut tcp_con, REMOTE_PASSWORD_HASH) {
-                let _ = writeln!(con, "[net] authentication succeeded — starting shell");
-                let env = ShellEnv {
-                    version: VERSION,
-                    platform: "QEMU virt (RISC-V 32) [remote]",
-                    scheduler: "minimal",
-                    get_uptime_ticks: Some(get_uptime_ticks),
-                    get_task_list: Some(write_task_list),
-                    get_mem_info: Some(write_mem_info),
-                    get_driver_list: Some(write_driver_list),
-                    wifi_cmd: None,
-                };
-                let mut sh = Shell::new(env);
-                sh.run(&mut tcp_con);
-            } else {
-                let _ = writeln!(con, "[net] authentication failed");
+            #[cfg(feature = "shell")]
+            {
+                if net::auth::login_prompt(&mut tcp_con, REMOTE_PASSWORD_HASH) {
+                    let _ = writeln!(con, "[net] authentication succeeded — starting shell");
+                    let env = ShellEnv {
+                        version: VERSION,
+                        platform: "QEMU virt (RISC-V 32) [remote]",
+                        scheduler: "minimal",
+                        get_uptime_ticks: Some(get_uptime_ticks),
+                        get_task_list: Some(write_task_list),
+                        get_mem_info: Some(write_mem_info),
+                        get_driver_list: Some(write_driver_list),
+                        wifi_cmd: None,
+                        bt_cmd: None,
+                        zigbee_cmd: None,
+                    };
+                    let mut sh = Shell::new(env);
+                    sh.run(&mut tcp_con);
+                } else {
+                    let _ = writeln!(con, "[net] authentication failed");
+                }
+            }
+            #[cfg(not(feature = "shell"))]
+            {
+                let _ = writeln!(tcp_con, "VeerOS net: no shell available");
             }
         }
 
@@ -306,22 +374,26 @@ fn net_task() -> ! {
 // Scheduler query callbacks (injected into the shell via ShellEnv)
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "shell")]
 fn get_uptime_ticks() -> u64 {
     unsafe { (*SCHEDULER.0.get()).ticks }
 }
 
+#[cfg(feature = "shell")]
 fn write_mem_info(w: &mut dyn core::fmt::Write) {
     unsafe {
         (*HEAP.0.get()).write_stats(w);
     }
 }
 
+#[cfg(feature = "shell")]
 fn write_driver_list(w: &mut dyn core::fmt::Write) {
     unsafe {
         (*DRIVERS.0.get()).write_list(w);
     }
 }
 
+#[cfg(feature = "shell")]
 fn write_task_list(w: &mut dyn core::fmt::Write) {
     let sched = unsafe { &*SCHEDULER.0.get() };
     let _ = writeln!(w, "  ID  STATE     PRI  NAME");
@@ -344,6 +416,7 @@ fn write_task_list(w: &mut dyn core::fmt::Write) {
 // QEMU power-off via SiFive Test device
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "shell")]
 fn qemu_poweroff() -> ! {
     #[cfg(target_arch = "riscv32")]
     unsafe {
@@ -453,16 +526,23 @@ pub extern "C" fn _rust_start() -> ! {
         reg.grant_irq(clint, 7); // machine timer
 
         // VIRTIO-NET
-        let vnet = reg.register("virtio-net", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: true,
-            uses_network: true,
-        }).unwrap();
-        reg.grant_mmio(vnet, MemRegion::new(0x1000_1000, 0x1000)).ok();
-        reg.grant_irq(vnet, 1);
+        #[cfg(feature = "net")]
+        {
+            let vnet = reg.register("virtio-net", DriverCaps {
+                mmio_regions: 1,
+                uses_interrupts: true,
+                uses_dma: true,
+                uses_network: true,
+            }).unwrap();
+            reg.grant_mmio(vnet, MemRegion::new(0x1000_1000, 0x1000)).ok();
+            reg.grant_irq(vnet, 1);
+        }
     }
-    let _ = writeln!(con, "[boot] driver registry: 3 drivers registered");
+    #[cfg(feature = "net")]
+    let driver_count = 3;
+    #[cfg(not(feature = "net"))]
+    let driver_count = 2;
+    let _ = writeln!(con, "[boot] driver registry: {} drivers registered", driver_count);
 
     // ── install trap vector ──────────────────────────────────
     #[cfg(target_arch = "riscv32")]
@@ -511,22 +591,61 @@ pub extern "C" fn _rust_start() -> ! {
         }
 
         // Shell task (priority 1).
-        let sb = SHELL_STACK.0.as_ptr() as usize;
-        let st = sb + SHELL_STACK.0.len();
-        if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1) {
-            sched.tasks[idx].context.status = INITIAL_MSTATUS;
+        #[cfg(feature = "shell")]
+        {
+            let sb = SHELL_STACK.0.as_ptr() as usize;
+            let st = sb + SHELL_STACK.0.len();
+            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1) {
+                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            }
         }
 
         // Network listener task (priority 1).
-        let sb = NET_TASK_STACK.0.as_ptr() as usize;
-        let st = sb + NET_TASK_STACK.0.len();
-        if let Some(idx) = sched.create_task("net", net_task as *const () as usize, st, sb, 1) {
-            sched.tasks[idx].context.status = INITIAL_MSTATUS;
+        #[cfg(feature = "net")]
+        {
+            let sb = NET_TASK_STACK.0.as_ptr() as usize;
+            let st = sb + NET_TASK_STACK.0.len();
+            if let Some(idx) = sched.create_task("net", net_task as *const () as usize, st, sb, 1) {
+                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            }
+        }
+
+        // ── userlib sample tasks ─────────────────────────────
+        #[cfg(feature = "samples")]
+        {
+            let sb = HELLO_STACK.0.as_ptr() as usize;
+            let st = sb + HELLO_STACK.0.len();
+            if let Some(idx) = sched.create_task("hello", samples::hello_task as *const () as usize, st, sb, 2) {
+                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            }
+
+            let sb = TIMER_STACK.0.as_ptr() as usize;
+            let st = sb + TIMER_STACK.0.len();
+            if let Some(idx) = sched.create_task("timer", samples::timer_task as *const () as usize, st, sb, 2) {
+                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            }
+
+            // IPC pair: sender (slot N) talks to receiver (slot N+1)
+            let sb = IPC_TX_STACK.0.as_ptr() as usize;
+            let st = sb + IPC_TX_STACK.0.len();
+            if let Some(idx) = sched.create_task("ipc-tx", samples::ipc_sender_task as *const () as usize, st, sb, 2) {
+                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            }
+
+            let sb = IPC_RX_STACK.0.as_ptr() as usize;
+            let st = sb + IPC_RX_STACK.0.len();
+            if let Some(idx) = sched.create_task("ipc-rx", samples::ipc_receiver_task as *const () as usize, st, sb, 2) {
+                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            }
         }
     }
     let _ = writeln!(con, "[boot] idle task registered");
+    #[cfg(feature = "shell")]
     let _ = writeln!(con, "[boot] shell task registered");
+    #[cfg(feature = "net")]
     let _ = writeln!(con, "[boot] net listener task registered (port {})", REMOTE_SHELL_PORT);
+    #[cfg(feature = "samples")]
+    let _ = writeln!(con, "[boot] userlib sample tasks registered (hello, timer, ipc-tx, ipc-rx)");
 
     // ── start the first task (never returns) ─────────────────
     let _ = writeln!(con, "[boot] starting scheduler — preemptive mode");
@@ -549,7 +668,29 @@ pub extern "C" fn _rust_start() -> ! {
             // Host build — just run the shell directly for `cargo check`.
             let _ = ctx_ptr;
             drop(con);
+            #[cfg(feature = "shell")]
             shell_task();
+            #[cfg(not(feature = "shell"))]
+            idle_task();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Console I/O callbacks (used by the syscall dispatcher)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub(crate) fn console_write_byte(b: u8) {
+    let serial = default_serial();
+    let mut con = Console::new(serial);
+    let _ = con.write_str(unsafe {
+        core::str::from_utf8_unchecked(core::slice::from_ref(&b))
+    });
+}
+
+#[allow(dead_code)]
+pub(crate) fn console_read_byte() -> u8 {
+    // Non-blocking read — return 0xFF if no data available.
+    0xFF
 }

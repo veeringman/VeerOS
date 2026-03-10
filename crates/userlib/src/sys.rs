@@ -1,0 +1,121 @@
+//! Raw syscall interface — the lowest layer of the userlib.
+//!
+//! Each function issues a single RISC-V `ecall` instruction with the
+//! syscall number in `a7` and arguments in `a0`–`a3`.  The kernel
+//! returns results in `a0`–`a1`.
+//!
+//! On non-RISC-V hosts (used for `cargo check`) the functions are
+//! no-ops that return 0, allowing the userlib to type-check everywhere.
+
+/// Issue a syscall with 0 arguments.  Returns `(a0,)`.
+#[inline(always)]
+pub fn syscall0(nr: usize) -> usize {
+    let ret: usize;
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("x17") nr,
+            lateout("x10") ret,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        let _ = nr;
+        ret = 0;
+    }
+    ret
+}
+
+/// Issue a syscall with 1 argument.  Returns `a0`.
+#[inline(always)]
+pub fn syscall1(nr: usize, a0: usize) -> usize {
+    let ret: usize;
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("x17") nr,
+            inlateout("x10") a0 => ret,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        let _ = (nr, a0);
+        ret = 0;
+    }
+    ret
+}
+
+/// Issue a syscall with 2 arguments.  Returns `(a0, a1)`.
+#[inline(always)]
+pub fn syscall2(nr: usize, a0: usize, a1: usize) -> (usize, usize) {
+    let r0: usize;
+    let r1: usize;
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("x17") nr,
+            inlateout("x10") a0 => r0,
+            inlateout("x11") a1 => r1,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        let _ = (nr, a0, a1);
+        r0 = 0;
+        r1 = 0;
+    }
+    (r0, r1)
+}
+
+/// Issue a syscall with 3 arguments.  Returns `a0`.
+#[inline(always)]
+pub fn syscall3(nr: usize, a0: usize, a1: usize, a2: usize) -> usize {
+    let ret: usize;
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("x17") nr,
+            inlateout("x10") a0 => ret,
+            in("x11") a1,
+            in("x12") a2,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        let _ = (nr, a0, a1, a2);
+        ret = 0;
+    }
+    ret
+}
+
+/// Issue a syscall with 4 arguments.  Returns `a0`.
+#[inline(always)]
+pub fn syscall4(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> usize {
+    let ret: usize;
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("x17") nr,
+            inlateout("x10") a0 => ret,
+            in("x11") a1,
+            in("x12") a2,
+            in("x13") a3,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        let _ = (nr, a0, a1, a2, a3);
+        ret = 0;
+    }
+    ret
+}

@@ -8,17 +8,26 @@ repository.workspace = true
 description = "VeerOS kernel for the QEMU virt RISC-V 32-bit machine"
 
 [features]
-default = ["dist-minimal"]
+default = ["dist-app"]
+
+# ── Distribution profiles ────────────────────────────────────
 dist-minimal = ["microkernel/dist-minimal"]
-dist-app = ["microkernel/dist-app"]
-dist-rt = ["microkernel/dist-rt"]
-dist-full = ["microkernel/dist-full"]
+dist-app     = ["microkernel/dist-app", "shell", "net", "userlib", "samples"]
+dist-rt      = ["microkernel/dist-rt"]
+dist-full    = ["dist-app", "dist-rt"]
+
+# ── Optional components ──────────────────────────────────────
+shell   = ["dep:shell"]
+net     = ["dep:net", "dep:smoltcp"]
+userlib = ["dep:userlib"]
+samples = ["userlib"]
 
 [dependencies]
 arch = { path = "../../arch" }
 microkernel = { path = "../../microkernel", default-features = false }
 soc-qemu-virt = { path = "../../soc/qemu_virt" }
-net = { path = "../../net" }
-shell = { path = "../../shell" }
-smoltcp = { workspace = true }
+net = { path = "../../net", optional = true }
+shell = { path = "../../shell", optional = true }
+userlib = { path = "../../userlib", optional = true }
+smoltcp = { workspace = true, optional = true }
 panic-halt = "1.0"

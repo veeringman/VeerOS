@@ -135,6 +135,8 @@ fn main() {
         get_mem_info: None,
         get_driver_list: None,
         wifi_cmd: None,
+        bt_cmd: None,
+        zigbee_cmd: None,
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);

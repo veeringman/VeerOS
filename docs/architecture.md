@@ -128,6 +128,79 @@ listener task for remote TCP shell over VIRTIO-NET.
 
 ---
 
+## Process Model (Current → Planned)
+
+### Current (v0.1): Flat Task Model
+
+```
+┌───────────────────────────────────────────────────────┐
+│  Single address space (M-mode, no MMU/PMP)            │
+│                                                       │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐         │
+│  │ idle   │ │ shell  │ │ net    │ │ user   │ ...×16  │
+│  │ task 0 │ │ task 1 │ │ task 2 │ │ task 3 │         │
+│  └────────┘ └────────┘ └────────┘ └────────┘         │
+│  Fixed TCB table [Tcb; 16], round-robin / priority    │
+│  Single-slot IPC mailbox, no locks, no processes      │
+└───────────────────────────────────────────────────────┘
+```
+
+- Tasks are flat: no parent-child, no address space isolation
+- `TaskContext` is RISC-V 32-GPR specific
+- Sleep uses `gpr[0]` overload instead of a proper field
+- IPC is fire-and-forget single-slot (overwrites on full)
+
+### Planned (v0.2+): Process + Thread + Multi-Arch
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Kernel (privileged: M-mode / EL1 / Ring 0)                     │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │ Scheduler │ IPC queues │ Futex table │ Socket layer      │    │
+│  └──────────────────────────────────────────────────────────┘    │
+├──────────────────────────────────────────────────────────────────┤
+│  Process A (ASID 1)              │  Process B (ASID 2)          │
+│  ┌────────┐ ┌────────┐          │  ┌────────┐                  │
+│  │ Thread 0│ │ Thread 1│          │  │ Thread 0│                  │
+│  │ (main) │ │ (worker)│          │  │ (main) │                  │
+│  └────────┘ └────────┘          │  └────────┘                  │
+│  Shared: heap, .text, .rodata   │  Own: heap, .text, .rodata   │
+│  PMP/MPU/page-table isolated    │  PMP/MPU/page-table isolated │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Key changes:
+- **`SavedContext` trait** — per-arch context type (riscv32, riscv64, aarch64, x86-64)
+- **Process owns address space** — ASID, memory regions, handle table, child list
+- **Thread runs within process** — own stack + context, shares process memory
+- **BlockReason enum** — typed blocking: `Sleep`, `IpcRecv`, `MutexWait`, `Join`, `IoWait`
+- **Message queues** — bounded ring buffers replace single-slot mailboxes
+- **Futex-based synchronization** — Mutex, Condvar, Semaphore, RwLock in userlib
+- **Socket API** — unified local + network sockets with handle table
+- **Async executor** — `no_std` poll-based runtime in userlib using `SYS_POLL_WAIT`
+
+### Multi-Architecture `SavedContext`
+
+```rust
+// In arch crate — trait that each arch implements:
+pub trait SavedContext: Copy + Sized {
+    fn zero() -> Self;
+    fn set_pc(&mut self, pc: usize);
+    fn set_sp(&mut self, sp: usize);
+    fn set_arg(&mut self, n: usize, val: usize);  // syscall args
+    fn get_ret(&self, n: usize) -> usize;          // return values
+    fn pc(&self) -> usize;
+    fn sp(&self) -> usize;
+    fn syscall_nr(&self) -> usize;
+}
+
+// Per-arch implementations:
+//   riscv32: 32 GPRs (x0-x31) + pc + mstatus      = 136 bytes
+//   riscv64: 32 GPRs (x0-x31) + pc + sstatus       = 272 bytes
+//   aarch64: 31 GPRs (x0-x30) + SP + PC + PSTATE   = 272 bytes
+//   x86-64:  16 GPRs + RIP + RFLAGS + segments      = 176 bytes
+```
+
 ## Summary
 
 VeerOS provides a **clean, modern OS architecture** that combines:

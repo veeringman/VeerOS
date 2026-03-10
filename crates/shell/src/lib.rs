@@ -48,6 +48,10 @@ pub struct ShellEnv {
     pub get_driver_list: Option<fn(&mut dyn core::fmt::Write)>,
     /// Optional callback: handle `wifi <subcommand> <args>` and write output.
     pub wifi_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+    /// Optional callback: handle `bt <subcommand> <args>` and write output.
+    pub bt_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+    /// Optional callback: handle `zigbee <subcommand> <args>` and write output.
+    pub zigbee_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -194,6 +198,8 @@ impl Shell {
             "meminfo" | "mem" | "free" => self.cmd_meminfo(con),
             "drivers" | "lsdrv" => self.cmd_drivers(con),
             "wifi" => self.cmd_wifi(con, args),
+            "bt" | "ble" => self.cmd_bt(con, args),
+            "zigbee" | "thread" | "802154" => self.cmd_zigbee(con, args),
             "clear" | "cls" => self.cmd_clear(con),
             "echo" => self.cmd_echo(con, args),
             "logo" => self.cmd_logo(con),
@@ -226,6 +232,8 @@ impl Shell {
         let _ = writeln!(con, "  meminfo    Memory pool statistics");
         let _ = writeln!(con, "  drivers    List registered drivers");
         let _ = writeln!(con, "  wifi       Wi-Fi (scan/list/set/connect/status)");
+        let _ = writeln!(con, "  bt         Bluetooth LE (scan/list/advertise/stop/status)");
+        let _ = writeln!(con, "  zigbee     ZigBee/Thread 802.15.4 (init/scan/channel/send/status)");
         let _ = writeln!(con, "  clear      Clear the screen");
         let _ = writeln!(con, "  echo       Echo arguments");
         let _ = writeln!(con, "  logo       Display VeerOS logo");
@@ -305,6 +313,30 @@ impl Shell {
             f(sub, rest, con as &mut dyn core::fmt::Write);
         } else {
             let _ = writeln!(con, "  wifi: not available on this platform");
+        }
+    }
+
+    fn cmd_bt<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        if let Some(f) = self.env.bt_cmd {
+            let (sub, rest) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => (args, ""),
+            };
+            f(sub, rest, con as &mut dyn core::fmt::Write);
+        } else {
+            let _ = writeln!(con, "  bt: not available on this platform");
+        }
+    }
+
+    fn cmd_zigbee<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        if let Some(f) = self.env.zigbee_cmd {
+            let (sub, rest) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => (args, ""),
+            };
+            f(sub, rest, con as &mut dyn core::fmt::Write);
+        } else {
+            let _ = writeln!(con, "  zigbee: not available on this platform");
         }
     }
 

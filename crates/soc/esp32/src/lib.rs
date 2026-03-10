@@ -27,6 +27,8 @@
 
 use arch::Platform;
 
+pub mod ble;
+pub mod ieee802154;
 pub mod intc;
 pub mod mem;
 pub mod systimer;

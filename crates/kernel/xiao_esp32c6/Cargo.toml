@@ -8,15 +8,23 @@ repository.workspace = true
 description = "VeerOS kernel for the Seeed XIAO ESP32-C6 board"
 
 [features]
-default = ["dist-minimal"]
+default = ["dist-minimal", "shell", "wifi", "ble", "ieee802154"]
+
+# ── Distribution profiles ────────────────────────────────────
 dist-minimal = ["microkernel/dist-minimal"]
-dist-app = ["microkernel/dist-app"]
-dist-rt = ["microkernel/dist-rt"]
-dist-full = ["microkernel/dist-full"]
+dist-app     = ["microkernel/dist-app", "shell", "wifi", "ble", "ieee802154"]
+dist-rt      = ["microkernel/dist-rt"]
+dist-full    = ["dist-app", "dist-rt"]
+
+# ── Optional components ──────────────────────────────────────
+shell      = ["dep:shell"]
+wifi       = []
+ble        = []
+ieee802154 = []
 
 [dependencies]
 arch = { path = "../../arch" }
 microkernel = { path = "../../microkernel", default-features = false }
 soc-esp32 = { path = "../../soc/esp32", default-features = false, features = ["c6"] }
-shell = { path = "../../shell" }
+shell = { path = "../../shell", optional = true }
 panic-halt = "1.0"

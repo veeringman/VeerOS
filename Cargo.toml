@@ -16,6 +16,7 @@ members = [
     "crates/distributions",
     "crates/net",
     "crates/shell",
+    "crates/userlib",
 
     # ── Demo / test ──────────────────────────────────────
     "crates/veeros-demo",

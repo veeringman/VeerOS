@@ -46,10 +46,118 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [x] Shell `uptime` command (reads scheduler tick counter via callback)
 - [x] Shell `tasks` / `ps` command (live task table via callback)
 - [x] Timer ISR preempts shell ↔ idle with real context switches
+- [x] Formal syscall ABI — ecall-based, numbered ranges (task/ipc/io/time/mem/debug)
+- [x] Kernel syscall dispatcher (`dispatch.rs`) + `SyscallAction` enum
+- [x] Userlib crate — `sys`, `task`, `ipc`, `io`, `time` modules with raw ecall wrappers
+- [x] `print!` / `println!` macros via `SYS_WRITE_BUF` syscall
+- [x] IPC send/recv/poll syscalls wired end-to-end
+- [x] Sleep/wake syscalls with `wake_sleepers()` in timer tick
+- [x] Userlib sample tasks verified on QEMU (hello, timer, ipc-tx, ipc-rx)
 - [ ] Driver isolation model
 - [ ] Memory management baseline for embedded targets
 - [ ] Optional app runtime service
 - [ ] Optional real-time scheduling service
+
+## Phase 6 — Process Model Overhaul (Multi-Arch Foundation)
+
+### 6A — Architecture Abstraction Layer
+_Make `arch` crate truly architecture-neutral so ARM64, RISC-V 64, and x86-64 can coexist._
+
+- [ ] **`SavedContext` trait** — replace concrete `TaskContext { gpr: [usize; 32] }` with a trait (`size_of`, `set_sp`, `set_pc`, `set_arg`, `get_ret`, `zero`) implemented per-arch
+- [ ] **Per-arch context modules** — `arch_riscv32/context.rs`, `arch_riscv64/context.rs`, `arch_arm64/context.rs`, `arch_x86_64/context.rs`
+- [ ] **Arch-specific trap entry/exit** — factor `_veer_trap_entry` assembly into per-arch crates (currently duplicated in both kernel trap.rs)
+- [ ] **`usize` portability audit** — ensure scheduler, IPC, allocator work with both 32-bit and 64-bit word sizes
+- [ ] **`SyscallAbi` trait** — abstract ecall (RISC-V) / svc (ARM) / syscall (x86) instruction + register convention
+- [ ] **Conditional `TaskContext` in `arch`** — `#[cfg(target_arch)]` dispatch or associated type on `Platform` trait
+- [ ] **ARM64 stub** — `arch_arm64` crate: `SavedContext` with 31 GPRs + SP + PC + PSTATE, trap frame for EL1→EL0
+- [ ] **RISC-V 64 stub** — `arch_riscv64` crate: same 32 GPRs but `usize = u64`, S-mode mcause→scause
+- [ ] **x86-64 stub** — `arch_x86_64` crate: `SavedContext` with 16 GPRs + RIP + RFLAGS + segment regs
+
+### 6B — Process + Thread Model
+_Introduce proper process/thread separation. Processes own address spaces; threads run within them._
+
+- [ ] **`Process` struct** — address space ID (ASID), capability token set, resource quotas, child list, exit status
+- [ ] **`Thread` struct** (replaces current `Tcb`)** — belongs to a `Process`, has own stack + context, share process memory
+- [ ] **Thread states** — extend `TaskState` → `Ready`, `Running`, `Blocked(BlockReason)`, `Suspended`, `Zombie`
+- [ ] **`BlockReason` enum** — `Sleep(u64)`, `IpcRecv`, `MutexWait(MutexId)`, `CondWait(CondId)`, `Join(ThreadId)`, `IoWait`
+- [ ] **Replace `gpr[0]` sleep hack** — add `wakeup_tick: u64` field to `Thread`/`Tcb` struct
+- [ ] **`SYS_SPAWN` syscall** — create a new thread within the calling process from userspace
+- [ ] **`SYS_SPAWN_PROCESS` syscall** — create a new process with a separate address space
+- [ ] **`SYS_JOIN` syscall** — wait for a thread to exit, retrieve exit code
+- [ ] **Per-process resource accounting** — track heap usage, open handles, thread count per process
+- [ ] **Parent-child relationship** — process tree, orphan reparenting, `SYS_WAIT`
+- [ ] **Thread-local storage (TLS)** — `tp` register (RISC-V x4) pointing to per-thread data area
+
+### 6C — Memory Management + Isolation
+_Hardware-enforced memory isolation using PMP (RISC-V) / MPU (ARM Cortex-M) / page tables (MMU targets)._
+
+- [ ] **`MemoryProtection` trait** — abstract PMP, MPU, and MMU behind a common interface (`grant_region`, `revoke_region`, `switch_context`)
+- [ ] **RISC-V PMP driver** — configure PMP entries per-task on context switch (8–16 regions)
+- [ ] **Per-process memory regions** — stack, heap, .text, .rodata tracked in process descriptor
+- [ ] **Pointer validation** — `SYS_WRITE_BUF` / `SYS_PANIC` verify user pointers against granted regions before access
+- [ ] **Stack guard regions** — PMP/MPU region below each stack to trap overflow
+- [ ] **Kernel/user split** — M-mode kernel + U-mode tasks on RISC-V; EL1/EL0 on ARM64; ring 0/3 on x86-64
+- [ ] **RISC-V S-mode support** — for 64-bit targets with MMU (Sv39/Sv48 page tables)
+- [ ] **ARM64 page tables** — 4K pages, TTBR0/TTBR1 split, ASID tagging
+
+### 6D — Synchronization Primitives
+_Kernel-backed locking and signaling for safe concurrent access._
+
+- [ ] **`SYS_FUTEX_WAIT` / `SYS_FUTEX_WAKE` syscalls** — Linux-style futex as the universal building block
+- [ ] **Userlib `Mutex<T>`** — spin-then-futex mutex built on `SYS_FUTEX_WAIT/WAKE`, `no_std` compatible
+- [ ] **Userlib `Condvar`** — condition variable on top of futex
+- [ ] **Userlib `Semaphore`** — counting semaphore (bounded concurrency control)
+- [ ] **Priority inheritance** — in kernel futex: boost holder's priority to max of all waiters
+- [ ] **Deadlock detection** — optional: track wait-for graph in kernel, surface via debug syscall
+- [ ] **`RwLock<T>`** — reader-writer lock (multiple readers xor one writer)
+- [ ] **Atomic operations support** — RISC-V A extension (lr/sc, amo*) or fallback kernel-mediated CAS on rv32imc
+
+### 6E — Message Queues + Channels
+_Replace single-slot mailbox with proper IPC primitives._
+
+- [ ] **Bounded message queue** — ring buffer (configurable depth, e.g., 8–64 slots) per queue, not per task
+- [ ] **`SYS_MQ_CREATE` / `SYS_MQ_DESTROY`** — create/destroy a named or anonymous queue
+- [ ] **`SYS_MQ_SEND` / `SYS_MQ_RECV`** — blocking and non-blocking variants with timeout
+- [ ] **`SYS_MQ_POLL`** — check if queue has messages without consuming
+- [ ] **Typed channels** — userlib wrapper: `Channel<T>` for typed, zero-copy (within address space) message passing
+- [ ] **Multicast / publish-subscribe** — notification groups for event broadcasting
+- [ ] **Keep legacy single-slot IPC** as a fast path for simple request/reply patterns
+- [ ] **`arg1` fix** — return all 4 message words through `a0`–`a3` in userlib `recv()`
+
+### 6F — Async/Await Runtime
+_Cooperative concurrency within a thread — many logical tasks on one stack._
+
+- [ ] **Kernel `SYS_POLL_SET` syscall** — register interest in multiple events (IPC, timer, I/O ready)
+- [ ] **Kernel `SYS_POLL_WAIT` syscall** — block until any registered event fires (like epoll_wait)
+- [ ] **Userlib executor** — single-threaded `no_std` async executor: task queue, `Waker` integration with `SYS_POLL_WAIT`
+- [ ] **Userlib `AsyncTimer`** — `Future` that yields until `SYS_SLEEP` completes
+- [ ] **Userlib `AsyncRecv`** — `Future` that yields until IPC message or MQ message arrives
+- [ ] **`async fn` task entry** — allow task entry points to be `async fn() -> !` with executor loop
+- [ ] **Cooperative yield point** — `core::task::Poll::Pending` triggers `SYS_POLL_WAIT`, not busy spin
+- [ ] **Cancellation** — drop-based cleanup for in-flight async operations
+
+### 6G — Sockets (IPC + Network)
+_Unified socket API spanning local IPC and network transports._
+
+- [ ] **`SYS_SOCKET` / `SYS_BIND` / `SYS_LISTEN` / `SYS_ACCEPT`** — BSD-style socket syscalls
+- [ ] **`SYS_CONNECT` / `SYS_SEND` / `SYS_RECV` / `SYS_CLOSE`** — data transfer syscalls
+- [ ] **Local (Unix-domain) sockets** — in-kernel ring buffer between two processes, no network overhead
+- [ ] **TCP sockets** — wrap smoltcp TCP in socket handle, expose to userspace
+- [ ] **UDP sockets** — wrap smoltcp UDP for datagram services
+- [ ] **Socket handle table** — per-process file descriptor / handle table (small fixed array initially)
+
+- [ ] **`select` / `poll` / `epoll`-style multiplexing** — ties into async `SYS_POLL_SET`
+- [ ] **Userlib `TcpStream` / `TcpListener`** — safe Rust wrappers in userlib
+
+### 6H — Documentation / Man Pages
+_Built-in documentation accessible from the shell._
+
+- [ ] **`man` shell command** — display help for syscalls, commands, and concepts
+- [ ] **Embedded man page store** — `&[(&str, &str)]` table in `.rodata`, keyed by topic name
+- [ ] **Syscall man pages** — one entry per syscall (yield, exit, send, recv, sleep, alloc, etc.)
+- [ ] **Shell command help** — `man help`, `man tasks`, `man wifi`, `man bt`, `man zigbee`
+- [ ] **Concept pages** — `man scheduler`, `man ipc`, `man memory`, `man boot`
+- [ ] **Pager** — basic `--More--` pagination for long man pages on small terminals
 
 ## Phase 5 — Remote Access (SSH / Equivalent)
 - [x] `NetworkDevice` trait in `arch` crate (transport-agnostic NIC abstraction)
@@ -65,11 +173,36 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [x] QEMU user-net or TAP networking for development/testing
 - [ ] ESP32 Wi-Fi driver integration for real-hardware remote access
 
-## Phase 4 — Distribution Profiles
-- [ ] `minimal` distribution build recipe
-- [ ] `app` distribution build recipe
-- [ ] `real-time` distribution build recipe
-- [ ] `full` distribution build recipe
+## Phase 4 — Distribution Profiles (Complete)
+- [x] Distribution matrix design — two axes: profile (minimal/app/rt/full) × components (shell/net/userlib/samples/wifi/ble/ieee802154)
+- [x] `distributions` crate restructured — aligned feature names (`dist-minimal`/`dist-app`/`dist-rt`/`dist-full`), component flags, documentation
+- [x] `kernel-qemu-virt` — optional deps: shell, net, userlib, smoltcp; profiles auto-bundle components; default = `dist-app`
+- [x] `kernel-xiao-esp32c6` — optional deps: shell; radio features: wifi, ble, ieee802154; default = `dist-minimal` + shell + all radios
+- [x] `#[cfg(feature)]` gates across both kernel binaries — conditional compilation of net_task, shell_task, sample tasks, driver registrations, radio managers
+- [x] `minimal` distribution build recipe — `--no-default-features --features dist-minimal` (bare scheduler + idle task only)
+- [x] `app` distribution build recipe — `--features dist-app` (shell + net + userlib + samples)
+- [x] `real-time` distribution build recipe — `--features dist-rt` (priority scheduler, combine with component flags)
+- [x] `full` distribution build recipe — `--features dist-full` (all components + priority scheduler)
+
+## Phase 7 — Multi-Architecture Targets
+
+### ARM64
+- [ ] `soc-qemu-virt-aarch64` crate — PL011 UART, GICv2 interrupt controller, ARM generic timer
+- [ ] `kernel-qemu-virt-aarch64` — `aarch64-unknown-none` target, EL1 boot, PSCI
+- [ ] ARM64 exception vector table — sync/IRQ/FIQ/SError handlers, context save/restore
+- [ ] QEMU `virt` machine aarch64 validation
+
+### RISC-V 64
+- [ ] `soc-qemu-virt-riscv64` crate — reuse NS16550/CLINT with `usize = u64`
+- [ ] `kernel-qemu-virt-riscv64` — `riscv64gc-unknown-none-elf` target, S-mode with SBI
+- [ ] S-mode trap delegation — `sstatus`/`scause`/`sepc` instead of M-mode CSRs
+- [ ] Sv39 page table support (if MMU path enabled)
+
+### x86-64
+- [ ] `soc-qemu-pc` crate — serial (COM1 0x3F8), APIC timer, PIC/IOAPIC
+- [ ] `kernel-qemu-pc` — `x86_64-unknown-none` target, multiboot2 boot, long mode
+- [ ] IDT setup — interrupt descriptor table, ISR stubs, syscall via `syscall`/`sysret`
+- [ ] GDT + TSS — kernel/user segment selectors, per-CPU task state segment
 
 ## Session Log
 - 2026-02-26: Bootstrapped workspace and crate architecture, documented design, and enabled distribution feature model.

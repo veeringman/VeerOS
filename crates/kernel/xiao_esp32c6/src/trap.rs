@@ -8,9 +8,11 @@
 use arch::{TaskContext, TickTimer};
 #[allow(unused_imports)]
 use microkernel::task::Scheduler;
+#[allow(unused_imports)]
+use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER};
+use crate::{SCHEDULER, TIMER, IPC, HEAP};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RISC-V trap entry / exit (global_asm — only emitted for riscv32)
@@ -221,6 +223,7 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext) -> *mut TaskContext {
     sched.save_current_context(unsafe { &*ctx });
 
     let need_switch = sched.tick();
+    dispatch::wake_sleepers(sched);
     if need_switch {
         if let Some(new_ctx) = sched.current_context_mut() {
             return new_ctx as *mut TaskContext;
@@ -233,9 +236,36 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext) -> *mut TaskContext {
 unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskContext {
     match code {
         MCAUSE_ECALL_MMODE => {
-            let c = unsafe { &mut *ctx };
-            c.pc += 4;
-            ctx
+            let sched = unsafe { &mut *SCHEDULER.0.get() };
+            let ipc = unsafe { &mut *IPC.0.get() };
+            let heap = unsafe { &mut *HEAP.0.get() };
+
+            let action = unsafe {
+                dispatch::dispatch(
+                    ctx,
+                    sched,
+                    ipc,
+                    heap,
+                    crate::console_write_byte,
+                    crate::console_read_byte,
+                )
+            };
+
+            match action {
+                SyscallAction::Resume => ctx,
+                SyscallAction::Reschedule | SyscallAction::TaskExited => {
+                    // Save AFTER dispatch so pc+4 and any gpr writes are captured.
+                    sched.save_current_context(unsafe { &*ctx });
+                    if let Some(next) = sched.pick_next() {
+                        use microkernel::task::TaskState;
+                        sched.current = next;
+                        sched.tasks[next].state = TaskState::Running;
+                        &mut sched.tasks[next].context as *mut TaskContext
+                    } else {
+                        ctx
+                    }
+                }
+            }
         }
         _ => loop {
             core::hint::spin_loop();
