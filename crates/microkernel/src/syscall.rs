@@ -438,3 +438,62 @@ pub const SYS_MOUNT: usize = 0xAE;
 ///   a1 = path length
 /// Returns: a0 = 0 on success, `usize::MAX` on error.
 pub const SYS_UMOUNT: usize = 0xAF;
+
+// ── Hardware / peripheral syscalls (0xB0 – 0xBF) ────────────────────────
+
+/// GPIO set mode.
+///   a0 = pin   (0–27)
+///   a1 = mode  (0 = input, 1 = output)
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_GPIO_SET_MODE: usize = 0xB0;
+
+/// GPIO read.
+///   a0 = pin
+/// Returns: a0 = 0 or 1.
+pub const SYS_GPIO_READ: usize = 0xB1;
+
+/// GPIO write.
+///   a0 = pin
+///   a1 = 0 or 1
+/// Returns: a0 = 0 on success.
+pub const SYS_GPIO_WRITE: usize = 0xB2;
+
+/// GPIO set pull-up/down.
+///   a0 = pin
+///   a1 = 0 (none), 1 (up), 2 (down)
+/// Returns: a0 = 0 on success.
+pub const SYS_GPIO_SET_PULL: usize = 0xB3;
+
+/// I2C write.
+///   a0 = bus
+///   a1 = 7-bit addr
+///   a2 = pointer to data
+///   a3 = length
+/// Returns: a0 = 0 on success, error code on failure.
+pub const SYS_I2C_WRITE: usize = 0xB4;
+
+/// I2C read.
+///   a0 = bus
+///   a1 = 7-bit addr
+///   a2 = pointer to buffer
+///   a3 = length
+/// Returns: a0 = bytes read, `usize::MAX` on error.
+pub const SYS_I2C_READ: usize = 0xB5;
+
+/// SPI transfer.
+///   a0 = bus
+///   a1 = pointer to TX buffer
+///   a2 = pointer to RX buffer
+///   a3 = length
+/// Returns: a0 = 0 on success.
+pub const SYS_SPI_TRANSFER: usize = 0xB6;
+
+/// Get board temperature in millidegrees C.
+/// Returns: a0 = temperature in millidegrees (signed, fits in usize bits).
+pub const SYS_GET_TEMP: usize = 0xB7;
+
+/// Get platform/hardware info string.
+///   a0 = pointer to output buffer
+///   a1 = buffer length
+/// Returns: a0 = bytes written.
+pub const SYS_HW_INFO: usize = 0xB8;

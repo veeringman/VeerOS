@@ -135,6 +135,19 @@ pub(crate) struct InputCell(pub UnsafeCell<InputSubsystem>);
 unsafe impl Sync for InputCell {}
 pub(crate) static INPUT: InputCell = InputCell(UnsafeCell::new(InputSubsystem::new()));
 
+// xHCI USB host controllers
+use soc_raspi5::xhci::Xhci;
+struct XhciCell(UnsafeCell<Xhci>);
+unsafe impl Sync for XhciCell {}
+static XHCI0: XhciCell = XhciCell(UnsafeCell::new(Xhci::xhci0()));
+static XHCI1: XhciCell = XhciCell(UnsafeCell::new(Xhci::xhci1()));
+
+// SD card (EMMC2)
+use soc_raspi5::sd::Emmc2Sd;
+struct SdCell(UnsafeCell<Emmc2Sd>);
+unsafe impl Sync for SdCell {}
+static SD: SdCell = SdCell(UnsafeCell::new(Emmc2Sd::new()));
+
 // Driver registry
 struct RegistryCell(UnsafeCell<DriverRegistry>);
 unsafe impl Sync for RegistryCell {}
@@ -154,6 +167,12 @@ pub(crate) static GIC: GicCell = GicCell(UnsafeCell::new(Gic400::new()));
 struct FbConCell(UnsafeCell<FbConsole>);
 unsafe impl Sync for FbConCell {}
 static FBCON: FbConCell = FbConCell(UnsafeCell::new(FbConsole::inactive()));
+
+// Kernel log ring buffer
+use microkernel::klog::KernelLog;
+struct KlogCell(UnsafeCell<KernelLog>);
+unsafe impl Sync for KlogCell {}
+static KLOG: KlogCell = KlogCell(UnsafeCell::new(KernelLog::new()));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Task stacks
@@ -237,6 +256,14 @@ fn shell_task() -> ! {
         input_status: Some(input_status),
         usb_list: Some(usb_list),
         ble_hid_list: None,
+        gpio_cmd: Some(gpio_cmd),
+        i2c_cmd: Some(i2c_cmd),
+        spi_cmd: Some(spi_cmd),
+        hw_info: Some(hw_info),
+        get_temp_millic: Some(get_temp_millic),
+        dmesg: Some(dmesg_info),
+        reboot: Some(do_reboot),
+        shutdown: Some(do_shutdown),
     };
     let mut sh = Shell::new(env);
     loop {
@@ -423,6 +450,36 @@ pub extern "C" fn _rust_start() -> ! {
     }
     let _ = writeln!(con, "[boot] IRQ unmasked");
 
+    // ── SD card (EMMC2) ──────────────────────────────────────
+    {
+        let sd = unsafe { &mut *SD.0.get() };
+        if sd.init() {
+            use arch::BlockDevice;
+            let _ = writeln!(con, "[boot] EMMC2 SD card: ready ({} sectors)", sd.block_count());
+        } else {
+            let _ = writeln!(con, "[boot] EMMC2 SD card: not detected or init failed");
+        }
+    }
+
+    // ── USB (xHCI via RP1) ───────────────────────────────────
+    {
+        use arch::UsbHostController;
+        let xhci0 = unsafe { &mut *XHCI0.0.get() };
+        if xhci0.init() {
+            let _ = writeln!(con, "[boot] xHCI0 (USB 3.0): {} ports, {} devices",
+                xhci0.port_count(), xhci0.num_devices);
+        } else {
+            let _ = writeln!(con, "[boot] xHCI0 (USB 3.0): init failed");
+        }
+        let xhci1 = unsafe { &mut *XHCI1.0.get() };
+        if xhci1.init() {
+            let _ = writeln!(con, "[boot] xHCI1 (USB 2.0): {} ports, {} devices",
+                xhci1.port_count(), xhci1.num_devices);
+        } else {
+            let _ = writeln!(con, "[boot] xHCI1 (USB 2.0): init failed");
+        }
+    }
+
     // ── HDMI framebuffer ─────────────────────────────────────
     {
         use soc_raspi5::fb;
@@ -552,6 +609,21 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(con, "[boot] starting scheduler — preemptive mode");
     let _ = writeln!(con, "");
 
+    // ── snapshot boot log into klog ──────────────────────────
+    {
+        let klog = unsafe { &mut *KLOG.0.get() };
+        let _ = writeln!(klog, "[boot] VeerOS v{VERSION} — Raspberry Pi 5 (AArch64)");
+        let _ = writeln!(klog, "[boot] heap {} KiB, VFS ready, {} drivers",
+            HEAP_SIZE / 1024, 3);
+        let sd = unsafe { &*SD.0.get() };
+        if sd.is_ready() {
+            use arch::BlockDevice;
+            let _ = writeln!(klog, "[boot] EMMC2 SD: {} sectors", sd.block_count());
+        }
+        let _ = writeln!(klog, "[boot] GIC-400 + ARM timer initialised");
+        let _ = writeln!(klog, "[boot] scheduler starting (preemptive mode)");
+    }
+
     unsafe {
         let sched = &mut *SCHEDULER.0.get();
         let ctx_ptr = sched.start().expect("no runnable task");
@@ -591,7 +663,9 @@ pub(crate) fn console_write_byte(b: u8) {
 
 #[allow(dead_code)]
 pub(crate) fn console_read_byte() -> u8 {
-    0xFF
+    use arch::Serial;
+    let serial = default_serial();
+    serial.read_byte()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -920,7 +994,15 @@ fn mount_list(w: &mut dyn core::fmt::Write) {
 
 fn lsblk_info(w: &mut dyn core::fmt::Write) {
     let _ = writeln!(w, "  NAME       TYPE   SIZE");
-    let _ = writeln!(w, "  emmc2-sd   disk   (SD card via EMMC2)");
+    let sd = unsafe { &*SD.0.get() };
+    if sd.is_ready() {
+        use arch::BlockDevice;
+        let sectors = sd.block_count();
+        let mb = sectors / 2048; // 512 bytes/sector, 2048 sectors/MiB
+        let _ = writeln!(w, "  emmc2-sd   disk   {} MiB ({} sectors)", mb, sectors);
+    } else {
+        let _ = writeln!(w, "  emmc2-sd   disk   (not detected)");
+    }
 }
 
 fn input_status(w: &mut dyn core::fmt::Write) {
@@ -929,7 +1011,389 @@ fn input_status(w: &mut dyn core::fmt::Write) {
 }
 
 fn usb_list(w: &mut dyn core::fmt::Write) {
-    let _ = writeln!(w, "  Bus   Port  Speed   Class   Description");
-    let _ = writeln!(w, "  xHCI0 (RP1 USB 3.0) — controller present, enumeration pending");
-    let _ = writeln!(w, "  xHCI1 (RP1 USB 2.0) — controller present, enumeration pending");
+    let xhci0 = unsafe { &*XHCI0.0.get() };
+    let _ = writeln!(w, "--- xHCI0 (RP1 USB 3.0) ---");
+    xhci0.write_port_list(w);
+    xhci0.write_device_list(w);
+    let xhci1 = unsafe { &*XHCI1.0.get() };
+    let _ = writeln!(w, "--- xHCI1 (RP1 USB 2.0) ---");
+    xhci1.write_port_list(w);
+    xhci1.write_device_list(w);
+}
+
+// ─── GPIO command callback ───────────────────────────────────────────────
+
+fn gpio_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    match sub {
+        "list" | "" => {
+            soc_raspi5::gpio::write_pin_list(w);
+        }
+        "read" => {
+            if let Ok(pin) = parse_u8(args.trim()) {
+                if pin > 27 {
+                    let _ = writeln!(w, "  error: pin must be 0–27");
+                } else {
+                    let val = soc_raspi5::gpio::read(pin);
+                    let _ = writeln!(w, "  GPIO{} = {}", pin, if val { 1 } else { 0 });
+                }
+            } else {
+                let _ = writeln!(w, "  usage: gpio read <pin>");
+            }
+        }
+        "write" => {
+            let (pin_s, val_s) = split_at_space(args);
+            if let (Ok(pin), Ok(val)) = (parse_u8(pin_s), parse_u8(val_s)) {
+                if pin > 27 {
+                    let _ = writeln!(w, "  error: pin must be 0–27");
+                } else {
+                    soc_raspi5::gpio::write(pin, val != 0);
+                    let _ = writeln!(w, "  GPIO{} <- {}", pin, if val != 0 { 1 } else { 0 });
+                }
+            } else {
+                let _ = writeln!(w, "  usage: gpio write <pin> <0|1>");
+            }
+        }
+        "mode" => {
+            let (pin_s, mode_s) = split_at_space(args);
+            if let Ok(pin) = parse_u8(pin_s) {
+                if pin > 27 {
+                    let _ = writeln!(w, "  error: pin must be 0–27");
+                    return;
+                }
+                match mode_s.trim() {
+                    "in" | "input" => {
+                        soc_raspi5::gpio::set_mode(pin, soc_raspi5::gpio::GpioMode::Input);
+                        let _ = writeln!(w, "  GPIO{} -> INPUT", pin);
+                    }
+                    "out" | "output" => {
+                        soc_raspi5::gpio::set_mode(pin, soc_raspi5::gpio::GpioMode::Output);
+                        let _ = writeln!(w, "  GPIO{} -> OUTPUT", pin);
+                    }
+                    _ => {
+                        let _ = writeln!(w, "  usage: gpio mode <pin> <in|out>");
+                    }
+                }
+            } else {
+                let _ = writeln!(w, "  usage: gpio mode <pin> <in|out>");
+            }
+        }
+        "pull" => {
+            let (pin_s, pull_s) = split_at_space(args);
+            if let Ok(pin) = parse_u8(pin_s) {
+                if pin > 27 {
+                    let _ = writeln!(w, "  error: pin must be 0–27");
+                    return;
+                }
+                match pull_s.trim() {
+                    "none" | "off" => {
+                        soc_raspi5::gpio::set_pull(pin, soc_raspi5::gpio::GpioPull::None);
+                        let _ = writeln!(w, "  GPIO{} pull -> NONE", pin);
+                    }
+                    "up" => {
+                        soc_raspi5::gpio::set_pull(pin, soc_raspi5::gpio::GpioPull::Up);
+                        let _ = writeln!(w, "  GPIO{} pull -> UP", pin);
+                    }
+                    "down" => {
+                        soc_raspi5::gpio::set_pull(pin, soc_raspi5::gpio::GpioPull::Down);
+                        let _ = writeln!(w, "  GPIO{} pull -> DOWN", pin);
+                    }
+                    _ => {
+                        let _ = writeln!(w, "  usage: gpio pull <pin> <none|up|down>");
+                    }
+                }
+            } else {
+                let _ = writeln!(w, "  usage: gpio pull <pin> <none|up|down>");
+            }
+        }
+        "toggle" => {
+            if let Ok(pin) = parse_u8(args.trim()) {
+                if pin > 27 {
+                    let _ = writeln!(w, "  error: pin must be 0–27");
+                } else {
+                    soc_raspi5::gpio::toggle(pin);
+                    let _ = writeln!(w, "  GPIO{} toggled", pin);
+                }
+            } else {
+                let _ = writeln!(w, "  usage: gpio toggle <pin>");
+            }
+        }
+        _ => {
+            let _ = writeln!(w, "  gpio subcommands: list, read, write, mode, pull, toggle");
+        }
+    }
+}
+
+// ─── I2C command callback ────────────────────────────────────────────────
+
+fn i2c_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    match sub {
+        "scan" => {
+            let bus_n = if args.trim().is_empty() { 1u8 } else {
+                parse_u8(args.trim()).unwrap_or(1)
+            };
+            if bus_n > 6 {
+                let _ = writeln!(w, "  error: bus must be 0–6");
+                return;
+            }
+            let _ = writeln!(w, "  Scanning I2C bus {}...", bus_n);
+            let _ = writeln!(w, "     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f");
+            let i2c = match bus_n {
+                0 => soc_raspi5::i2c::Rp1I2c::i2c0(),
+                1 => soc_raspi5::i2c::Rp1I2c::i2c1(),
+                2 => soc_raspi5::i2c::Rp1I2c::i2c2(),
+                3 => soc_raspi5::i2c::Rp1I2c::i2c3(),
+                4 => soc_raspi5::i2c::Rp1I2c::i2c4(),
+                5 => soc_raspi5::i2c::Rp1I2c::i2c5(),
+                6 => soc_raspi5::i2c::Rp1I2c::i2c6(),
+                _ => return,
+            };
+            i2c.init(soc_raspi5::i2c::I2cSpeed::Standard);
+            for row in 0..8u8 {
+                let _ = write!(w, "  {:02x}:", row * 16);
+                for col in 0..16u8 {
+                    let addr = row * 16 + col;
+                    if addr < 0x03 || addr > 0x77 {
+                        let _ = write!(w, "   ");
+                    } else {
+                        let mut buf = [0u8; 1];
+                        match i2c.read_from(addr, &mut buf) {
+                            Ok(_) => { let _ = write!(w, " {:02x}", addr); }
+                            Err(_) => { let _ = write!(w, " --"); }
+                        }
+                    }
+                }
+                let _ = writeln!(w);
+            }
+        }
+        "read" => {
+            // i2c read <bus> <addr> <reg>
+            let parts: [&str; 3] = parse_args_3(args);
+            if let (Ok(bus), Ok(addr), Ok(reg)) = (
+                parse_u8(parts[0]), parse_hex_u8(parts[1]), parse_hex_u8(parts[2])
+            ) {
+                if bus > 6 { let _ = writeln!(w, "  error: bus 0–6"); return; }
+                let i2c = make_i2c(bus);
+                i2c.init(soc_raspi5::i2c::I2cSpeed::Standard);
+                let mut buf = [0u8; 1];
+                match i2c.write_read(addr, &[reg], &mut buf) {
+                    Ok(_) => { let _ = writeln!(w, "  bus {} addr 0x{:02X} reg 0x{:02X} = 0x{:02X}", bus, addr, reg, buf[0]); }
+                    Err(e) => { let _ = writeln!(w, "  error: {:?}", e); }
+                }
+            } else {
+                let _ = writeln!(w, "  usage: i2c read <bus> <addr> <reg>");
+            }
+        }
+        "write" => {
+            // i2c write <bus> <addr> <reg> <val>
+            let parts: [&str; 4] = parse_args_4(args);
+            if let (Ok(bus), Ok(addr), Ok(reg), Ok(val)) = (
+                parse_u8(parts[0]), parse_hex_u8(parts[1]),
+                parse_hex_u8(parts[2]), parse_hex_u8(parts[3])
+            ) {
+                if bus > 6 { let _ = writeln!(w, "  error: bus 0–6"); return; }
+                let i2c = make_i2c(bus);
+                i2c.init(soc_raspi5::i2c::I2cSpeed::Standard);
+                match i2c.write_to(addr, &[reg, val]) {
+                    Ok(_) => { let _ = writeln!(w, "  OK: wrote 0x{:02X} to reg 0x{:02X} on 0x{:02X}", val, reg, addr); }
+                    Err(e) => { let _ = writeln!(w, "  error: {:?}", e); }
+                }
+            } else {
+                let _ = writeln!(w, "  usage: i2c write <bus> <addr> <reg> <val>");
+            }
+        }
+        _ => {
+            let _ = writeln!(w, "  i2c subcommands: scan, read, write");
+        }
+    }
+}
+
+fn make_i2c(bus: u8) -> soc_raspi5::i2c::Rp1I2c {
+    match bus {
+        0 => soc_raspi5::i2c::Rp1I2c::i2c0(),
+        1 => soc_raspi5::i2c::Rp1I2c::i2c1(),
+        2 => soc_raspi5::i2c::Rp1I2c::i2c2(),
+        3 => soc_raspi5::i2c::Rp1I2c::i2c3(),
+        4 => soc_raspi5::i2c::Rp1I2c::i2c4(),
+        5 => soc_raspi5::i2c::Rp1I2c::i2c5(),
+        6 => soc_raspi5::i2c::Rp1I2c::i2c6(),
+        _ => soc_raspi5::i2c::Rp1I2c::i2c1(),
+    }
+}
+
+// ─── SPI command callback ────────────────────────────────────────────────
+
+fn spi_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    match sub {
+        "cfg" => {
+            // spi cfg <bus> <mode> <freq_div>
+            let parts: [&str; 3] = parse_args_3(args);
+            if let (Ok(bus), Ok(mode), Ok(div)) = (
+                parse_u8(parts[0]), parse_u8(parts[1]), parse_u16(parts[2])
+            ) {
+                if bus > 5 { let _ = writeln!(w, "  error: bus 0–5"); return; }
+                if mode > 3 { let _ = writeln!(w, "  error: mode 0–3"); return; }
+                let spi_mode = match mode {
+                    0 => soc_raspi5::spi::SpiMode::Mode0,
+                    1 => soc_raspi5::spi::SpiMode::Mode1,
+                    2 => soc_raspi5::spi::SpiMode::Mode2,
+                    _ => soc_raspi5::spi::SpiMode::Mode3,
+                };
+                let spi = make_spi(bus);
+                spi.init(spi_mode, div, 8);
+                let _ = writeln!(w, "  SPI{} configured: mode {}, divisor {}", bus, mode, div);
+            } else {
+                let _ = writeln!(w, "  usage: spi cfg <bus> <mode> <freq_div>");
+            }
+        }
+        "xfer" => {
+            // spi xfer <bus> <hex bytes...>
+            let (bus_s, hex_s) = split_at_space(args);
+            if let Ok(bus) = parse_u8(bus_s) {
+                if bus > 5 { let _ = writeln!(w, "  error: bus 0–5"); return; }
+                let mut tx = [0u8; 32];
+                let mut rx = [0u8; 32];
+                let mut len = 0usize;
+                for tok in hex_s.split_ascii_whitespace() {
+                    if len >= 32 { break; }
+                    if let Ok(b) = parse_hex_u8(tok) {
+                        tx[len] = b;
+                        len += 1;
+                    }
+                }
+                if len == 0 {
+                    let _ = writeln!(w, "  usage: spi xfer <bus> <hex bytes...>");
+                    return;
+                }
+                let spi = make_spi(bus);
+                spi.transfer(&tx[..len], &mut rx[..len]);
+                let _ = write!(w, "  TX:");
+                for i in 0..len { let _ = write!(w, " {:02X}", tx[i]); }
+                let _ = writeln!(w);
+                let _ = write!(w, "  RX:");
+                for i in 0..len { let _ = write!(w, " {:02X}", rx[i]); }
+                let _ = writeln!(w);
+            } else {
+                let _ = writeln!(w, "  usage: spi xfer <bus> <hex bytes...>");
+            }
+        }
+        _ => {
+            let _ = writeln!(w, "  spi subcommands: cfg, xfer");
+        }
+    }
+}
+
+fn make_spi(bus: u8) -> soc_raspi5::spi::Rp1Spi {
+    match bus {
+        0 => soc_raspi5::spi::Rp1Spi::spi0(),
+        1 => soc_raspi5::spi::Rp1Spi::spi1(),
+        2 => soc_raspi5::spi::Rp1Spi::spi2(),
+        3 => soc_raspi5::spi::Rp1Spi::spi3(),
+        4 => soc_raspi5::spi::Rp1Spi::spi4(),
+        5 => soc_raspi5::spi::Rp1Spi::spi5(),
+        _ => soc_raspi5::spi::Rp1Spi::spi0(),
+    }
+}
+
+// ─── Hardware info callback ──────────────────────────────────────────────
+
+fn hw_info(w: &mut dyn core::fmt::Write) {
+    soc_raspi5::board::write_hw_info(w);
+}
+
+fn get_temp_millic() -> i32 {
+    soc_raspi5::board::get_temperature()
+}
+
+// ─── Kernel log callback ────────────────────────────────────────────────
+
+fn dmesg_info(w: &mut dyn core::fmt::Write) {
+    let klog = unsafe { &*KLOG.0.get() };
+    klog.dump(w);
+}
+
+// ─── Reboot / shutdown ──────────────────────────────────────────────────
+
+fn do_reboot() {
+    soc_raspi5::board::reboot();
+}
+
+fn do_shutdown() {
+    soc_raspi5::board::shutdown();
+}
+
+// ─── Arg parsing helpers ────────────────────────────────────────────────
+
+fn split_at_space(s: &str) -> (&str, &str) {
+    let s = s.trim();
+    match s.find(' ') {
+        Some(i) => (s[..i].trim(), s[i + 1..].trim()),
+        None => (s, ""),
+    }
+}
+
+fn parse_u8(s: &str) -> Result<u8, ()> {
+    let s = s.trim();
+    if s.is_empty() { return Err(()); }
+    if s.starts_with("0x") || s.starts_with("0X") {
+        parse_hex_u8(s)
+    } else {
+        let mut val: u16 = 0;
+        for &b in s.as_bytes() {
+            if b < b'0' || b > b'9' { return Err(()); }
+            val = val * 10 + (b - b'0') as u16;
+            if val > 255 { return Err(()); }
+        }
+        Ok(val as u8)
+    }
+}
+
+fn parse_u16(s: &str) -> Result<u16, ()> {
+    let s = s.trim();
+    if s.is_empty() { return Err(()); }
+    let mut val: u32 = 0;
+    for &b in s.as_bytes() {
+        if b < b'0' || b > b'9' { return Err(()); }
+        val = val * 10 + (b - b'0') as u32;
+        if val > 65535 { return Err(()); }
+    }
+    Ok(val as u16)
+}
+
+fn parse_hex_u8(s: &str) -> Result<u8, ()> {
+    let s = s.trim();
+    let s = if s.starts_with("0x") || s.starts_with("0X") { &s[2..] } else { s };
+    if s.is_empty() || s.len() > 2 { return Err(()); }
+    let mut val: u8 = 0;
+    for &b in s.as_bytes() {
+        let nib = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return Err(()),
+        };
+        val = val * 16 + nib;
+    }
+    Ok(val)
+}
+
+fn parse_args_3(s: &str) -> [&str; 3] {
+    let mut result = [""; 3];
+    let mut rest = s.trim();
+    for slot in result.iter_mut().take(3) {
+        let (a, b) = split_at_space(rest);
+        *slot = a;
+        rest = b;
+    }
+    result
+}
+
+fn parse_args_4(s: &str) -> [&str; 4] {
+    let mut result = [""; 4];
+    let mut rest = s.trim();
+    for slot in result.iter_mut().take(4) {
+        let (a, b) = split_at_space(rest);
+        *slot = a;
+        rest = b;
+    }
+    result
 }

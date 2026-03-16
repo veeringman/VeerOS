@@ -202,6 +202,16 @@ unsafe impl Sync for TimerCell {}
 pub(crate) static TIMER: TimerCell = TimerCell(UnsafeCell::new(Clint::new()));
 
 // ---------------------------------------------------------------------------
+// Kernel log ring buffer
+// ---------------------------------------------------------------------------
+
+use microkernel::klog::KernelLog;
+
+pub(crate) struct KlogCell(pub UnsafeCell<KernelLog>);
+unsafe impl Sync for KlogCell {}
+pub(crate) static KLOG: KlogCell = KlogCell(UnsafeCell::new(KernelLog::new()));
+
+// ---------------------------------------------------------------------------
 // Idle task
 // ---------------------------------------------------------------------------
 
@@ -283,6 +293,14 @@ fn shell_task() -> ! {
         input_status: Some(input_status),
         usb_list: None,
         ble_hid_list: None,
+        gpio_cmd: None,
+        i2c_cmd: None,
+        spi_cmd: None,
+        hw_info: None,
+        get_temp_millic: None,
+        dmesg: Some(dmesg_info),
+        reboot: None,
+        shutdown: Some(do_shutdown),
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);
@@ -489,6 +507,14 @@ fn net_task() -> ! {
                         input_status: Some(input_status),
                         usb_list: None,
                         ble_hid_list: None,
+                        gpio_cmd: None,
+                        i2c_cmd: None,
+                        spi_cmd: None,
+                        hw_info: None,
+                        get_temp_millic: None,
+                        dmesg: Some(dmesg_info),
+                        reboot: None,
+                        shutdown: Some(do_shutdown),
                     };
                     let mut sh = Shell::new(env);
                     sh.run(&mut tcp_con);
@@ -922,6 +948,12 @@ fn input_status(w: &mut dyn core::fmt::Write) {
     input.write_status(w);
 }
 
+#[cfg(feature = "shell")]
+fn dmesg_info(w: &mut dyn core::fmt::Write) {
+    let klog = unsafe { &*KLOG.0.get() };
+    klog.dump(w);
+}
+
 // ---------------------------------------------------------------------------
 // QEMU power-off via SiFive Test device
 // ---------------------------------------------------------------------------
@@ -940,6 +972,12 @@ fn qemu_poweroff() -> ! {
         #[cfg(not(target_arch = "riscv32"))]
         core::hint::spin_loop();
     }
+}
+
+/// Wrapper for `ShellEnv::shutdown` which expects `fn()`.
+#[cfg(feature = "shell")]
+fn do_shutdown() {
+    qemu_poweroff();
 }
 
 /// RISC-V initial mstatus: MPIE=1 (bit 7) so mret enables interrupts,

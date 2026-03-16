@@ -48,3 +48,5 @@ pub mod async_rt;
 pub mod socket;
 pub mod user;
 pub mod fs;
+pub mod gpio;
+pub mod hw;

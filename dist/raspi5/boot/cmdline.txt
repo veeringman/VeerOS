@@ -1,0 +1,4 @@
+# VeerOS — RPi5 kernel command line
+# The firmware passes this to the kernel in register x0 (ATAGS/DTB pointer).
+# For bare-metal we don't parse it, but it's here for documentation.
+# If you later add DTB parsing, the firmware will pass the DTB address instead.

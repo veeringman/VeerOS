@@ -91,6 +91,24 @@ pub struct ShellEnv {
     pub usb_list: Option<fn(&mut dyn core::fmt::Write)>,
     /// List connected BLE HID devices. Writes output to writer.
     pub ble_hid_list: Option<fn(&mut dyn core::fmt::Write)>,
+
+    // ── Hardware / GPIO / bus callbacks ───────────────────────────────
+    /// Handle `gpio <subcommand> <args>` and write output.
+    pub gpio_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+    /// Handle `i2c <subcommand> <args>` and write output.
+    pub i2c_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+    /// Handle `spi <subcommand> <args>` and write output.
+    pub spi_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+    /// Write hardware info (board, memory, clocks, thermal) to writer.
+    pub hw_info: Option<fn(&mut dyn core::fmt::Write)>,
+    /// Read SoC temperature in millidegrees C. Returns 0 if unavailable.
+    pub get_temp_millic: Option<fn() -> i32>,
+    /// Write kernel log ring buffer contents to writer.
+    pub dmesg: Option<fn(&mut dyn core::fmt::Write)>,
+    /// Reboot the system. Should not return.
+    pub reboot: Option<fn()>,
+    /// Halt / power off the system. Should not return.
+    pub shutdown: Option<fn()>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -251,6 +269,15 @@ impl Shell {
             // ── input device commands ────────────────────
             "input" => self.cmd_input(con, args),
             "lsusb" => self.cmd_lsusb(con),
+            // ── hardware / bus commands ──────────────────
+            "gpio" => self.cmd_gpio(con, args),
+            "i2c" | "i2cdetect" => self.cmd_i2c(con, args),
+            "spi" => self.cmd_spi(con, args),
+            "hwinfo" | "devinfo" => self.cmd_hwinfo(con),
+            "temp" => self.cmd_temp(con),
+            "dmesg" => self.cmd_dmesg(con),
+            "reboot" => self.cmd_reboot(con),
+            "shutdown" | "halt" | "poweroff" => self.cmd_shutdown(con),
             "exit" | "quit" => {
                 let _ = writeln!(con, "Goodbye.");
                 return true;
@@ -311,6 +338,15 @@ impl Shell {
         let _ = writeln!(con, "  ────────── input ─────────────────");
         let _ = writeln!(con, "  input      Input device status");
         let _ = writeln!(con, "  lsusb      List USB devices");
+        let _ = writeln!(con, "  ────────── hardware ──────────────");
+        let _ = writeln!(con, "  gpio       GPIO pin control (list/read/write/mode)");
+        let _ = writeln!(con, "  i2c        I\u{00B2}C bus (scan/read/write)");
+        let _ = writeln!(con, "  spi        SPI bus (cfg/xfer)");
+        let _ = writeln!(con, "  hwinfo     Hardware info (board/memory/thermal)");
+        let _ = writeln!(con, "  temp       SoC temperature readout");
+        let _ = writeln!(con, "  dmesg      Kernel log buffer");
+        let _ = writeln!(con, "  reboot     Reboot the system");
+        let _ = writeln!(con, "  shutdown   Halt / power off");
         let _ = writeln!(con, "  exit       Exit the shell");
         let _ = writeln!(con, "");
     }
@@ -954,11 +990,122 @@ impl Shell {
             None => { let _ = writeln!(con, "lsusb: not available on this platform"); }
         }
     }
+
+    // ── GPIO ─────────────────────────────────────────────────────────
+
+    fn cmd_gpio<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        let (sub, rest) = split_first_word(args);
+        match self.env.gpio_cmd {
+            Some(f) => {
+                if sub.is_empty() {
+                    f("list", "", con);
+                } else {
+                    f(sub, rest, con);
+                }
+            }
+            None => { let _ = writeln!(con, "gpio: not available on this platform"); }
+        }
+    }
+
+    // ── I2C ──────────────────────────────────────────────────────────
+
+    fn cmd_i2c<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        let (sub, rest) = split_first_word(args);
+        match self.env.i2c_cmd {
+            Some(f) => {
+                if sub.is_empty() {
+                    let _ = writeln!(con, "Usage: i2c <scan|read|write> [bus] [addr] [reg] [val]");
+                    let _ = writeln!(con, "  i2c scan [bus]         Scan for devices (bus 0-6, default 1)");
+                    let _ = writeln!(con, "  i2c read <bus> <addr> <reg>    Read register");
+                    let _ = writeln!(con, "  i2c write <bus> <addr> <reg> <val>  Write register");
+                } else {
+                    f(sub, rest, con);
+                }
+            }
+            None => { let _ = writeln!(con, "i2c: not available on this platform"); }
+        }
+    }
+
+    // ── SPI ──────────────────────────────────────────────────────────
+
+    fn cmd_spi<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        let (sub, rest) = split_first_word(args);
+        match self.env.spi_cmd {
+            Some(f) => {
+                if sub.is_empty() {
+                    let _ = writeln!(con, "Usage: spi <xfer|cfg> [bus] [data...]");
+                    let _ = writeln!(con, "  spi cfg <bus> <mode> <freq_div>  Configure SPI bus");
+                    let _ = writeln!(con, "  spi xfer <bus> <hex_bytes>       Transfer bytes");
+                } else {
+                    f(sub, rest, con);
+                }
+            }
+            None => { let _ = writeln!(con, "spi: not available on this platform"); }
+        }
+    }
+
+    // ── Hardware info ────────────────────────────────────────────────
+
+    fn cmd_hwinfo<S: Serial>(&self, con: &mut Console<S>) {
+        match self.env.hw_info {
+            Some(f) => f(con),
+            None => { let _ = writeln!(con, "hwinfo: not available on this platform"); }
+        }
+    }
+
+    fn cmd_temp<S: Serial>(&self, con: &mut Console<S>) {
+        match self.env.get_temp_millic {
+            Some(f) => {
+                let mc = f();
+                let deg = mc / 1000;
+                let frac = ((mc % 1000).unsigned_abs() / 100) as u32;
+                let _ = writeln!(con, "  SoC temperature: {}.{}°C", deg, frac);
+            }
+            None => { let _ = writeln!(con, "temp: not available on this platform"); }
+        }
+    }
+
+    fn cmd_dmesg<S: Serial>(&self, con: &mut Console<S>) {
+        match self.env.dmesg {
+            Some(f) => f(con),
+            None => { let _ = writeln!(con, "dmesg: no kernel log available"); }
+        }
+    }
+
+    fn cmd_reboot<S: Serial>(&self, con: &mut Console<S>) {
+        match self.env.reboot {
+            Some(f) => {
+                let _ = writeln!(con, "Rebooting...");
+                f();
+            }
+            None => { let _ = writeln!(con, "reboot: not available on this platform"); }
+        }
+    }
+
+    fn cmd_shutdown<S: Serial>(&self, con: &mut Console<S>) {
+        match self.env.shutdown {
+            Some(f) => {
+                let _ = writeln!(con, "Shutting down...");
+                f();
+            }
+            None => { let _ = writeln!(con, "shutdown: not available on this platform"); }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Split a string at the first whitespace boundary, returning (first_word, rest).
+/// Both halves are trimmed of leading/trailing whitespace.
+fn split_first_word(s: &str) -> (&str, &str) {
+    let s = s.trim();
+    match s.find(' ') {
+        Some(i) => (s[..i].trim(), s[i + 1..].trim()),
+        None => (s, ""),
+    }
+}
 
 /// Simple no_std usize parser.
 fn parse_usize_simple(s: &str) -> Result<usize, ()> {
@@ -1807,6 +1954,125 @@ Standard directories at boot: /, /dev, /tmp, /etc
 Boot files: /etc/motd, /etc/hostname
 
 See also: ls, cat, stat, tree"),
+
+    ("gpio", "\
+GPIO(1) — GPIO pin control
+
+Commands:
+  gpio              — list all pin states
+  gpio list         — same as above
+  gpio read <pin>   — read digital level of a specific pin
+  gpio write <pin> <0|1>  — set pin output level
+  gpio mode <pin> <in|out>  — set pin direction
+  gpio pull <pin> <none|up|down>  — set pull resistor
+
+Examples:
+  gpio                  Show all 28 GPIO pins
+  gpio read 17          Read GPIO 17
+  gpio mode 18 out      Set GPIO 18 to output
+  gpio write 18 1       Set GPIO 18 high
+  gpio pull 4 up        Enable pull-up on GPIO 4
+
+Pin numbers are 0–27 on Raspberry Pi 5 (RP1 southbridge).
+
+See also: hwinfo, i2c, spi"),
+
+    ("i2c", "\
+I2C(1) — I\u{00B2}C bus commands
+
+Commands:
+  i2c scan [bus]                Scan for responsive devices
+  i2c read <bus> <addr> <reg>   Read one byte from device
+  i2c write <bus> <addr> <reg> <val>  Write one byte to device
+
+Arguments:
+  bus   — I2C bus number (0-6, default 1)
+  addr  — 7-bit device address (decimal or 0xNN hex)
+  reg   — register address (decimal or 0xNN hex)
+  val   — byte value (decimal or 0xNN hex)
+
+Examples:
+  i2c scan 1           Scan bus 1 for devices
+  i2c read 1 0x48 0    Read register 0 from device 0x48 on bus 1
+  i2c write 1 0x20 6 0xFF  Write 0xFF to register 6 on device 0x20
+
+See also: gpio, spi, hwinfo"),
+
+    ("spi", "\
+SPI(1) — SPI bus commands
+
+Commands:
+  spi cfg <bus> <mode> <freq_div>  Configure SPI bus
+  spi xfer <bus> <hex_bytes>       Full-duplex transfer
+
+Arguments:
+  bus       — SPI bus number (0-5)
+  mode      — SPI mode (0-3)
+  freq_div  — clock divisor (even number, 2-65534)
+  hex_bytes — space-separated hex bytes to transmit
+
+Examples:
+  spi cfg 0 0 64        Configure SPI0: mode 0, divisor 64
+  spi xfer 0 9F 00 00   Send 3 bytes, print responses (JEDEC read)
+
+See also: gpio, i2c, hwinfo"),
+
+    ("hwinfo", "\
+HWINFO(1) — Hardware information
+
+Displays platform hardware details:
+  - Board model and revision
+  - Memory size
+  - SoC temperature
+  - ARM/core clock frequency
+  - Serial number
+  - MAC address (if available)
+
+Alias: devinfo
+
+See also: sysinfo, temp, gpio"),
+
+    ("temp", "\
+TEMP(1) — SoC temperature
+
+Reads and displays the SoC temperature from hardware sensors.
+
+Example output:
+  SoC temperature: 42.3°C
+
+Uses VideoCore mailbox (RPi) or internal ADC (ESP32).
+
+See also: hwinfo, sysinfo"),
+
+    ("dmesg", "\
+DMESG(1) — Kernel log buffer
+
+Displays messages from the kernel log ring buffer, including boot
+messages, driver init, interrupts, errors, and hardware detection.
+
+The log is a fixed-size ring buffer (newest entries overwrite oldest).
+
+See also: sysinfo, hwinfo, drivers"),
+
+    ("reboot", "\
+REBOOT(1) — Reboot the system
+
+Triggers a hardware reset. Uses the watchdog timer (RPi) or
+software reset register (ESP32).
+
+Warning: rebooting clears all in-memory state.
+
+See also: shutdown"),
+
+    ("shutdown", "\
+SHUTDOWN(1) — Halt or power off
+
+Halts the CPU. On Raspberry Pi, enters low-power halt via firmware.
+On emulators (QEMU), exits the emulator.
+
+Aliases: halt, poweroff
+
+See also: reboot"),
 ];
 
 #[cfg(test)]

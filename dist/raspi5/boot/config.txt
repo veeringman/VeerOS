@@ -1,0 +1,53 @@
+# VeerOS — Raspberry Pi 5 boot configuration
+# Place this file on the FAT32 boot partition of the SD card.
+#
+# The RPi firmware reads this before loading the kernel.
+# See: https://www.raspberrypi.com/documentation/computers/config_txt.html
+
+# ── Core settings ─────────────────────────────────────────────────────────
+
+# Boot in 64-bit (AArch64) mode — required for VeerOS
+arm_64bit=1
+
+# Load our kernel image (default is kernel8.img for 64-bit)
+kernel=kernel8.img
+
+# Disable Linux device-tree overlay — we're bare-metal
+device_tree=
+
+# ── UART console ──────────────────────────────────────────────────────────
+
+# Enable mini-UART on GPIO 14/15 (pins 8/10) at 115200 baud.
+# This gives you the VeerOS shell over a serial adapter.
+enable_uart=1
+
+# Fix mini-UART clock so baud rate is stable
+core_freq=250
+core_freq_min=250
+
+# ── GPU / display ─────────────────────────────────────────────────────────
+
+# Allocate 64 MB to the VideoCore (enough for a framebuffer console)
+gpu_mem=64
+
+# Disable firmware splash screen for faster boot
+disable_splash=1
+
+# ── Hardware ──────────────────────────────────────────────────────────────
+
+# Enable I2C on GPIO 2/3 (bus 1, header pins 3/5)
+dtparam=i2c_arm=on
+
+# Enable SPI on GPIO 7-11 (bus 0, header pins 19/21/23/24/26)
+dtparam=spi=on
+
+# Disable Bluetooth (frees up the PL011 UART if needed later)
+dtoverlay=disable-bt
+
+# ── Boot behaviour ────────────────────────────────────────────────────────
+
+# Don't wait for a keyboard — go straight to kernel
+boot_delay=0
+
+# Disable overscan compensation (clean framebuffer edges)
+disable_overscan=1

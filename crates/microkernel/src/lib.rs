@@ -9,6 +9,7 @@ pub mod futex;
 pub mod hid;
 pub mod input;
 pub mod ipc;
+pub mod klog;
 pub mod poll;
 pub mod process;
 pub mod ramfs;

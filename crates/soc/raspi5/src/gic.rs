@@ -91,9 +91,13 @@ impl InterruptController for Gic400 {
         }
     }
 
-    fn disable_interrupt(&self, _irq: u16) {
-        // ISENABLER is set-enable — use ICENABLER (offset 0x180) for disable.
-        // Stubbed for now; disable via GICD_ICENABLER when needed.
+    fn disable_interrupt(&self, irq: u16) {
+        let bank = (irq / 32) as usize;
+        let bit = irq % 32;
+        unsafe {
+            let addr = GICD_BASE + 0x180 + bank * 4; // GICD_ICENABLER
+            mmio_write(addr, 1 << bit);
+        }
     }
 
     fn set_priority(&self, irq: u16, priority: u8) {

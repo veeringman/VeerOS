@@ -235,6 +235,16 @@ unsafe impl Sync for RadioCell {}
 #[cfg(feature = "ieee802154")]
 static RADIO_802154: RadioCell = RadioCell(UnsafeCell::new(RadioManager::new()));
 
+// ---------------------------------------------------------------------------
+// Kernel log ring buffer
+// ---------------------------------------------------------------------------
+
+use microkernel::klog::KernelLog;
+
+pub(crate) struct KlogCell(pub UnsafeCell<KernelLog>);
+unsafe impl Sync for KlogCell {}
+pub(crate) static KLOG: KlogCell = KlogCell(UnsafeCell::new(KernelLog::new()));
+
 /// RISC-V initial mstatus: MPIE=1 so mret enables interrupts, MPP=M-mode.
 const INITIAL_MSTATUS: usize = (1 << 7) | (3 << 11);
 
@@ -313,6 +323,14 @@ fn shell_task() -> ! {
         input_status: Some(input_status),
         usb_list: None,
         ble_hid_list: Some(ble_hid_list),
+        gpio_cmd: None,
+        i2c_cmd: None,
+        spi_cmd: None,
+        hw_info: None,
+        get_temp_millic: None,
+        dmesg: Some(dmesg_info),
+        reboot: None,
+        shutdown: None,
     };
     let mut sh = Shell::new(env);
     loop {
@@ -914,6 +932,11 @@ fn ble_hid_list(w: &mut dyn core::fmt::Write) {
     let _ = writeln!(w, "  Status: ready (ESP32-C6 BLE available)");
     let _ = writeln!(w, "  Max devices: 4");
     let _ = writeln!(w, "  Use 'input scan' to discover BLE HID peripherals");
+}
+
+fn dmesg_info(w: &mut dyn core::fmt::Write) {
+    let klog = unsafe { &*KLOG.0.get() };
+    klog.dump(w);
 }
 
 /// Shell callback for `wifi <sub> <args>`.

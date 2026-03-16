@@ -157,6 +157,14 @@ fn main() {
         input_status: None,
         usb_list: None,
         ble_hid_list: None,
+        gpio_cmd: None,
+        i2c_cmd: None,
+        spi_cmd: None,
+        hw_info: None,
+        get_temp_millic: None,
+        dmesg: None,
+        reboot: None,
+        shutdown: None,
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! EMMC2 / SDHCI SD card driver for Raspberry Pi 5 (BCM2712).
 //!
 //! Implements `arch::BlockDevice` for the BCM2712's EMMC2 host controller.

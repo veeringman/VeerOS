@@ -11,13 +11,17 @@
 
 #![no_std]
 
-use arch::Platform;
+use arch::{Platform, TickTimer};
 
 pub mod gic;
+pub mod gpio;
+pub mod i2c;
 pub mod mem;
+pub mod spi;
 pub mod timer;
 pub mod uart;
 pub mod mailbox;
+pub mod board;
 pub mod fb;
 pub mod font;
 pub mod fbcon;
@@ -37,9 +41,25 @@ impl Platform for Raspi5 {
     fn name(&self) -> &'static str {
         "Raspberry Pi 5 (BCM2712)"
     }
-    fn init_cpu(&self) {}
-    fn init_interrupts(&self) {}
-    fn init_timer(&self) {}
+    fn init_cpu(&self) {
+        // CPU already initialised by RPi firmware (EL2→EL1 done in _start).
+        // Enable FP/NEON: CPACR_EL1 FPEN = 0b11.
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("mrs {tmp}, cpacr_el1",
+                             "orr {tmp}, {tmp}, #(0x3 << 20)",
+                             "msr cpacr_el1, {tmp}",
+                             "isb",
+                             tmp = out(reg) _);
+        }
+    }
+    fn init_interrupts(&self) {
+        gic::Gic400::new().init();
+    }
+    fn init_timer(&self) {
+        let t = timer::ArmGenericTimer::new();
+        t.configure_tick(10_000); // 10 ms tick
+    }
 }
 
 /// Return a PL011 UART handle (firmware-initialised).
