@@ -119,3 +119,58 @@ pub fn syscall4(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> usize 
     }
     ret
 }
+
+/// Issue a syscall with 5 arguments.  Returns `a0`.
+#[inline(always)]
+pub fn syscall5(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> usize {
+    let ret: usize;
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("x17") nr,
+            inlateout("x10") a0 => ret,
+            in("x11") a1,
+            in("x12") a2,
+            in("x13") a3,
+            in("x14") a4,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        let _ = (nr, a0, a1, a2, a3, a4);
+        ret = 0;
+    }
+    ret
+}
+
+/// Issue a syscall that returns 4 values through `a0`–`a3`.
+#[inline(always)]
+pub fn syscall_ret4(nr: usize, a0: usize) -> (usize, usize, usize, usize) {
+    let r0: usize;
+    let r1: usize;
+    let r2: usize;
+    let r3: usize;
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("x17") nr,
+            inlateout("x10") a0 => r0,
+            lateout("x11") r1,
+            lateout("x12") r2,
+            lateout("x13") r3,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        let _ = (nr, a0);
+        r0 = 0;
+        r1 = 0;
+        r2 = 0;
+        r3 = 0;
+    }
+    (r0, r1, r2, r3)
+}

@@ -1,169 +1,21 @@
 //! Trap dispatcher for the QEMU `virt` RISC-V kernel.
 //!
-//! Reuses the same global_asm trap entry/exit as kernel-esp32.
-//! The dispatch logic differs: QEMU virt uses standard CLINT (mcause 7
-//! for machine timer) instead of the ESP32 interrupt matrix.
+//! The trap entry/exit assembly (`_veer_trap_entry`, `_veer_start_first_task`)
+//! lives in `arch::riscv32` and is shared by all RISC-V 32-bit kernels.
+//! This file provides the board-specific Rust dispatcher that the assembly
+//! calls into.
 
 #[allow(unused_imports)]
 use arch::{TaskContext, TickTimer};
+#[allow(unused_imports)]
+use arch::riscv32::pmp;
 #[allow(unused_imports)]
 use microkernel::task::Scheduler;
 #[allow(unused_imports)]
 use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RISC-V trap entry / exit (same for all RISC-V kernels)
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[cfg(target_arch = "riscv32")]
-core::arch::global_asm!(
-    r#"
-.section .text._veer_trap_entry
-.global  _veer_trap_entry
-.balign  4
-
-_veer_trap_entry:
-    addi  sp, sp, -136
-
-    sw  x1,   4(sp)
-    sw  x2,   8(sp)
-    sw  x3,  12(sp)
-    sw  x4,  16(sp)
-    sw  x5,  20(sp)
-    sw  x6,  24(sp)
-    sw  x7,  28(sp)
-    sw  x8,  32(sp)
-    sw  x9,  36(sp)
-    sw  x10, 40(sp)
-    sw  x11, 44(sp)
-    sw  x12, 48(sp)
-    sw  x13, 52(sp)
-    sw  x14, 56(sp)
-    sw  x15, 60(sp)
-    sw  x16, 64(sp)
-    sw  x17, 68(sp)
-    sw  x18, 72(sp)
-    sw  x19, 76(sp)
-    sw  x20, 80(sp)
-    sw  x21, 84(sp)
-    sw  x22, 88(sp)
-    sw  x23, 92(sp)
-    sw  x24, 96(sp)
-    sw  x25, 100(sp)
-    sw  x26, 104(sp)
-    sw  x27, 108(sp)
-    sw  x28, 112(sp)
-    sw  x29, 116(sp)
-    sw  x30, 120(sp)
-    sw  x31, 124(sp)
-
-    addi  t0, sp, 136
-    sw    t0, 8(sp)
-
-    csrr  t0, mepc
-    sw    t0, 128(sp)
-    csrr  t0, mstatus
-    sw    t0, 132(sp)
-
-    mv    a0, sp
-    call  _veer_trap_dispatch
-    mv    sp, a0
-
-    lw    t0, 128(sp)
-    csrw  mepc, t0
-    lw    t0, 132(sp)
-    csrw  mstatus, t0
-
-    lw  x1,   4(sp)
-    lw  x3,  12(sp)
-    lw  x4,  16(sp)
-    lw  x5,  20(sp)
-    lw  x6,  24(sp)
-    lw  x7,  28(sp)
-    lw  x8,  32(sp)
-    lw  x9,  36(sp)
-    lw  x10, 40(sp)
-    lw  x11, 44(sp)
-    lw  x12, 48(sp)
-    lw  x13, 52(sp)
-    lw  x14, 56(sp)
-    lw  x15, 60(sp)
-    lw  x16, 64(sp)
-    lw  x17, 68(sp)
-    lw  x18, 72(sp)
-    lw  x19, 76(sp)
-    lw  x20, 80(sp)
-    lw  x21, 84(sp)
-    lw  x22, 88(sp)
-    lw  x23, 92(sp)
-    lw  x24, 96(sp)
-    lw  x25, 100(sp)
-    lw  x26, 104(sp)
-    lw  x27, 108(sp)
-    lw  x28, 112(sp)
-    lw  x29, 116(sp)
-    lw  x30, 120(sp)
-    lw  x31, 124(sp)
-
-    lw  x2, 8(sp)
-
-    mret
-
-# ─────────────────────────────────────────────────────────────────
-# Start-first-task: load a TaskContext and mret into user code.
-#   a0 = pointer to TaskContext
-# ─────────────────────────────────────────────────────────────────
-.section .text._veer_start_first_task
-.global  _veer_start_first_task
-.balign  4
-
-_veer_start_first_task:
-    mv    sp, a0
-
-    lw    t0, 128(sp)
-    csrw  mepc, t0
-    lw    t0, 132(sp)
-    csrw  mstatus, t0
-
-    lw  x1,   4(sp)
-    lw  x3,  12(sp)
-    lw  x4,  16(sp)
-    lw  x5,  20(sp)
-    lw  x6,  24(sp)
-    lw  x7,  28(sp)
-    lw  x8,  32(sp)
-    lw  x9,  36(sp)
-    lw  x10, 40(sp)
-    lw  x11, 44(sp)
-    lw  x12, 48(sp)
-    lw  x13, 52(sp)
-    lw  x14, 56(sp)
-    lw  x15, 60(sp)
-    lw  x16, 64(sp)
-    lw  x17, 68(sp)
-    lw  x18, 72(sp)
-    lw  x19, 76(sp)
-    lw  x20, 80(sp)
-    lw  x21, 84(sp)
-    lw  x22, 88(sp)
-    lw  x23, 92(sp)
-    lw  x24, 96(sp)
-    lw  x25, 100(sp)
-    lw  x26, 104(sp)
-    lw  x27, 108(sp)
-    lw  x28, 112(sp)
-    lw  x29, 116(sp)
-    lw  x30, 120(sp)
-    lw  x31, 124(sp)
-
-    lw  x2, 8(sp)
-
-    mret
-"#
-);
+use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // mcause constants (standard RISC-V privilege spec)
@@ -175,6 +27,35 @@ const MCAUSE_INTERRUPT_BIT: usize = 1 << 31;
 const MCAUSE_MACHINE_TIMER: usize = 7;
 #[allow(dead_code)]
 const MCAUSE_ECALL_MMODE: usize = 11;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PMP helper — apply memory regions for the current task
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Program PMP entries for the currently selected task.
+///
+/// Combines process-level regions (code, data, heap) with
+/// thread-level regions (stack + guard) and programs PMP.
+#[cfg(target_arch = "riscv32")]
+unsafe fn apply_pmp_for_current(sched: &Scheduler) {
+    let cur = sched.current;
+    if cur < sched.tasks.len() {
+        let tcb = &sched.tasks[cur];
+        let pid = tcb.process_id;
+        let procs = unsafe { &*PROCESSES.0.get() };
+        if pid < microkernel::process::MAX_PROCESSES {
+            let p = &procs.processes[pid];
+            pmp::apply_combined_regions(
+                &p.regions[..p.region_count],
+                p.region_count,
+                &tcb.regions,
+                tcb.region_count,
+            );
+        } else {
+            pmp::apply_task_regions(&tcb.regions, tcb.region_count);
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Rust trap dispatcher
@@ -217,7 +98,16 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext) -> *mut TaskContext {
 
     let need_switch = sched.tick();
     dispatch::wake_sleepers(sched);
+
+    // Wake poll-blocked tasks whose events fired or timeout expired.
+    let ipc = unsafe { &*IPC.0.get() };
+    let channels = unsafe { &*CHANNELS.0.get() };
+    let poll = unsafe { &mut *POLL.0.get() };
+    microkernel::poll::wake_poll_waiters(poll, sched, ipc, channels);
+
     if need_switch {
+        // Apply PMP for the new task before returning its context.
+        apply_pmp_for_current(sched);
         if let Some(new_ctx) = sched.current_context_mut() {
             return new_ctx as *mut TaskContext;
         }
@@ -232,6 +122,18 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
             let sched = unsafe { &mut *SCHEDULER.0.get() };
             let ipc = unsafe { &mut *IPC.0.get() };
             let heap = unsafe { &mut *HEAP.0.get() };
+            let futex = unsafe { &mut *FUTEX.0.get() };
+            let channels = unsafe { &mut *CHANNELS.0.get() };
+
+            let poll = unsafe { &mut *POLL.0.get() };
+            let processes = unsafe { &mut *PROCESSES.0.get() };
+            let sockets = unsafe { &mut *SOCKETS.0.get() };
+            let users = unsafe { &mut *USERS.0.get() };
+            let inodes = unsafe { &mut *INODES.0.get() };
+            let ramfs = unsafe { &mut *RAMFS.0.get() };
+            let fat32 = unsafe { &mut *FAT32.0.get() };
+            let mounts = unsafe { &mut *MOUNTS.0.get() };
+            let input = unsafe { &mut *INPUT.0.get() };
 
             let action = unsafe {
                 dispatch::dispatch(
@@ -239,6 +141,17 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                     sched,
                     ipc,
                     heap,
+                    futex,
+                    channels,
+                    poll,
+                    processes,
+                    sockets,
+                    users,
+                    inodes,
+                    ramfs,
+                    fat32,
+                    mounts,
+                    input,
                     crate::console_write_byte,
                     crate::console_read_byte,
                 )
@@ -253,6 +166,8 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                         use microkernel::task::TaskState;
                         sched.current = next;
                         sched.tasks[next].state = TaskState::Running;
+                        // Apply PMP before returning the new context pointer.
+                        apply_pmp_for_current(sched);
                         &mut sched.tasks[next].context as *mut TaskContext
                     } else {
                         ctx

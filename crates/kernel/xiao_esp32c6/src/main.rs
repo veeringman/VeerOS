@@ -6,14 +6,16 @@ mod trap;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 
-use arch::{Console, InterruptController, TickTimer};
+use arch::{Console, InterruptController, SavedContext, TickTimer};
 use soc_esp32::{
     default_serial, interrupt_controller, system_timer,
     systimer::SysTimer, Esp32Riscv,
 };
 use microkernel::Kernel;
 use microkernel::alloc::Heap;
+use microkernel::channel::Channels;
 use microkernel::driver::{DriverCaps, DriverRegistry, MemRegion};
+use microkernel::futex::FutexTable;
 use microkernel::ipc::Ipc;
 use microkernel::task::Scheduler;
 #[cfg(feature = "shell")]
@@ -67,6 +69,112 @@ pub(crate) struct IpcCell(pub UnsafeCell<Ipc>);
 unsafe impl Sync for IpcCell {}
 #[allow(dead_code)]
 pub(crate) static IPC: IpcCell = IpcCell(UnsafeCell::new(Ipc::new()));
+
+// ---------------------------------------------------------------------------
+// Futex table
+// ---------------------------------------------------------------------------
+
+pub(crate) struct FutexCell(pub UnsafeCell<FutexTable>);
+unsafe impl Sync for FutexCell {}
+pub(crate) static FUTEX: FutexCell = FutexCell(UnsafeCell::new(FutexTable::new()));
+
+// ---------------------------------------------------------------------------
+// Channel pool
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ChannelCell(pub UnsafeCell<Channels>);
+unsafe impl Sync for ChannelCell {}
+pub(crate) static CHANNELS: ChannelCell = ChannelCell(UnsafeCell::new(Channels::new()));
+
+// ---------------------------------------------------------------------------
+// Poll table
+// ---------------------------------------------------------------------------
+
+use microkernel::poll::PollTable;
+
+pub(crate) struct PollCell(pub UnsafeCell<PollTable>);
+unsafe impl Sync for PollCell {}
+pub(crate) static POLL: PollCell = PollCell(UnsafeCell::new(PollTable::new()));
+
+// ---------------------------------------------------------------------------
+// Process table
+// ---------------------------------------------------------------------------
+
+use microkernel::process::ProcessTable;
+
+pub(crate) struct ProcessCell(pub UnsafeCell<ProcessTable>);
+unsafe impl Sync for ProcessCell {}
+pub(crate) static PROCESSES: ProcessCell = ProcessCell(UnsafeCell::new(ProcessTable::new()));
+
+// ---------------------------------------------------------------------------
+// Socket table
+// ---------------------------------------------------------------------------
+
+use microkernel::socket::SocketTable;
+
+pub(crate) struct SocketCell(pub UnsafeCell<SocketTable>);
+unsafe impl Sync for SocketCell {}
+pub(crate) static SOCKETS: SocketCell = SocketCell(UnsafeCell::new(SocketTable::new()));
+
+// ---------------------------------------------------------------------------
+// User table
+// ---------------------------------------------------------------------------
+
+use microkernel::user::UserTable;
+
+pub(crate) struct UserCell(pub UnsafeCell<UserTable>);
+unsafe impl Sync for UserCell {}
+pub(crate) static USERS: UserCell = UserCell(UnsafeCell::new(UserTable::new()));
+
+// ---------------------------------------------------------------------------
+// VFS inode table
+// ---------------------------------------------------------------------------
+
+use microkernel::vfs::InodeTable;
+
+pub(crate) struct InodeCell(pub UnsafeCell<InodeTable>);
+unsafe impl Sync for InodeCell {}
+pub(crate) static INODES: InodeCell = InodeCell(UnsafeCell::new(InodeTable::new()));
+
+// ---------------------------------------------------------------------------
+// RamFS
+// ---------------------------------------------------------------------------
+
+use microkernel::ramfs::RamFs;
+
+pub(crate) struct RamFsCell(pub UnsafeCell<RamFs>);
+unsafe impl Sync for RamFsCell {}
+pub(crate) static RAMFS: RamFsCell = RamFsCell(UnsafeCell::new(RamFs::new()));
+
+// ---------------------------------------------------------------------------
+// FAT32 filesystem state
+// ---------------------------------------------------------------------------
+
+use microkernel::fat32::Fat32;
+
+pub(crate) struct Fat32Cell(pub UnsafeCell<Fat32>);
+unsafe impl Sync for Fat32Cell {}
+pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(Fat32::new()));
+
+// ---------------------------------------------------------------------------
+// Mount table
+// ---------------------------------------------------------------------------
+
+use microkernel::vfs::MountTable;
+
+pub(crate) struct MountCell(pub UnsafeCell<MountTable>);
+unsafe impl Sync for MountCell {}
+pub(crate) static MOUNTS: MountCell = MountCell(UnsafeCell::new(MountTable::new()));
+
+// ---------------------------------------------------------------------------
+// Input subsystem
+// ---------------------------------------------------------------------------
+
+use microkernel::input::InputSubsystem;
+
+pub(crate) struct InputCell(pub UnsafeCell<InputSubsystem>);
+unsafe impl Sync for InputCell {}
+pub(crate) static INPUT: InputCell = InputCell(UnsafeCell::new(InputSubsystem::new()));
 
 // ---------------------------------------------------------------------------
 // Static timer handle (used by the trap dispatcher to ack interrupts)
@@ -185,6 +293,26 @@ fn shell_task() -> ! {
         zigbee_cmd: Some(zigbee_command),
         #[cfg(not(feature = "ieee802154"))]
         zigbee_cmd: None,
+        get_current_user: Some(get_current_user),
+        get_user_list: Some(write_user_list),
+        vfs_list_dir: Some(vfs_list_dir),
+        vfs_read_file: Some(vfs_read_file),
+        vfs_write_file: Some(vfs_write_file),
+        vfs_mkdir: Some(vfs_mkdir),
+        vfs_stat: Some(vfs_stat),
+        vfs_unlink: Some(vfs_unlink),
+        vfs_rename: Some(vfs_rename),
+        vfs_getcwd: Some(vfs_getcwd),
+        vfs_chdir: Some(vfs_chdir),
+        vfs_tree: Some(vfs_tree),
+        vfs_touch: Some(vfs_touch),
+        mount_list: Some(mount_list),
+        mount_fs: None,
+        umount_fs: None,
+        lsblk: Some(lsblk_info),
+        input_status: Some(input_status),
+        usb_list: None,
+        ble_hid_list: Some(ble_hid_list),
     };
     let mut sh = Shell::new(env);
     loop {
@@ -356,15 +484,45 @@ pub extern "C" fn _rust_start() -> ! {
     unsafe { *TIMER.0.get() = timer; }
     let _ = writeln!(con, "[boot] systimer tick @ {} us", TICK_PERIOD_US);
 
+    // ── VFS initialisation ───────────────────────────────────
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let ramfs = &mut *RAMFS.0.get();
+        inodes.init_root();
+        let dev_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/dev").unwrap_or(microkernel::vfs::NO_INODE);
+        if dev_id != microkernel::vfs::NO_INODE {
+            inodes.create_device_in(dev_id, "null", 0, 0);
+            inodes.create_device_in(dev_id, "zero", 0, 1);
+            inodes.create_device_in(dev_id, "console", 0, 2);
+            inodes.create_device_in(dev_id, "random", 0, 3);
+            inodes.create_device_in(dev_id, "keyboard", 1, 0);
+            inodes.create_device_in(dev_id, "mouse", 1, 1);
+        }
+        let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc").unwrap_or(microkernel::vfs::NO_INODE);
+        if etc_id != microkernel::vfs::NO_INODE {
+            ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS!\n");
+            ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-esp32c6\n");
+        }
+    }
+    let _ = writeln!(con, "[boot] VFS initialised (ramfs {} KiB)", microkernel::ramfs::RAMFS_POOL_SIZE / 1024);
+
     // ── scheduler + tasks ────────────────────────────────────
     unsafe {
         let sched = &mut *SCHEDULER.0.get();
+        let procs = &mut *PROCESSES.0.get();
+
+        // Create process 0 (init/kernel process).
+        procs.create("init", usize::MAX, 0, 0);
+
+        // Initialize user table with default accounts.
+        let user_tbl = &mut *USERS.0.get();
+        user_tbl.init_defaults();
 
         // Idle task (priority 0).
         let sb = IDLE_STACK.0.as_ptr() as usize;
         let st = sb + IDLE_STACK.0.len();
-        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0) {
-            sched.tasks[idx].context.status = INITIAL_MSTATUS;
+        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
+            sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
         }
 
         // Shell task (priority 1).
@@ -372,10 +530,18 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = SHELL_STACK.0.as_ptr() as usize;
             let st = sb + SHELL_STACK.0.len();
-            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1) {
-                sched.tasks[idx].context.status = INITIAL_MSTATUS;
+            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0) {
+                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
+    }
+    // Set init process thread count to match all boot tasks.
+    unsafe {
+        use microkernel::task::TaskState;
+        let sched = &*SCHEDULER.0.get();
+        let procs = &mut *PROCESSES.0.get();
+        let count = sched.tasks.iter().filter(|t| t.state != TaskState::Free).count();
+        procs.processes[0].thread_count = count;
     }
     let _ = writeln!(con, "[boot] idle task registered");
     #[cfg(feature = "shell")]
@@ -444,11 +610,310 @@ fn write_task_list(w: &mut dyn core::fmt::Write) {
                 TaskState::Ready => "ready",
                 TaskState::Running => "RUNNING",
                 TaskState::Blocked => "blocked",
+                TaskState::Suspended => "suspend",
+                TaskState::Zombie => "zombie",
             };
             let _ = writeln!(w, "  {:2}  {:8}  {:3}  {}", i, st, t.priority, t.name);
         }
     }
     let _ = writeln!(w, "  ticks: {}", sched.ticks);
+}
+
+#[cfg(feature = "shell")]
+fn get_current_user() -> (u16, &'static str) {
+    unsafe {
+        let users = &*USERS.0.get();
+        let uid = (*PROCESSES.0.get()).processes[0].uid;
+        (uid, users.name_for_uid(uid))
+    }
+}
+
+#[cfg(feature = "shell")]
+fn write_user_list(w: &mut dyn core::fmt::Write) {
+    unsafe {
+        let users = &*USERS.0.get();
+        let _ = writeln!(w, "  USER     UID  STATUS");
+        let _ = writeln!(w, "  -------  ---  ------");
+        for i in 0..users.user_count {
+            let u = &users.users[i];
+            let active = users.sessions.iter().any(|s| s.active && s.uid == u.uid);
+            let st = if active { "active" } else { "      " };
+            let _ = writeln!(w, "  {:7}  {:3}  {}", u.name, u.uid, st);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VFS callbacks (injected into ShellEnv)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "shell")]
+fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
+    use microkernel::vfs::{InodeKind, NO_INODE};
+    unsafe {
+        let inodes = &*INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let dir_id = if path == "." { Some(cwd) } else { inodes.resolve(cwd, path) };
+        match dir_id {
+            Some(id) if id != NO_INODE => {
+                let inode = &inodes.inodes[id as usize];
+                if inode.kind != InodeKind::Directory {
+                    let _ = writeln!(w, "ls: '{}': not a directory", path);
+                    return;
+                }
+                let mut child = inode.children_head;
+                while child != NO_INODE {
+                    let c = &inodes.inodes[child as usize];
+                    let kind_ch = match c.kind {
+                        InodeKind::Directory => 'd',
+                        InodeKind::File => 'f',
+                        InodeKind::Device => 'c',
+                        _ => '?',
+                    };
+                    let _ = writeln!(w, "  {}  {:6}  {}", kind_ch, c.size, c.name_str());
+                    child = c.next_sibling;
+                }
+            }
+            _ => { let _ = writeln!(w, "ls: '{}': no such directory", path); }
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_read_file(path: &str, buf: &mut [u8]) -> usize {
+    use microkernel::vfs::{InodeKind, NO_INODE};
+    unsafe {
+        let inodes = &*INODES.0.get();
+        let ramfs = &*RAMFS.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+        if id == NO_INODE { return 0; }
+        if inodes.inodes[id as usize].kind != InodeKind::File { return 0; }
+        ramfs.read(inodes, id, 0, buf)
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
+    use microkernel::vfs::{InodeKind, NO_INODE};
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let ramfs = &mut *RAMFS.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let mut id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+        if id == NO_INODE {
+            if let Some(slash) = path.rfind('/') {
+                let parent_path = if slash == 0 { "/" } else { &path[..slash] };
+                let name = &path[slash + 1..];
+                let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
+                if parent == NO_INODE || name.is_empty() { return false; }
+                id = match inodes.create_file_in(parent, name) { Some(i) => i, None => return false };
+            } else {
+                id = match inodes.create_file_in(cwd, path) { Some(i) => i, None => return false };
+            }
+        }
+        if inodes.inodes[id as usize].kind != InodeKind::File { return false; }
+        let offset = if append { inodes.inodes[id as usize].size } else { 0 };
+        if !append { ramfs.truncate(inodes, id, 0); }
+        ramfs.write(inodes, id, offset, data) > 0
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_mkdir(path: &str) -> bool {
+    use microkernel::vfs::NO_INODE;
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        if let Some(slash) = path.rfind('/') {
+            let parent_path = if slash == 0 { "/" } else { &path[..slash] };
+            let name = &path[slash + 1..];
+            let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
+            if parent == NO_INODE || name.is_empty() { return false; }
+            inodes.mkdir_in(parent, name).is_some()
+        } else {
+            inodes.mkdir_in(cwd, path).is_some()
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_stat(path: &str, w: &mut dyn core::fmt::Write) {
+    use microkernel::vfs::{InodeKind, NO_INODE};
+    unsafe {
+        let inodes = &*INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+        if id == NO_INODE {
+            let _ = writeln!(w, "stat: '{}': no such file or directory", path);
+            return;
+        }
+        let inode = &inodes.inodes[id as usize];
+        let kind = match inode.kind { InodeKind::File => "file", InodeKind::Directory => "directory", InodeKind::Device => "device", _ => "unknown" };
+        let _ = writeln!(w, "  File: {}", inode.name_str());
+        let _ = writeln!(w, "  Type: {}", kind);
+        let _ = writeln!(w, "  Size: {}", inode.size);
+        let _ = writeln!(w, "  Inode: {}", id);
+        let _ = writeln!(w, "  Parent: {}", inode.parent);
+        if inode.kind == InodeKind::Device {
+            let _ = writeln!(w, "  Device: {},{}", inode.dev_major, inode.dev_minor);
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_unlink(path: &str) -> bool {
+    use microkernel::vfs::NO_INODE;
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+        if id == NO_INODE { return false; }
+        inodes.unlink(id)
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_rename(old: &str, new: &str) -> bool {
+    use microkernel::vfs::NO_INODE;
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let id = inodes.resolve(cwd, old).unwrap_or(NO_INODE);
+        if id == NO_INODE { return false; }
+        if let Some(slash) = new.rfind('/') {
+            let parent_path = if slash == 0 { "/" } else { &new[..slash] };
+            let name = &new[slash + 1..];
+            let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
+            if parent == NO_INODE || name.is_empty() { return false; }
+            inodes.rename(id, parent, name)
+        } else {
+            inodes.rename(id, cwd, new)
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_getcwd(buf: &mut [u8]) -> usize {
+    unsafe {
+        let inodes = &*INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        inodes.build_path(cwd, buf)
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_chdir(path: &str) -> bool {
+    use microkernel::vfs::{InodeKind, NO_INODE};
+    unsafe {
+        let inodes = &*INODES.0.get();
+        let procs = &mut *PROCESSES.0.get();
+        let cwd = procs.processes[0].cwd;
+        let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+        if id == NO_INODE { return false; }
+        if inodes.inodes[id as usize].kind != InodeKind::Directory { return false; }
+        procs.processes[0].cwd = id;
+        true
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
+    use microkernel::vfs::{InodeKind, ROOT_INODE, NO_INODE};
+    unsafe {
+        let inodes = &*INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let start = if path == "/" { ROOT_INODE } else { inodes.resolve(cwd, path).unwrap_or(NO_INODE) };
+        if start == NO_INODE { let _ = writeln!(w, "tree: '{}': no such directory", path); return; }
+        let root = &inodes.inodes[start as usize];
+        if root.kind != InodeKind::Directory { let _ = writeln!(w, "tree: '{}': not a directory", path); return; }
+        let _ = writeln!(w, "{}", if path == "/" || path == "." { "/" } else { path });
+        let mut stack: [(u16, u8); 64] = [(NO_INODE, 0); 64];
+        let mut sp = 0usize;
+        let mut kids: [u16; 64] = [NO_INODE; 64];
+        let mut nk = 0usize;
+        let mut ch = root.children_head;
+        while ch != NO_INODE && nk < 64 { kids[nk] = ch; nk += 1; ch = inodes.inodes[ch as usize].next_sibling; }
+        let mut i = nk;
+        while i > 0 { i -= 1; if sp < 64 { stack[sp] = (kids[i], 1); sp += 1; } }
+        while sp > 0 {
+            sp -= 1;
+            let (id, depth) = stack[sp];
+            let node = &inodes.inodes[id as usize];
+            for _ in 0..depth { w.write_str("  ").ok(); }
+            let kind_ch = match node.kind { InodeKind::Directory => '/', InodeKind::Device => '*', _ => ' ' };
+            let _ = writeln!(w, "{}{}", node.name_str(), kind_ch);
+            if node.kind == InodeKind::Directory {
+                let mut ck: [u16; 64] = [NO_INODE; 64];
+                let mut cn = 0usize;
+                let mut c = node.children_head;
+                while c != NO_INODE && cn < 64 { ck[cn] = c; cn += 1; c = inodes.inodes[c as usize].next_sibling; }
+                let mut j = cn;
+                while j > 0 { j -= 1; if sp < 64 { stack[sp] = (ck[j], depth + 1); sp += 1; } }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+fn vfs_touch(path: &str) -> bool {
+    use microkernel::vfs::NO_INODE;
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        if inodes.resolve(cwd, path).unwrap_or(NO_INODE) != NO_INODE { return true; }
+        if let Some(slash) = path.rfind('/') {
+            let parent_path = if slash == 0 { "/" } else { &path[..slash] };
+            let name = &path[slash + 1..];
+            let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
+            if parent == NO_INODE || name.is_empty() { return false; }
+            inodes.create_file_in(parent, name).is_some()
+        } else {
+            inodes.create_file_in(cwd, path).is_some()
+        }
+    }
+}
+
+fn mount_list(w: &mut dyn core::fmt::Write) {
+    unsafe {
+        let mounts = &*MOUNTS.0.get();
+        let inodes = &*INODES.0.get();
+        let mut found = false;
+        for (i, m) in mounts.mounts.iter().enumerate() {
+            if m.active {
+                let mut pathbuf = [0u8; 64];
+                let plen = inodes.build_path(m.dir_inode, &mut pathbuf);
+                let path = core::str::from_utf8(&pathbuf[..plen]).unwrap_or("?");
+                let fstype = match m.fs_type {
+                    microkernel::vfs::FsType::Fat32 => "fat32",
+                    microkernel::vfs::FsType::RamFs => "ramfs",
+                    _ => "none",
+                };
+                let _ = writeln!(w, "  {} on {} type {} (slot {})", m.label_str(), path, fstype, i + 1);
+                found = true;
+            }
+        }
+        if !found {
+            let _ = writeln!(w, "  (no filesystems mounted)");
+        }
+    }
+}
+
+fn lsblk_info(w: &mut dyn core::fmt::Write) {
+    let _ = writeln!(w, "  NAME       TYPE   SIZE");
+    let _ = writeln!(w, "  spi-sd     disk   (SD card via SPI2)");
+}
+
+fn input_status(w: &mut dyn core::fmt::Write) {
+    let input = unsafe { &*INPUT.0.get() };
+    input.write_status(w);
+}
+
+fn ble_hid_list(w: &mut dyn core::fmt::Write) {
+    let _ = writeln!(w, "  BLE HID-over-GATT (HOGP) client");
+    let _ = writeln!(w, "  Status: ready (ESP32-C6 BLE available)");
+    let _ = writeln!(w, "  Max devices: 4");
+    let _ = writeln!(w, "  Use 'input scan' to discover BLE HID peripherals");
 }
 
 /// Shell callback for `wifi <sub> <args>`.

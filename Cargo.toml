@@ -6,10 +6,12 @@ members = [
     # ── Layer 1: SoC drivers ─────────────────────────────
     "crates/soc/esp32",
     "crates/soc/qemu_virt",
+    "crates/soc/raspi5",
 
     # ── Layer 2: Kernel binaries (one per board) ─────────
     "crates/kernel/xiao_esp32c6",
     "crates/kernel/qemu_virt",
+    "crates/kernel/raspi5",
 
     # ── Shared OS components ─────────────────────────────
     "crates/microkernel",

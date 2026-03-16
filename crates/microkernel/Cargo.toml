@@ -12,6 +12,8 @@ dist-minimal = []
 dist-app = []
 dist-rt = []
 dist-full = ["dist-app", "dist-rt"]
+multi-user = []
+ramfs-small = []
 
 [dependencies]
 bitflags.workspace = true

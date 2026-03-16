@@ -1,11 +1,22 @@
 #![no_std]
 
 pub mod alloc;
+pub mod channel;
 pub mod dispatch;
 pub mod driver;
+pub mod fat32;
+pub mod futex;
+pub mod hid;
+pub mod input;
 pub mod ipc;
+pub mod poll;
+pub mod process;
+pub mod ramfs;
+pub mod socket;
 pub mod syscall;
 pub mod task;
+pub mod user;
+pub mod vfs;
 
 use arch::Platform;
 use bitflags::bitflags;

@@ -6,7 +6,7 @@
 //! - Priority-aware round-robin for the `RealTime` distribution.
 //! - A `tick()` entry point the timer ISR calls each period.
 
-use arch::TaskContext;
+use arch::{SavedContext, TaskContext, TaskMemRegion, TaskRegions, MemPerms, MAX_TASK_REGIONS};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -17,6 +17,10 @@ pub const MAX_TASKS: usize = 16;
 
 /// Default stack size per task (bytes). Boards can override at link time.
 pub const DEFAULT_STACK_SIZE: usize = 2048;
+
+/// Stack guard size in bytes.  PMP/MPU will deny access to this region
+/// below the stack, trapping stack overflow (enforced in U-mode).
+pub const STACK_GUARD_SIZE: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Task state
@@ -31,21 +35,78 @@ pub enum TaskState {
     Ready,
     /// Task is the currently executing task.
     Running,
-    /// Task is blocked (waiting for IPC, timer, etc.).
+    /// Task is blocked (see [`BlockReason`] for why).
     Blocked,
+    /// Task has been explicitly suspended (can be resumed).
+    Suspended,
+    /// Task has exited; exit status retained until collected.
+    Zombie,
 }
 
-/// Task Control Block — one per task slot.
+/// Why a task is blocked — stored alongside `TaskState::Blocked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    /// Not blocked (default / task is Free/Ready/Running).
+    None,
+    /// Sleeping until `wakeup_tick`.
+    Sleep,
+    /// Waiting for an IPC message.
+    IpcRecv,
+    /// Waiting for a child task to exit (`join_target` task ID).
+    Join,
+    /// Blocked on a futex (waiting for a `SYS_FUTEX_WAKE`).
+    Futex,
+    /// Blocked trying to send on a full channel.
+    ChanSend(usize),
+    /// Blocked trying to receive from an empty channel.
+    ChanRecv(usize),
+    /// Blocked waiting for a poll event set to fire (`SYS_POLL_WAIT`).
+    PollWait,
+    /// Blocked on `accept()` waiting for a connection.
+    SockAccept(usize),
+    /// Blocked on `recv()` waiting for data on a socket.
+    SockRecv(usize),
+    /// Blocked on `send()` waiting for space in peer's buffer.
+    SockSend(usize),
+}
+
+/// Task Control Block — one per thread slot.
+///
+/// Threads belong to a [`Process`](crate::process::Process) identified
+/// by `process_id`.  Multiple threads can share the same process (and
+/// therefore the same address-space / memory regions).
 #[derive(Debug, Clone, Copy)]
 pub struct Tcb {
     pub state: TaskState,
     pub priority: u8,
+    /// Original priority before any inheritance boost.
+    pub base_priority: u8,
     pub name: &'static str,
     pub context: TaskContext,
     /// Bottom of stack allocation (pointer kept for bookkeeping).
     pub stack_bottom: usize,
     /// Stack size in bytes.
     pub stack_size: usize,
+    /// Why this task is blocked (meaningful only when `state == Blocked`).
+    pub block_reason: BlockReason,
+    /// Tick at which a sleeping task should wake (0 = not sleeping).
+    pub wakeup_tick: u64,
+    /// Parent task index (who spawned this task), or `usize::MAX` for root.
+    pub parent: usize,
+    /// Task index we are joining on, or `usize::MAX` if not joining.
+    pub join_target: usize,
+    /// Exit code set by `SYS_EXIT`, readable via `SYS_JOIN`.
+    pub exit_code: usize,
+    /// Per-thread memory regions (stack + guard).
+    pub regions: TaskRegions,
+    /// Number of valid entries in `regions`.
+    pub region_count: usize,
+    /// Index into the [`ProcessTable`](crate::process::ProcessTable).
+    /// `usize::MAX` means "no process" (legacy / kernel-internal).
+    pub process_id: usize,
+    /// Thread-local storage base address (written to `tp`/x4 on RISC-V
+    /// context switch).  0 means TLS is not configured.
+    pub tls_base: usize,
 }
 
 impl Tcb {
@@ -53,10 +114,20 @@ impl Tcb {
         Self {
             state: TaskState::Free,
             priority: 0,
+            base_priority: 0,
             name: "",
             context: TaskContext::zero(),
             stack_bottom: 0,
             stack_size: 0,
+            block_reason: BlockReason::None,
+            wakeup_tick: 0,
+            parent: usize::MAX,
+            join_target: usize::MAX,
+            exit_code: 0,
+            regions: [TaskMemRegion::empty(); MAX_TASK_REGIONS],
+            region_count: 0,
+            process_id: usize::MAX,
+            tls_base: 0,
         }
     }
 }
@@ -84,10 +155,13 @@ impl Scheduler {
         }
     }
 
-    /// Register a new task. Returns the task index, or `None` if the table is full.
+    /// Register a new task (thread). Returns the task index, or `None` if the table is full.
     ///
     /// `entry` is the function pointer the task begins executing at.
     /// `stack_top` is the highest usable address of the task's stack.
+    /// `process_id` links the thread to a process (`usize::MAX` for legacy/kernel tasks).
+    ///
+    /// Automatically grants per-thread stack RW region and stack guard.
     pub fn create_task(
         &mut self,
         name: &'static str,
@@ -95,26 +169,69 @@ impl Scheduler {
         stack_top: usize,
         stack_bottom: usize,
         priority: u8,
+        process_id: usize,
     ) -> Option<usize> {
         for (i, slot) in self.tasks.iter_mut().enumerate() {
             if slot.state == TaskState::Free {
                 let mut ctx = TaskContext::zero();
-                ctx.pc = entry;
-                // RISC-V: x2 = sp
-                ctx.gpr[2] = stack_top;
+                ctx.set_pc(entry);
+                ctx.set_sp(stack_top);
+
+                // Grant stack region (RW, no execute).
+                let mut regions = [TaskMemRegion::empty(); MAX_TASK_REGIONS];
+                regions[0] = TaskMemRegion {
+                    base: stack_bottom,
+                    size: stack_top - stack_bottom,
+                    perms: MemPerms::RW,
+                };
+                // Stack guard: no-access region below the stack.
+                // When PMP is enforced (U-mode), overflow into this
+                // region triggers a trap instead of silent corruption.
+                if stack_bottom >= STACK_GUARD_SIZE {
+                    regions[1] = TaskMemRegion {
+                        base: stack_bottom - STACK_GUARD_SIZE,
+                        size: STACK_GUARD_SIZE,
+                        perms: MemPerms::NONE,
+                    };
+                }
 
                 *slot = Tcb {
                     state: TaskState::Ready,
                     priority,
+                    base_priority: priority,
                     name,
                     context: ctx,
                     stack_bottom,
                     stack_size: stack_top - stack_bottom,
+                    block_reason: BlockReason::None,
+                    wakeup_tick: 0,
+                    parent: usize::MAX,
+                    join_target: usize::MAX,
+                    exit_code: 0,
+                    regions,
+                    region_count: if stack_bottom >= STACK_GUARD_SIZE { 2 } else { 1 },
+                    process_id,
+                    tls_base: 0,
                 };
                 return Some(i);
             }
         }
         None
+    }
+
+    /// Grant an additional memory region to a task.
+    /// Returns `true` on success, `false` if the region table is full.
+    pub fn grant_region(&mut self, task_id: usize, region: TaskMemRegion) -> bool {
+        if task_id >= MAX_TASKS {
+            return false;
+        }
+        let tcb = &mut self.tasks[task_id];
+        if tcb.region_count >= MAX_TASK_REGIONS {
+            return false;
+        }
+        tcb.regions[tcb.region_count] = region;
+        tcb.region_count += 1;
+        true
     }
 
     /// Pick the first ready task, mark it Running, and return a pointer

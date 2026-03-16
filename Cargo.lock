@@ -68,6 +68,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel-raspi5"
+version = "0.1.0"
+dependencies = [
+ "arch",
+ "microkernel",
+ "panic-halt",
+ "shell",
+ "soc-raspi5",
+ "userlib",
+]
+
+[[package]]
 name = "kernel-xiao-esp32c6"
 version = "0.1.0"
 dependencies = [
@@ -141,6 +153,13 @@ dependencies = [
 
 [[package]]
 name = "soc-qemu-virt"
+version = "0.1.0"
+dependencies = [
+ "arch",
+]
+
+[[package]]
+name = "soc-raspi5"
 version = "0.1.0"
 dependencies = [
  "arch",

@@ -84,3 +84,6 @@ pub const SYSTIMER_BASE: usize = 0x6002_3000;
 
 /// Interrupt matrix (INTERRUPT_CORE0) base address.
 pub const INTC_BASE: usize = 0x600C_2000;
+
+/// GPSPI2 (SPI2) base address — used for SPI-mode SD card access.
+pub const SPI2_BASE: usize = 0x6000_3000;
