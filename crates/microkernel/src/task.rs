@@ -13,6 +13,11 @@ use arch::{SavedContext, TaskContext, TaskMemRegion, TaskRegions, MemPerms, MAX_
 // ---------------------------------------------------------------------------
 
 /// Maximum number of concurrent tasks.
+/// 64-bit architectures have more address space and RAM, so we allow more tasks.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+pub const MAX_TASKS: usize = 64;
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub const MAX_TASKS: usize = 16;
 
 /// Default stack size per task (bytes). Boards can override at link time.
@@ -68,6 +73,9 @@ pub enum BlockReason {
     SockRecv(usize),
     /// Blocked on `send()` waiting for space in peer's buffer.
     SockSend(usize),
+    /// Blocked waiting for an IRQ to fire (userspace driver).
+    /// The usize is the IRQ line the driver is waiting on.
+    IrqWait(usize),
 }
 
 /// Task Control Block — one per thread slot.
@@ -260,13 +268,22 @@ impl Scheduler {
         #[cfg(feature = "dist-rt")]
         {
             let mut best_idx: Option<usize> = None;
-            let mut best_pri: u8 = 0;
+            let mut best_pri: Option<u8> = None;
             for offset in 0..MAX_TASKS {
                 let idx = (start + offset) % MAX_TASKS;
                 let t = &self.tasks[idx];
-                if t.state == TaskState::Ready && t.priority > best_pri {
-                    best_pri = t.priority;
-                    best_idx = Some(idx);
+                if t.state == TaskState::Ready {
+                    match best_pri {
+                        None => {
+                            best_pri = Some(t.priority);
+                            best_idx = Some(idx);
+                        }
+                        Some(bp) if t.priority > bp => {
+                            best_pri = Some(t.priority);
+                            best_idx = Some(idx);
+                        }
+                        _ => {}
+                    }
                 }
             }
             return best_idx;

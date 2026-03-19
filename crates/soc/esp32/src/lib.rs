@@ -32,9 +32,11 @@ pub mod ble_hid;
 pub mod ieee802154;
 pub mod intc;
 pub mod mem;
+pub mod modem;
 pub mod sdspi;
 pub mod systimer;
 pub mod uart;
+pub mod usb_serial_jtag;
 pub mod wdt;
 pub mod wifi;
 
@@ -73,6 +75,12 @@ impl Platform for Esp32Riscv {
 
 pub fn default_serial() -> uart::Uart0 {
     uart::Uart0::new()
+}
+
+/// USB Serial/JTAG — used on boards where the USB-C port is wired
+/// to the internal USB controller (e.g. XIAO ESP32-C6).
+pub fn usb_serial() -> usb_serial_jtag::UsbSerialJtag {
+    usb_serial_jtag::UsbSerialJtag::new()
 }
 
 pub fn interrupt_controller() -> intc::Esp32Intc {

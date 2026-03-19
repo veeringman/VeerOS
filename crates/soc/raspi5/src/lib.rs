@@ -24,7 +24,11 @@ pub mod mailbox;
 pub mod board;
 pub mod fb;
 pub mod font;
+pub mod logo;
 pub mod fbcon;
+pub mod pcie;
+pub mod dtb;
+pub mod mini_uart;
 pub mod sd;
 pub mod xhci;
 

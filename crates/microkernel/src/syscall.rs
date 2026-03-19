@@ -497,3 +497,40 @@ pub const SYS_GET_TEMP: usize = 0xB7;
 ///   a1 = buffer length
 /// Returns: a0 = bytes written.
 pub const SYS_HW_INFO: usize = 0xB8;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Driver / userspace I/O (0xC0–0xCF)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Read a 32-bit MMIO register (kernel validates PMP grant).
+///   a0 = physical address
+/// Returns: a0 = value read.
+pub const SYS_DRV_MMIO_READ32: usize = 0xC0;
+
+/// Write a 32-bit MMIO register (kernel validates PMP grant).
+///   a0 = physical address
+///   a1 = value to write
+/// Returns: a0 = 0 on success, `usize::MAX` on denied.
+pub const SYS_DRV_MMIO_WRITE32: usize = 0xC1;
+
+/// Block until the driver's assigned IRQ fires.
+///   a0 = IRQ line the driver is registered for
+/// Returns: a0 = 0 on wakeup.
+pub const SYS_DRV_IRQ_WAIT: usize = 0xC2;
+
+/// Acknowledge a driver IRQ (re-enable the interrupt).
+///   a0 = IRQ line
+/// Returns: a0 = 0 on success.
+pub const SYS_DRV_IRQ_ACK: usize = 0xC3;
+
+/// Register the calling task as a driver server on a named channel.
+///   a0 = channel ID (previously created via SYS_CHAN_CREATE)
+///   a1 = driver handle (from kernel's DriverRegistry)
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_DRV_REGISTER: usize = 0xC4;
+
+/// Send a log/status message to the kernel console (for driver debug).
+///   a0 = pointer to message
+///   a1 = length
+/// Returns: a0 = 0.
+pub const SYS_DRV_LOG: usize = 0xC5;

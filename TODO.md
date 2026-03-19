@@ -299,6 +299,65 @@ _Unified file abstraction for in-memory files, device nodes, and future block st
 - [x] QEMU user-net or TAP networking for development/testing
 - [ ] ESP32 Wi-Fi driver integration for real-hardware remote access
 
+### ESP32-C6 Wi-Fi — Full Stack (RF → IP → Shell-over-TCP)
+_Bring up real Wi-Fi on XIAO ESP32-C6: associate with AP, get an IP via DHCP, and serve a VeerOS shell over TCP so the device is accessible from the network._
+
+#### Prerequisites
+- [x] **WiFi driver skeleton** — `crates/soc/esp32/src/wifi.rs`: `WifiManager` state machine, `Esp32Wifi` driver struct, MAC init, clock/modem enable
+- [x] **WiFi shell commands** — `wifi scan/list/set/connect/status` wired through `ShellEnv.wifi_cmd`
+- [x] **smoltcp TCP/IP stack** — already integrated in `crates/net/` with `DeviceAdapter` bridge
+- [x] **`TcpSerial`** — `Serial` trait over TCP socket (shell-over-TCP, proven on QEMU)
+- [x] **SYSTIMER + interrupt pipeline** — working preemptive scheduler on ESP32-C6
+
+#### Phase W1 — Espressif Radio Firmware Integration
+_The ESP32-C6 WiFi/BLE RF is driven by proprietary Espressif blobs (libphy.a, libcoexist.a, libpp.a, etc.). We must link and initialize them._
+
+- [ ] **Obtain esp-wifi blobs** — extract `libphy.a`, `libnet80211.a`, `libcoexist.a`, `libpp.a`, `libcore.a`, `libwpa_supplicant.a` from ESP-IDF v5.x or esp-wifi-sys crate
+- [ ] **Link blobs into kernel** — add `.a` archives to `build.rs` link search, resolve extern symbols (`esp_wifi_init`, `esp_wifi_start`, `esp_wifi_connect`, etc.)
+- [ ] **Implement blob FFI shim** — provide C-callable functions the blobs expect: `malloc`/`free` (→ VeerOS heap), `printf` (→ klog), `vTaskDelay` (→ sleep syscall), timer/mutex/semaphore OS abstractions
+- [ ] **PHY calibration** — call `esp_phy_init()` with calibration data from NVS or defaults; RF registers init
+- [ ] **WiFi supplicant init** — initialize WPA/WPA2/WPA3 supplicant from blob (handles 4-way handshake)
+- [ ] **Coexistence init** — esp-coex init for WiFi/BLE shared antenna (already stub in modem.rs)
+- [ ] **Alternative: `esp-wifi` crate** — evaluate using `esp-wifi` (Rust) from esp-rs project as a higher-level alternative to raw blobs
+
+#### Phase W2 — WiFi STA Association
+_Connect to an access point and complete the WPA handshake._
+
+- [ ] **Scan implementation** — call blob `esp_wifi_scan_start()` → populate `scan_results` in `WifiManager`
+- [ ] **Station mode connect** — `esp_wifi_set_mode(WIFI_MODE_STA)` → `esp_wifi_set_config()` with SSID/password → `esp_wifi_connect()`
+- [ ] **Event handling** — register event callback for `WIFI_EVENT_STA_CONNECTED`, `WIFI_EVENT_STA_DISCONNECTED`, `IP_EVENT_STA_GOT_IP`
+- [ ] **State machine updates** — drive `WifiManager` state: Configured → Connecting → Connected / Disconnected based on events
+- [ ] **Auto-reconnect** — on disconnect event, retry connect with backoff (1s, 2s, 4s, max 30s)
+- [ ] **`wifi status` shows RSSI** — read RSSI from blob and display signal strength in shell
+
+#### Phase W3 — DHCP + IP Configuration
+_Acquire an IP address from the network._
+
+- [ ] **DHCP client in smoltcp** — enable smoltcp's `dhcpv4` feature; wire `Dhcpv4Client` into the network stack
+- [ ] **`NetworkDevice` impl for ESP32 WiFi** — bridge between `Esp32Wifi` TX/RX packet buffers and smoltcp's `Device` trait
+- [ ] **IP assignment callback** — on DHCP lease, store IP in `WifiManager.ip`, update smoltcp interface, print `[wifi] got IP: x.x.x.x`
+- [ ] **DNS resolver** — minimal DNS stub or smoltcp DNS feature for hostname resolution
+- [ ] **Static IP fallback** — `wifi ip set <ip> <mask> <gw>` shell command for manual configuration
+- [ ] **`ifconfig` / `ip` shell command** — display interface IP, netmask, gateway, MAC, RSSI
+
+#### Phase W4 — Shell-over-TCP (Remote Access)
+_Serve the VeerOS shell on a TCP port so you can `nc <device-ip> 2323` or `ssh` in from any machine on the LAN._
+
+- [ ] **ESP32 net listener task** — new kernel task (`net-srv`) that listens on TCP port 2323 (reuse `net` crate listener pattern from QEMU)
+- [ ] **`TcpSerial` on ESP32** — instantiate `TcpSerial` backed by smoltcp TCP socket → ESP32 WiFi NIC
+- [ ] **WiFi shell session** — on TCP accept, spawn a shell task attached to `TcpSerial` (same as QEMU net shell)
+- [ ] **Network tick integration** — smoltcp `poll()` called from timer ISR or dedicated net task loop (receive/transmit frames)
+- [ ] **`wifi connect` triggers full stack** — single shell command: associate → DHCP → start net listener → print IP + port
+- [ ] **Boot auto-connect** — if SSID configured, auto-connect at boot and start TCP shell server
+- [ ] **Connection status LED** — optional: blink onboard LED to indicate WiFi state (connecting/connected/error)
+
+#### Phase W5 — Security + Hardening
+- [ ] **WPA3-SAE support** — ensure supplicant blob supports WPA3 for modern routers
+- [ ] **Encrypted shell protocol** — TLS or lightweight encrypted channel over TCP (integrates with Phase 8C crypto)
+- [ ] **Authentication** — password or key-based login for TCP shell (integrates with Phase 6I user identity)
+- [ ] **Rate limiting** — limit TCP connection attempts to prevent brute-force
+- [ ] **Firewall rules** — simple port allow/deny table in kernel (default: only port 2323 open)
+
 ## Phase 4 — Distribution Profiles (Complete)
 - [x] Distribution matrix design — two axes: profile (minimal/app/rt/full) × components (shell/net/userlib/samples/wifi/ble/ieee802154)
 - [x] `distributions` crate restructured — aligned feature names (`dist-minimal`/`dist-app`/`dist-rt`/`dist-full`), component flags, documentation

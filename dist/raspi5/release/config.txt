@@ -12,20 +12,23 @@ arm_64bit=1
 # Load our kernel image (default is kernel8.img for 64-bit)
 kernel=kernel8.img
 
-# Disable Linux device-tree overlay — we're bare-metal
-device_tree=
+# RPi5 needs the device tree to set up PCIe and map the RP1 southbridge.
+# Without it, UART/GPIO/I2C/SPI won't work (they're behind RP1 on PCIe).
+# The firmware auto-selects bcm2712-rpi-5-b.dtb for RPi5.
+
+# Skip RPi5 OS compatibility check (we're not Linux)
+os_check=0
 
 # ── UART console ──────────────────────────────────────────────────────────
 
-# Enable mini-UART on GPIO 14/15 (pins 8/10) at 115200 baud.
-# This gives you the VeerOS shell over a serial adapter.
+# Enable PL011 UART on GPIO 14/15 (pins 8/10) at 115200 baud.
+# RPi5 uses PL011 (not mini-UART), so no core_freq hack needed.
 enable_uart=1
 
-# Fix mini-UART clock so baud rate is stable
-core_freq=250
-core_freq_min=250
-
 # ── GPU / display ─────────────────────────────────────────────────────────
+
+# Force HDMI output even if no display is detected at boot
+hdmi_force_hotplug=1
 
 # Allocate 64 MB to the VideoCore (enough for a framebuffer console)
 gpu_mem=64

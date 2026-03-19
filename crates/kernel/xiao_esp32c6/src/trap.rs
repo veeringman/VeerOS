@@ -16,7 +16,7 @@ use microkernel::task::Scheduler;
 use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT};
+use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS};
 // mcause constants
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -25,6 +25,8 @@ const MCAUSE_INTERRUPT_BIT: usize = 1 << 31;
 /// ESP32-C3: SYSTIMER fires on CPU interrupt line 1 (not standard mcause 7).
 #[allow(dead_code)]
 const SYSTIMER_CPU_INT_CODE: usize = 1;
+#[allow(dead_code)]
+const MCAUSE_ECALL_UMODE: usize = 8;
 #[allow(dead_code)]
 const MCAUSE_ECALL_MMODE: usize = 11;
 
@@ -109,7 +111,7 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext) -> *mut TaskContext {
 #[cfg(target_arch = "riscv32")]
 unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskContext {
     match code {
-        MCAUSE_ECALL_MMODE => {
+        MCAUSE_ECALL_UMODE | MCAUSE_ECALL_MMODE => {
             let sched = unsafe { &mut *SCHEDULER.0.get() };
             let ipc = unsafe { &mut *IPC.0.get() };
             let heap = unsafe { &mut *HEAP.0.get() };
@@ -125,6 +127,7 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
             let fat32 = unsafe { &mut *FAT32.0.get() };
             let mounts = unsafe { &mut *MOUNTS.0.get() };
             let input = unsafe { &mut *INPUT.0.get() };
+            let drivers = unsafe { &mut *DRIVERS.0.get() };
 
             let action = unsafe {
                 dispatch::dispatch(
@@ -143,6 +146,7 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                     fat32,
                     mounts,
                     input,
+                    drivers,
                     crate::console_write_byte,
                     crate::console_read_byte,
                 )
@@ -165,8 +169,34 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                 }
             }
         }
-        _ => loop {
-            core::hint::spin_loop();
+        _ => {
+            // Unknown exception — print diagnostic and halt.
+            crate::console_write_byte(b'!');
+            crate::console_write_byte(b'E');
+            // Emit mcause code as hex nibbles.
+            let code_u8 = code as u8;
+            let hi = (code_u8 >> 4) & 0xF;
+            let lo = code_u8 & 0xF;
+            crate::console_write_byte(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 });
+            crate::console_write_byte(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
+            // Emit mepc.
+            let mepc: usize;
+            unsafe { core::arch::asm!("csrr {}, mepc", out(reg) mepc, options(nomem, nostack)); }
+            crate::console_write_byte(b'@');
+            for shift in (0..8).rev() {
+                let nib = ((mepc >> (shift * 4)) & 0xF) as u8;
+                crate::console_write_byte(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+            }
+            crate::console_write_byte(b'\n');
+            // Flush USB Serial JTAG so bytes reach the host
+            unsafe {
+                let usb_base: usize = 0x6000_F000;
+                let conf = core::ptr::read_volatile((usb_base + 0x04) as *const u32);
+                core::ptr::write_volatile((usb_base + 0x04) as *mut u32, conf | 1);
+            }
+            loop {
+                core::hint::spin_loop();
+            }
         },
     }
 }

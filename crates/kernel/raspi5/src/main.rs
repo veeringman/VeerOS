@@ -21,8 +21,8 @@ mod samples;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 
-use arch::{Console, SavedContext, TickTimer};
-use soc_raspi5::{default_serial, system_timer, Raspi5};
+use arch::{Console, SavedContext, TickTimer, Platform};
+use soc_raspi5::{system_timer, Raspi5};
 use soc_raspi5::gic::Gic400;
 use soc_raspi5::fbcon::FbConsole;
 use microkernel::Kernel;
@@ -44,7 +44,6 @@ use panic_halt as _;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const TICK_PERIOD_US: u32 = 1_000; // 1 ms
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Static kernel state (single-core, interrupts disabled during access)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -221,8 +220,6 @@ fn idle_task() -> ! {
 
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
-    // Use framebuffer console (HDMI + UART) if available,
-    // otherwise fall back to UART-only.
     let fbcon = unsafe { *FBCON.0.get() };
     let mut con = Console::new(fbcon);
     let env = ShellEnv {
@@ -291,6 +288,9 @@ core::arch::global_asm!(
 .balign  4
 
 _start:
+    // ── Save DTB pointer before clobbering x0 ──────────────
+    mov   x19, x0
+
     // ── Park secondary cores (only core 0 boots) ────────────
     mrs   x0, mpidr_el1
     and   x0, x0, #0xFF
@@ -306,6 +306,14 @@ _start:
     // Configure HCR_EL2: set RW (bit 31) so EL1 uses AArch64.
     mov   x0, #(1 << 31)
     msr   hcr_el2, x0
+
+    // Allow EL1 access to physical timer registers.
+    // CNTHCTL_EL2: EL1PCTEN (bit 0) + EL1PCEN (bit 1) = 0x3
+    mov   x0, #3
+    msr   cnthctl_el2, x0
+
+    // No virtual offset.
+    msr   cntvoff_el2, xzr
 
     // Set SCTLR_EL1 to a known safe state (caches/MMU off).
     mov   x0, xzr
@@ -337,6 +345,10 @@ _at_el1:
     ldr   x0, =_veer_vectors
     msr   vbar_el1, x0
 
+    // ── Store DTB pointer (saved in x19 at entry, after BSS zeroed) ──
+    ldr   x0, =DTB_PTR
+    str   x19, [x0]
+
     // ── Jump into Rust ───────────────────────────────────────
     bl    _rust_start
 
@@ -350,29 +362,114 @@ _park:
 );
 
 // ═══════════════════════════════════════════════════════════════════════════
+// DTB pointer saved by assembly entry
+// ═══════════════════════════════════════════════════════════════════════════
+#[unsafe(no_mangle)]
+static mut DTB_PTR: usize = 0;
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Rust entry point
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _rust_start() -> ! {
+    // ── Set TPIDR_EL1 to a scratch context buffer ────────────
+    // This is needed so that any synchronous exception (e.g. data abort
+    // during the RP1 probe) has a valid context save area. Without this,
+    // the trap handler would write registers to address 0.
+    #[cfg(target_arch = "aarch64")]
+    {
+        static mut BOOT_CTX: arch::TaskContext = arch::TaskContext::zero();
+        unsafe {
+            let ptr = core::ptr::addr_of_mut!(BOOT_CTX) as usize;
+            core::arch::asm!("msr tpidr_el1, {}", in(reg) ptr, options(nomem, nostack));
+        }
+    }
+
+    // ── HDMI framebuffer (early) ─────────────────────────────
+    // Try framebuffer FIRST — mailbox uses BCM2712 registers (not RP1),
+    // so this works even if RP1 PCIe BAR is not mapped.  This gives us
+    // HDMI output for diagnostics before touching any RP1 peripherals.
+    {
+        use soc_raspi5::fb;
+        if let Some(info) = fb::init_framebuffer(1920, 1080, 32) {
+            let fbcon = FbConsole::new(info);
+            fbcon.clear_screen();
+            unsafe { *FBCON.0.get() = fbcon; }
+        }
+    }
+
+    // ── BCM2712 mini UART (RP1-independent serial) ─────────
+    // This UART is directly on the SoC, not behind RP1 PCIe.
+    // Requires `enable_uart=1` in config.txt on the SD card.
+    if soc_raspi5::mini_uart::is_available() {
+        soc_raspi5::mini_uart::write_str("\r\n[mini-uart] VeerOS boot — mini UART active\r\n");
+    }
+
     // ── early console ────────────────────────────────────────
-    let serial = default_serial();
-    let mut con = Console::new(serial);
+    // UART is NOT enabled yet — RP1 southbridge might not be accessible.
+    // Console output goes to framebuffer only until we enable UART later.
+    let fbcon = unsafe { *FBCON.0.get() };
+    let mut con = Console::new(fbcon);
 
-    // ── platform + kernel init ───────────────────────────────
+    // ── boot logo + banner (HDMI only at this point) ────────
+    // Draw logo at top-left with a small margin, then print banner
+    // text to the right of the logo using set_cursor (not spaces,
+    // which would overwrite logo pixels with black).
+    {
+        let logo_x = 8u32; // 8px left margin
+        let logo_y = 8u32; // 8px top margin
+        let logo_w = fbcon.blit_logo(logo_x, logo_y);
+
+        // Calculate text column to start after logo (+ 2 col gap)
+        let text_col = if logo_w > 0 {
+            (logo_x + logo_w) / soc_raspi5::font::CHAR_W + 2
+        } else {
+            0
+        };
+
+        // Logo is 48px tall = 3 rows at CHAR_H=16. Rows 0-2 are
+        // within the logo zone; use set_cursor to skip past it.
+        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 0); }
+        let _ = writeln!(con, "========================================");
+        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 1); }
+        let _ = writeln!(con, "  VeerOS v{VERSION}");
+        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 2); }
+        let _ = writeln!(con, "  Platform : Raspberry Pi 5 (BCM2712)");
+        // Row 3: bottom edge of logo, still safe beside it
+        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 3); }
+        let _ = writeln!(con, "  Arch     : AArch64 (Cortex-A76)");
+        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 4); }
+        let _ = writeln!(con, "========================================");
+        // Move cursor to full-width area below the header
+        unsafe { soc_raspi5::fbcon::set_cursor(0, 5); }
+        let _ = writeln!(con, "");
+    }
+
+    // ── platform init (step by step for diagnostics) ───────
+    let _ = writeln!(con, "[boot] init CPU (FP/NEON)...");
+
+    // Read current EL for diagnostics
+    #[cfg(target_arch = "aarch64")]
+    {
+        let el: u64;
+        unsafe { core::arch::asm!("mrs {}, CurrentEL", out(reg) el, options(nomem, nostack)); }
+        let _ = writeln!(con, "[boot] CurrentEL = {}", (el >> 2) & 3);
+    }
+
     let platform = Raspi5::new();
-    let kernel = Kernel::new(platform);
-    kernel.boot();
+    platform.init_cpu();
+    let _ = writeln!(con, "[boot] CPU OK");
 
-    // ── boot banner ──────────────────────────────────────────
-    let _ = writeln!(con, "");
-    let _ = writeln!(con, "========================================");
-    let _ = writeln!(con, "  VeerOS v{VERSION}");
-    let _ = writeln!(con, "  Platform : {}", kernel.platform_name());
-    let _ = writeln!(con, "  Arch     : AArch64 (Cortex-A76)");
-    let _ = writeln!(con, "  Scheduler: {}", kernel.scheduler_label());
-    let _ = writeln!(con, "========================================");
-    let _ = writeln!(con, "");
+    // Skip GIC + Timer for now — just confirm we can reach this point
+    let kernel = Kernel::new(platform);
+    let _ = writeln!(con, "[boot] Kernel struct ready");
+    let _ = writeln!(con, "[boot] Scheduler: {}", kernel.scheduler_label());
+
+    // ── UART: DO NOT ENABLE YET ────────────────────────────
+    // RP1 BAR address needs verification. Keep HDMI-only for now.
+    // soc_raspi5::fbcon::enable_uart_mirror();
+    let _ = writeln!(con, "[boot] UART: skipped (HDMI-only mode)");
 
     // ── kernel heap ──────────────────────────────────────────
     unsafe {
@@ -437,75 +534,108 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(con, "[boot] GIC-400 initialised (PPI #30 enabled)");
 
     // ── ARM generic timer ────────────────────────────────────
+    let _ = writeln!(con, "[boot] configuring ARM timer...");
     let timer = system_timer();
+    let freq = timer.frequency();
+    let _ = writeln!(con, "[boot] timer freq = {} Hz", freq);
     timer.configure_tick(TICK_PERIOD_US);
     unsafe { *TIMER.0.get() = timer; }
-    let _ = writeln!(con, "[boot] ARM generic timer tick @ {} us", TICK_PERIOD_US);
+    let _ = writeln!(con, "[boot] ARM timer tick @ {} us", TICK_PERIOD_US);
 
-    // ── enable IRQ in DAIF ───────────────────────────────────
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        // Clear IRQ mask bit (bit 7 of DAIF → bit 1 of DAIFClr).
-        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
-    }
-    let _ = writeln!(con, "[boot] IRQ unmasked");
+    // NOTE: IRQ is enabled later, just before eret into the first task.
+    // If enabled here, timer IRQs would fire with TPIDR_EL1 unset,
+    // causing the IRQ handler to save context via a wild pointer.
+    let _ = writeln!(con, "[boot] IRQ will be enabled at scheduler start");
 
     // ── SD card (EMMC2) ──────────────────────────────────────
+    let _ = writeln!(con, "[boot] SD card (EMMC2)...");
     {
         let sd = unsafe { &mut *SD.0.get() };
-        if sd.init() {
+        if sd.init_reuse() {
             use arch::BlockDevice;
-            let _ = writeln!(con, "[boot] EMMC2 SD card: ready ({} sectors)", sd.block_count());
+            let _ = writeln!(con, "[boot]   reuse OK, {} sectors", sd.block_count());
+        } else if sd.init() {
+            use arch::BlockDevice;
+            let _ = writeln!(con, "[boot]   full init OK, {} sectors", sd.block_count());
         } else {
-            let _ = writeln!(con, "[boot] EMMC2 SD card: not detected or init failed");
+            let _ = writeln!(con, "[boot]   SD init FAILED");
         }
     }
 
+    // ── RP1 discovery via BRCM PCIe driver ───────────────────
+    let rp1_ok = {
+        let _ = writeln!(con, "[boot] PCIe → RP1...");
+        let rp1_info_inner = soc_raspi5::pcie::init_rp1(|args| {
+            let _ = writeln!(con, "[pcie] {}", args);
+        }, |addr| safe_read32(addr));
+        if let Some(ref info) = rp1_info_inner {
+            let _ = writeln!(con, "[boot] RP1 OK on {} — BAR {:#x} ({} KiB)",
+                info.controller, info.bar_base, info.bar_size / 1024);
+        } else {
+            let _ = writeln!(con, "[boot] RP1 NOT FOUND");
+        }
+        rp1_info_inner.is_some()
+    };
+
     // ── USB (xHCI via RP1) ───────────────────────────────────
-    {
+    if rp1_ok {
         use arch::UsbHostController;
+        let _ = writeln!(con, "[boot] starting xHCI0 init...");
         let xhci0 = unsafe { &mut *XHCI0.0.get() };
         if xhci0.init() {
             let _ = writeln!(con, "[boot] xHCI0 (USB 3.0): {} ports, {} devices",
                 xhci0.port_count(), xhci0.num_devices);
+            let kbd0 = xhci0.hid_keyboard_count();
+            if kbd0 > 0 {
+                let _ = writeln!(con, "[boot]   {} HID keyboard(s) on xHCI0", kbd0);
+            }
         } else {
             let _ = writeln!(con, "[boot] xHCI0 (USB 3.0): init failed");
         }
+        let _ = writeln!(con, "[boot] starting xHCI1 init...");
         let xhci1 = unsafe { &mut *XHCI1.0.get() };
         if xhci1.init() {
             let _ = writeln!(con, "[boot] xHCI1 (USB 2.0): {} ports, {} devices",
                 xhci1.port_count(), xhci1.num_devices);
+            let kbd1 = xhci1.hid_keyboard_count();
+            if kbd1 > 0 {
+                let _ = writeln!(con, "[boot]   {} HID keyboard(s) on xHCI1", kbd1);
+            }
         } else {
             let _ = writeln!(con, "[boot] xHCI1 (USB 2.0): init failed");
         }
+
+        // Enable UART mirror now that RP1 is confirmed accessible
+        soc_raspi5::fbcon::enable_uart_mirror();
+        let _ = writeln!(con, "[boot] UART0 enabled (RP1 accessible)");
+
+        // Initialise input subsystem (USB HID keyboard/mouse)
+        unsafe { (*INPUT.0.get()).init(); }
+        // Register keyboard-poll callback so FbConsole can read USB keys.
+        soc_raspi5::fbcon::set_kbd_poll(kbd_poll_fn, kbd_has_data_fn);
+        let _ = writeln!(con, "[boot] input subsystem: active");
+    } else {
+        let _ = writeln!(con, "[boot] xHCI: skipped (RP1 not responding)");
+        let _ = writeln!(con, "[boot] UART: skipped (RP1 not responding)");
     }
 
-    // ── HDMI framebuffer ─────────────────────────────────────
+    // ── HDMI framebuffer driver registration ───────────────────
     {
-        use soc_raspi5::fb;
-        match fb::init_framebuffer(640, 480, 32) {
-            Some(info) => {
-                let fbcon = FbConsole::new(info);
-                fbcon.clear_screen();
-                unsafe { *FBCON.0.get() = fbcon; }
-
-                // Register framebuffer driver
-                unsafe {
-                    let reg = &mut *DRIVERS.0.get();
-                    let _ = reg.register("hdmi-fb", DriverCaps {
-                        mmio_regions: 1,
-                        uses_interrupts: false,
-                        uses_dma: false,
-                        uses_network: false,
-                    });
-                }
-
-                let _ = writeln!(con, "[boot] HDMI framebuffer {}×{} @ {:#x} (pitch={})",
-                    info.width, info.height, info.fb_ptr as usize, info.pitch);
+        let fb_active = unsafe { (*FBCON.0.get()).is_active() };
+        if fb_active {
+            // Register framebuffer driver (FB was init'd early)
+            unsafe {
+                let reg = &mut *DRIVERS.0.get();
+                let _ = reg.register("hdmi-fb", DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: false,
+                    uses_dma: false,
+                    uses_network: false,
+                });
             }
-            None => {
-                let _ = writeln!(con, "[boot] HDMI framebuffer: not available (UART-only mode)");
-            }
+            let _ = writeln!(con, "[boot] HDMI framebuffer: active");
+        } else {
+            let _ = writeln!(con, "[boot] HDMI framebuffer: not available (UART-only mode)");
         }
     }
 
@@ -605,14 +735,10 @@ pub extern "C" fn _rust_start() -> ! {
     #[cfg(feature = "samples")]
     let _ = writeln!(con, "[boot] sample tasks registered (hello, timer, ipc-tx, ipc-rx)");
 
-    // ── start the first task (never returns) ─────────────────
-    let _ = writeln!(con, "[boot] starting scheduler — preemptive mode");
-    let _ = writeln!(con, "");
-
     // ── snapshot boot log into klog ──────────────────────────
     {
         let klog = unsafe { &mut *KLOG.0.get() };
-        let _ = writeln!(klog, "[boot] VeerOS v{VERSION} — Raspberry Pi 5 (AArch64)");
+        let _ = writeln!(klog, "[boot] VeerOS v{VERSION} -- Raspberry Pi 5 (AArch64)");
         let _ = writeln!(klog, "[boot] heap {} KiB, VFS ready, {} drivers",
             HEAP_SIZE / 1024, 3);
         let sd = unsafe { &*SD.0.get() };
@@ -624,9 +750,13 @@ pub extern "C" fn _rust_start() -> ! {
         let _ = writeln!(klog, "[boot] scheduler starting (preemptive mode)");
     }
 
+    // ── start the first task (never returns) ─────────────────
     unsafe {
         let sched = &mut *SCHEDULER.0.get();
+        let _ = writeln!(con, "[boot] starting scheduler -- preemptive mode");
         let ctx_ptr = sched.start().expect("no runnable task");
+        let task = &sched.tasks[sched.current];
+        let _ = writeln!(con, "[boot] first task: {}", task.name);
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -649,23 +779,91 @@ pub extern "C" fn _rust_start() -> ! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Safe MMIO probe — reads a u32 from an address, returning None on fault
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Try to read a `u32` from `addr`. Returns `Some(value)` if the read
+/// succeeded, or `None` if it caused a data abort (unmapped memory).
+///
+/// Uses the trap handler's probe mechanism: sets PROBE_ACTIVE, does
+/// a volatile read, checks PROBE_FAULTED.
+#[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
+fn safe_read32(addr: usize) -> Option<u32> {
+    unsafe {
+        trap::PROBE_ACTIVE = true;
+        trap::PROBE_FAULTED = false;
+
+        let val: u32;
+        core::arch::asm!(
+            "ldr {val:w}, [{addr}]",
+            addr = in(reg) addr,
+            val = out(reg) val,
+            options(nostack),
+        );
+
+        trap::PROBE_ACTIVE = false;
+
+        if trap::PROBE_FAULTED {
+            None
+        } else {
+            Some(val)
+        }
+    }
+}
+
+/// Print a probe result line.
+#[allow(dead_code)]
+fn print_probe(con: &mut Console<FbConsole>, label: &str, val: Option<u32>) {
+    match val {
+        Some(v) => { let _ = writeln!(con, "[boot]   {} = {:#010x}", label, v); }
+        None    => { let _ = writeln!(con, "[boot]   {} = FAULT", label); }
+    }
+}
+
+/// Read a 32-bit value from PCIe config space using BRCM EXT_CFG mechanism.
+// (pcie_config_read removed — now in soc_raspi5::pcie module)
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Console I/O callbacks (used by the syscall dispatcher)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(dead_code)]
 pub(crate) fn console_write_byte(b: u8) {
-    let serial = default_serial();
-    let mut con = Console::new(serial);
-    let _ = con.write_str(unsafe {
-        core::str::from_utf8_unchecked(core::slice::from_ref(&b))
-    });
+    use arch::Serial;
+    let fbcon = unsafe { *FBCON.0.get() };
+    fbcon.write_byte(b);
+}
+
+/// Keyboard poll callback — registered with FbConsole so `read_byte()`
+/// can pull from the USB HID keyboard queue fed by the timer tick.
+fn kbd_poll_fn() -> Option<u8> {
+    let input = unsafe { &mut *INPUT.0.get() };
+    if !input.active { return None; }
+    let mut buf = [0u8; 1];
+    if input.kbd_read(&mut buf) > 0 { Some(buf[0]) } else { None }
+}
+
+/// Non-consuming check: does the keyboard queue have data?
+fn kbd_has_data_fn() -> bool {
+    let input = unsafe { &*INPUT.0.get() };
+    input.active && input.kbd_has_data()
 }
 
 #[allow(dead_code)]
 pub(crate) fn console_read_byte() -> u8 {
     use arch::Serial;
-    let serial = default_serial();
-    serial.read_byte()
+    // Check USB keyboard queue first (fed by timer-tick HID poll).
+    let input = unsafe { &mut *INPUT.0.get() };
+    if input.active {
+        let mut buf = [0u8; 1];
+        if input.kbd_read(&mut buf) > 0 {
+            return buf[0];
+        }
+    }
+    // Fall back to UART.
+    let fbcon = unsafe { *FBCON.0.get() };
+    fbcon.read_byte()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

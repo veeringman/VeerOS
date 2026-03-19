@@ -22,10 +22,11 @@
 use arch::BlockDevice;
 
 // ─── EMMC2 register base ─────────────────────────────────────────────
-/// EMMC2 base address on RPi5 (firmware-remapped, per DTB).
-/// The BCM2712 maps EMMC2 at this address in the 40-bit PA space.
-/// Confirmed via `dtc -I dtb -O dts bcm2712-rpi-5-b.dtb`.
-const EMMC2_BASE: usize = 0x10_7D00_4000;
+/// EMMC2 base address on RPi5 (BCM2712).
+/// From DTB: soc@107c000000 / mmc@fff000 → soc child 0xFFF000
+/// soc ranges: child 0x0 → parent 0x10_0000_0000, size 0x8000_0000
+/// CPU physical = 0x10_0000_0000 + 0xFFF000 = 0x10_00FF_F000
+const EMMC2_BASE: usize = 0x10_00FF_F000;
 
 // ─── SDHCI register offsets ──────────────────────────────────────────
 const REG_ARG2:         usize = 0x00;
@@ -129,7 +130,68 @@ impl Emmc2Sd {
         }
     }
 
-    /// Attempt to initialise the SD card. Returns `true` on success.
+    /// Attempt to initialise the SD card by reusing the firmware's existing setup.
+    ///
+    /// The VideoCore firmware already initialised EMMC2, loaded kernel8.img,
+    /// and left the card in transfer state. We just verify the controller looks
+    /// alive and set our state to Ready.
+    ///
+    /// Returns `true` on success.
+    pub fn init_reuse(&mut self) -> bool {
+        // Read SLOTISR_VER to check we can see the controller
+        let ver = self.read_reg(REG_SLOTISR_VER);
+        if ver == 0 || ver == 0xFFFF_FFFF {
+            self.state = SdState::Error;
+            return false;
+        }
+
+        // Controller is alive. Read status — card should not be in
+        // reset (CONTROL1 bits 26:24 should be 0).
+        let ctrl1 = self.read_reg(REG_CONTROL1);
+        if ctrl1 & 0x0700_0000 != 0 {
+            // Controller is in reset — can't reuse
+            self.state = SdState::Error;
+            return false;
+        }
+
+        // Check clock is running (bit 1 = CLK_STABLE, bit 2 = CLK_EN)
+        if ctrl1 & 0x06 != 0x06 {
+            // Try enabling clock
+            self.write_reg(REG_CONTROL1, ctrl1 | 0x06);
+            self.delay(100);
+            let ctrl1 = self.read_reg(REG_CONTROL1);
+            if ctrl1 & 0x02 == 0 {
+                self.state = SdState::Error;
+                return false;
+            }
+        }
+
+        // Enable interrupt masks
+        self.write_reg(REG_IRPT_MASK, 0xFFFF_FFFF);
+        self.write_reg(REG_IRPT_EN, 0xFFFF_FFFF);
+        self.write_reg(REG_INTERRUPT, 0xFFFF_FFFF); // clear pending
+
+        // Assume SDHC (all modern cards and Pi cards are)
+        self.sdhc = true;
+        // Fallback sector count — can be read later from CSD
+        self.sectors = 2 * 1024 * 1024 * 1024 / SD_BLOCK_SIZE as u64;
+
+        // Test with a dummy read of block 0 to confirm data path works
+        let mut buf = [0u8; 512];
+        if !self.read_block_raw(0, &mut buf) {
+            self.state = SdState::Error;
+            return false;
+        }
+        // Block 0 should be the MBR — check for 0x55 0xAA at offset 510
+        if buf[510] == 0x55 && buf[511] == 0xAA {
+            // Valid MBR — card is definitely working
+        }
+
+        self.state = SdState::Ready;
+        true
+    }
+
+    /// Attempt to initialise the SD card from scratch. Returns `true` on success.
     pub fn init(&mut self) -> bool {
         // Reset the controller
         self.write_reg(REG_CONTROL1, 0x0F00_0000); // reset all

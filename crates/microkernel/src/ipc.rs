@@ -100,9 +100,12 @@ impl Ipc {
         self.mailboxes[d].msg = msg;
         self.mailboxes[d].full = true;
 
-        // Wake the destination if it was blocked on recv.
-        if sched.tasks[d].state == TaskState::Blocked {
+        // Wake the destination if it was blocked on IPC recv.
+        if sched.tasks[d].state == TaskState::Blocked
+            && sched.tasks[d].block_reason == crate::task::BlockReason::IpcRecv
+        {
             sched.tasks[d].state = TaskState::Ready;
+            sched.tasks[d].block_reason = crate::task::BlockReason::None;
         }
 
         true
@@ -127,6 +130,7 @@ impl Ipc {
             // Nothing pending — block until a send() wakes us.
             if sched.tasks[t].state == TaskState::Running {
                 sched.tasks[t].state = TaskState::Blocked;
+                sched.tasks[t].block_reason = crate::task::BlockReason::IpcRecv;
             }
             None
         }

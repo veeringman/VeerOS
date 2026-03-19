@@ -1,8 +1,8 @@
 //! Framebuffer console — implements `Serial` for HDMI output.
 //!
-//! Renders text on the GPU-allocated framebuffer using an 8×16 bitmap
-//! font (8×8 data rendered double-height).  Output is mirrored to the
-//! PL011 UART so the serial terminal stays in sync.
+//! Renders text on the GPU-allocated framebuffer using an 8×8 bitmap
+//! font.  Output is mirrored to the PL011 UART so the serial terminal
+//! stays in sync.
 //!
 //! Input (read_byte / has_data) is always sourced from the UART, since
 //! the framebuffer is output-only.
@@ -10,14 +10,15 @@
 use arch::Serial;
 use crate::fb::FbInfo;
 use crate::font;
+use crate::logo;
 use crate::uart::Pl011;
 
 // ─── Console dimensions ──────────────────────────────────────────────
 
 /// Character cell width in pixels.
 const CHAR_W: u32 = font::CHAR_W;   // 8
-/// Character cell height in pixels (double-height rendering).
-const CHAR_H: u32 = font::CHAR_H;   // 16
+/// Character cell height in pixels (glyph + row spacing).
+const CHAR_H: u32 = font::CHAR_H;   // 12
 
 // ─── Cursor state (module-level statics, single-core safe) ──────────
 
@@ -26,8 +27,8 @@ static mut CURSOR_ROW: u32 = 0;
 
 // ─── Colors ──────────────────────────────────────────────────────────
 
-/// Foreground: white (0x00RRGGBB).
-const FG_COLOR: u32 = 0x00FF_FFFF;
+/// Foreground: terminal green (0x00RRGGBB).
+const FG_COLOR: u32 = 0x0000_FF00;
 /// Background: black.
 const BG_COLOR: u32 = 0x0000_0000;
 
@@ -86,6 +87,35 @@ impl FbConsole {
         !self.fb_ptr.is_null()
     }
 
+    /// Blit the boot logo at pixel position (x, y) with alpha blending
+    /// against the black background. Returns the width used in pixels.
+    pub fn blit_logo(&self, x: u32, y: u32) -> u32 {
+        if !self.is_active() {
+            return 0;
+        }
+        let w = logo::LOGO_W;
+        let h = logo::LOGO_H;
+        for dy in 0..h {
+            for dx in 0..w {
+                let px = logo::LOGO_DATA[(dy * w + dx) as usize];
+                let a = (px >> 24) & 0xFF;
+                if a == 0 {
+                    continue; // fully transparent — skip
+                }
+                let r = (px >> 16) & 0xFF;
+                let g = (px >> 8) & 0xFF;
+                let b = px & 0xFF;
+                // Alpha blend against black: out = color * alpha / 255
+                let ro = (r * a) / 255;
+                let go = (g * a) / 255;
+                let bo = (b * a) / 255;
+                let color = (ro << 16) | (go << 8) | bo;
+                unsafe { self.put_pixel(x + dx, y + dy, color); }
+            }
+        }
+        w
+    }
+
     /// Clear the entire screen to the background color.
     pub fn clear_screen(&self) {
         if !self.is_active() {
@@ -117,19 +147,16 @@ impl FbConsole {
         let py = row * CHAR_H;
 
         unsafe {
-            for glyph_row in 0..8u32 {
+            for glyph_row in 0..font::GLYPH_H {
                 let bits = glyph[glyph_row as usize];
-                // Each font row is rendered twice (double-height).
-                let y0 = py + glyph_row * 2;
-                let y1 = y0 + 1;
+                let y = py + glyph_row;
                 for bit in 0..8u32 {
                     let color = if bits & (0x80 >> bit) != 0 {
                         FG_COLOR
                     } else {
                         BG_COLOR
                     };
-                    self.put_pixel(px + bit, y0, color);
-                    self.put_pixel(px + bit, y1, color);
+                    self.put_pixel(px + bit, y, color);
                 }
             }
         }
@@ -169,6 +196,7 @@ impl FbConsole {
                     CURSOR_COL = 0;
                 }
                 b'\n' => {
+                    CURSOR_COL = 0;
                     CURSOR_ROW += 1;
                     if CURSOR_ROW >= self.rows {
                         self.scroll_up();
@@ -215,21 +243,85 @@ impl FbConsole {
 
 impl Serial for FbConsole {
     fn write_byte(&self, byte: u8) {
-        // Always mirror to UART (serial terminal stays in sync).
-        Pl011::new().write_byte(byte);
-
-        // If framebuffer is active, also render on screen.
+        // If framebuffer is active, render on screen.
         if self.is_active() {
             self.render_byte(byte);
+        }
+
+        // Mirror to UART only when RP1 is confirmed reachable.
+        // The RP1 southbridge is behind PCIe — accessing it before
+        // the firmware maps the BAR causes a synchronous data abort.
+        if unsafe { UART_READY } {
+            Pl011::new().write_byte(byte);
         }
     }
 
     fn read_byte(&self) -> u8 {
-        // Input always comes from UART.
-        Pl011::new().read_byte()
+        // Check USB keyboard queue first.
+        loop {
+            if let Some(f) = unsafe { KBD_POLL_FN } {
+                if let Some(b) = f() {
+                    return b;
+                }
+            }
+            if unsafe { UART_READY } {
+                if Pl011::new().has_data() {
+                    return Pl011::new().read_byte();
+                }
+            }
+            // No data from either source — yield and retry.
+            #[cfg(target_arch = "aarch64")]
+            unsafe { core::arch::asm!("wfe", options(nomem, nostack)); }
+        }
     }
 
     fn has_data(&self) -> bool {
-        Pl011::new().has_data()
+        if let Some(f) = unsafe { KBD_HAS_DATA_FN } {
+            if f() {
+                return true;
+            }
+        }
+        if unsafe { UART_READY } {
+            Pl011::new().has_data()
+        } else {
+            false
+        }
+    }
+}
+
+// ─── UART readiness flag ─────────────────────────────────────────────
+
+/// Set by the kernel after confirming RP1 UART is accessible.
+static mut UART_READY: bool = false;
+
+/// Mark the PL011 UART as safe to access (call after RP1 BAR is mapped).
+pub fn enable_uart_mirror() {
+    unsafe { UART_READY = true; }
+}
+
+/// Set the text cursor position (column, row) directly.
+///
+/// # Safety
+/// Caller must ensure col and row are within the console grid.
+pub unsafe fn set_cursor(col: u32, row: u32) {
+    CURSOR_COL = col;
+    CURSOR_ROW = row;
+}
+
+// ─── USB keyboard hook ──────────────────────────────────────────────
+
+/// Optional callback to poll USB keyboard for a byte.
+/// Returns `Some(ascii)` if a key is available, `None` otherwise.
+static mut KBD_POLL_FN: Option<fn() -> Option<u8>> = None;
+
+/// Optional callback to check if the keyboard queue has data (non-consuming).
+static mut KBD_HAS_DATA_FN: Option<fn() -> bool> = None;
+
+/// Register keyboard callbacks (called by the kernel after
+/// InputSubsystem is initialised).
+pub fn set_kbd_poll(poll: fn() -> Option<u8>, has_data: fn() -> bool) {
+    unsafe {
+        KBD_POLL_FN = Some(poll);
+        KBD_HAS_DATA_FN = Some(has_data);
     }
 }

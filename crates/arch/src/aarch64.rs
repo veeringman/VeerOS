@@ -217,7 +217,7 @@ _veer_trap_irq:
     ldr   x1, =__stack_top
     mov   sp, x1
 
-    bl    _veer_trap_dispatch
+    bl    _veer_irq_dispatch
 
     msr   tpidr_el1, x0
 
@@ -292,6 +292,10 @@ _veer_start_first_task:
     ldr   x1, [x0, #8]
     ldr   x0, [x0, #0]
 
+    // IRQ is enabled atomically by eret: SPSR_EL1 has I=0 (bit 7 clear),
+    // so restoring PSTATE from SPSR unmasks IRQ at the same instant PC
+    // jumps to the task.  No daifclr here — it would create a race where
+    // a pending IRQ overwrites ELR_EL1/SPSR_EL1 before eret consumes them.
     eret
 "#
 );

@@ -10,6 +10,7 @@
 
 use arch::{SavedContext, TaskContext, MemPerms, validate_user_ptr};
 use crate::channel::{Channels, ChanMsg};
+use crate::driver::DriverRegistry;
 use crate::fat32::Fat32;
 use crate::futex::FutexTable;
 use crate::input::InputSubsystem;
@@ -111,6 +112,7 @@ pub unsafe fn dispatch(
     fat32: &mut Fat32,
     mounts: &mut MountTable,
     input: &mut InputSubsystem,
+    drivers: &mut DriverRegistry,
     console_write: fn(u8),
     console_read: fn() -> u8,
 ) -> SyscallAction {
@@ -143,12 +145,25 @@ pub unsafe fn dispatch(
 
         SYS_EXIT => {
             let cur = sched.current;
+            // Diagnostic: confirm SYS_EXIT is reached.
+            console_write(b'[');
+            console_write(b'X');
+            console_write(b'I');
+            console_write(b'T');
+            console_write(b':');
+            console_write(b'0' + (cur as u8 % 10));
+            console_write(b']');
+            console_write(b'\n');
             if cur < sched.tasks.len() {
                 use crate::task::TaskState;
                 let pid = sched.tasks[cur].process_id;
                 sched.tasks[cur].exit_code = a0;
                 sched.tasks[cur].state = TaskState::Free;
                 sched.tasks[cur].block_reason = BlockReason::None;
+                sched.tasks[cur].wakeup_tick = 0;
+                sched.tasks[cur].join_target = usize::MAX;
+                // Zero the PC so any accidental resumption is detectable.
+                sched.tasks[cur].context.set_pc(0);
                 // Notify the process table that a thread exited.
                 processes.thread_exited(pid, a0);
                 // Wake any task that was joining on us.
@@ -238,7 +253,6 @@ pub unsafe fn dispatch(
                     sched.tasks[cur].block_reason = BlockReason::Join;
                     sched.tasks[cur].join_target = target;
                 }
-                sched.save_current_context(c);
                 SyscallAction::Reschedule
             }
         }
@@ -361,9 +375,9 @@ pub unsafe fn dispatch(
                     c.set_pc(pc - TaskContext::INSTRUCTION_SIZE);
                     let cur = sched.current;
                     if cur < sched.tasks.len() {
+                        sched.tasks[cur].state = TaskState::Blocked;
                         sched.tasks[cur].block_reason = BlockReason::IpcRecv;
                     }
-                    sched.save_current_context(c);
                     SyscallAction::Reschedule
                 }
             }
@@ -420,7 +434,6 @@ pub unsafe fn dispatch(
                 sched.tasks[cur].block_reason = BlockReason::Sleep;
                 sched.tasks[cur].wakeup_tick = sched.ticks.saturating_add(a0 as u64);
             }
-            sched.save_current_context(c);
             SyscallAction::Reschedule
         }
 
@@ -538,7 +551,6 @@ pub unsafe fn dispatch(
             }
             let blocked = unsafe { futex.wait(sched, tid, addr, expected) };
             if blocked {
-                sched.save_current_context(c);
                 c.set_ret(0, 0); // will be seen on wakeup
                 SyscallAction::Reschedule
             } else {
@@ -583,7 +595,6 @@ pub unsafe fn dispatch(
                     // Rewind PC so the send is retried on wakeup.
                     let pc = c.get_pc();
                     c.set_pc(pc - TaskContext::INSTRUCTION_SIZE);
-                    sched.save_current_context(c);
                     SyscallAction::Reschedule
                 }
                 Err(()) => {
@@ -614,7 +625,6 @@ pub unsafe fn dispatch(
                     // Rewind PC so the recv is retried on wakeup.
                     let pc = c.get_pc();
                     c.set_pc(pc - TaskContext::INSTRUCTION_SIZE);
-                    sched.save_current_context(c);
                     SyscallAction::Reschedule
                 }
                 Err(()) => {
@@ -679,7 +689,6 @@ pub unsafe fn dispatch(
                 // Rewind PC so poll_wait is re-executed on wakeup.
                 let pc = c.get_pc();
                 c.set_pc(pc - TaskContext::INSTRUCTION_SIZE);
-                sched.save_current_context(c);
                 SyscallAction::Reschedule
             }
         }
@@ -719,7 +728,6 @@ pub unsafe fn dispatch(
                     }
                     let pc = c.get_pc();
                     c.set_pc(pc - TaskContext::INSTRUCTION_SIZE);
-                    sched.save_current_context(c);
                     SyscallAction::Reschedule
                 }
             }
@@ -753,7 +761,6 @@ pub unsafe fn dispatch(
                         }
                         let pc = c.get_pc();
                         c.set_pc(pc - TaskContext::INSTRUCTION_SIZE);
-                        sched.save_current_context(c);
                         SyscallAction::Reschedule
                     }
                 }
@@ -782,7 +789,6 @@ pub unsafe fn dispatch(
                         }
                         let pc = c.get_pc();
                         c.set_pc(pc - TaskContext::INSTRUCTION_SIZE);
-                        sched.save_current_context(c);
                         SyscallAction::Reschedule
                     }
                 }
@@ -1651,6 +1657,89 @@ pub unsafe fn dispatch(
             SyscallAction::Resume
         }
 
+        // ── Driver / userspace I/O ───────────────────────────────
+        SYS_DRV_MMIO_READ32 => {
+            let addr = a0;
+            // Validate that the calling task has a PMP-granted region covering this address.
+            let cur = sched.current;
+            let allowed = if cur < sched.tasks.len() {
+                let tcb = &sched.tasks[cur];
+                // Check thread regions for an MMIO grant (RW permission).
+                tcb.regions[..tcb.region_count].iter().any(|r| r.allows(addr, 4, MemPerms::READ))
+            } else {
+                false
+            };
+            if allowed {
+                let val = unsafe { core::ptr::read_volatile(addr as *const u32) };
+                c.set_ret(0, val as usize);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_DRV_MMIO_WRITE32 => {
+            let addr = a0;
+            let val = a1 as u32;
+            let cur = sched.current;
+            let allowed = if cur < sched.tasks.len() {
+                let tcb = &sched.tasks[cur];
+                tcb.regions[..tcb.region_count].iter().any(|r| r.allows(addr, 4, MemPerms::RW))
+            } else {
+                false
+            };
+            if allowed {
+                unsafe { core::ptr::write_volatile(addr as *mut u32, val) };
+                c.set_ret(0, 0);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_DRV_IRQ_WAIT => {
+            let irq_line = a0;
+            let cur = sched.current;
+            if cur < sched.tasks.len() {
+                sched.tasks[cur].state = TaskState::Blocked;
+                sched.tasks[cur].block_reason = BlockReason::IrqWait(irq_line);
+            }
+            c.set_ret(0, 0);
+            SyscallAction::Reschedule
+        }
+
+        SYS_DRV_IRQ_ACK => {
+            // Re-enable the interrupt line after handling.
+            // The actual ack is done by the kernel in the ISR; this is
+            // a notification from the driver that it finished handling.
+            c.set_ret(0, 0);
+            SyscallAction::Resume
+        }
+
+        SYS_DRV_REGISTER => {
+            let chan_id = a0;
+            let drv_handle = a1;
+            // Validate: driver handle exists and channel is open.
+            let ok = drv_handle < drivers.count()
+                && chan_id < crate::channel::MAX_CHANNELS
+                && channels.chans[chan_id].open;
+            c.set_ret(0, if ok { 0 } else { usize::MAX });
+            SyscallAction::Resume
+        }
+
+        SYS_DRV_LOG => {
+            let ptr = a0 as *const u8;
+            let len = a1;
+            if len > 0 && len <= 256 && check_user_ptr(sched, processes, a0, len, MemPerms::READ) {
+                let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
+                for &b in buf {
+                    console_write(b);
+                }
+            }
+            c.set_ret(0, 0);
+            SyscallAction::Resume
+        }
+
         // ── Unknown ─────────────────────────────────────────────
         _ => {
             // Unknown syscall — return -1 (usize::MAX) in ret0.
@@ -1673,6 +1762,18 @@ pub fn wake_sleepers(sched: &mut Scheduler) {
                 task.block_reason = BlockReason::None;
                 task.state = TaskState::Ready;
             }
+        }
+    }
+}
+
+/// Wake any driver tasks blocked on `IrqWait` for the given IRQ line.
+///
+/// Called from the hardware ISR after acknowledging the interrupt.
+pub fn wake_irq_waiters(sched: &mut Scheduler, irq_line: usize) {
+    for task in sched.tasks.iter_mut() {
+        if task.state == TaskState::Blocked && task.block_reason == BlockReason::IrqWait(irq_line) {
+            task.block_reason = BlockReason::None;
+            task.state = TaskState::Ready;
         }
     }
 }

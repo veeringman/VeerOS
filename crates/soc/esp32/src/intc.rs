@@ -19,7 +19,7 @@ use arch::InterruptController;
 const INTC_BASE: usize = 0x600C_2000;
 
 #[cfg(feature = "c6")]
-const INTC_BASE: usize = 0x600C_2000;
+const INTC_BASE: usize = 0x6001_0000;
 
 #[cfg(feature = "h2")]
 const INTC_BASE: usize = 0x600C_2000;
@@ -40,15 +40,33 @@ const INTC_BASE: usize = 0x600C_2000;
 /// peripheral source to the chosen CPU interrupt line.
 const MAP_REG_OFFSET: usize = 0x000;
 
-/// Interrupt enable register — one bit per CPU interrupt line (1–31).
+// ---------------------------------------------------------------------------
+// PLIC base (ESP32-C6 uses PLIC at 0x2000_1000 for interrupt
+// enable / priority / threshold, separate from the INTMATRIX).
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "c6")]
+const PLIC_BASE: usize = 0x2000_1000;
+#[cfg(not(feature = "c6"))]
+const PLIC_BASE: usize = 0x0; // unused on non-C6
+
+/// PLIC machine-external-interrupt enable (1 bit per CPU int line).
+const PLIC_MXINT_ENABLE: usize = 0x00;
+/// PLIC interrupt type: 0=level, 1=edge (1 bit per CPU int line).
+const PLIC_MXINT_TYPE: usize = 0x04;
+/// PLIC edge-interrupt clear (write 1 to clear, 1 bit per CPU int line).
+const PLIC_MXINT_CLEAR: usize = 0x08;
+/// PLIC per-interrupt priority: base + 0x10 + 4*int_num  (bits [3:0]).
+const PLIC_MXINT_PRI_BASE: usize = 0x10;
+/// PLIC interrupt threshold (bits [7:0]).
+const PLIC_MXINT_THRESH: usize = 0x90;
+
+// Legacy offsets used by ESP32-C3 (INTMATRIX contains enable/pri/thresh).
+#[cfg(not(feature = "c6"))]
 const INT_ENABLE_REG: usize = 0x104;
-
-/// Interrupt priority registers — one per CPU interrupt line.
-/// Priority 0 = disabled; 1–15 valid priorities.
+#[cfg(not(feature = "c6"))]
 const INT_PRI_BASE: usize = 0x114;
-
-/// CPU interrupt threshold register — interrupts with priority ≤ threshold
-/// are masked.
+#[cfg(not(feature = "c6"))]
 const INT_THRESH_REG: usize = 0x190;
 
 // ---------------------------------------------------------------------------
@@ -86,24 +104,62 @@ impl Esp32Intc {
     /// Set the CPU interrupt priority threshold.
     /// Interrupts with priority ≤ threshold are masked.
     pub fn set_threshold(&self, threshold: u8) {
+        #[cfg(feature = "c6")]
+        unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_THRESH, threshold as u32) };
+        #[cfg(not(feature = "c6"))]
         unsafe { mmio_write(INTC_BASE + INT_THRESH_REG, threshold as u32) };
     }
 }
 
 impl InterruptController for Esp32Intc {
     fn enable_interrupt(&self, irq: u16) {
-        let val = unsafe { mmio_read(INTC_BASE + INT_ENABLE_REG) };
-        unsafe { mmio_write(INTC_BASE + INT_ENABLE_REG, val | (1 << irq)) };
+        #[cfg(feature = "c6")]
+        {
+            // Set interrupt type to level-triggered (clear the type bit).
+            let typ = unsafe { mmio_read(PLIC_BASE + PLIC_MXINT_TYPE) };
+            unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_TYPE, typ & !(1 << irq)) };
+            // Clear any stale edge-pending state.
+            unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_CLEAR, 1 << irq) };
+
+            let val = unsafe { mmio_read(PLIC_BASE + PLIC_MXINT_ENABLE) };
+            unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_ENABLE, val | (1 << irq)) };
+            // ESP32-C6 also requires the per-interrupt mie CSR bit to be set.
+            let mask = 1u32 << irq;
+            unsafe { core::arch::asm!("csrs mie, {0}", in(reg) mask, options(nomem, nostack)); }
+        }
+        #[cfg(not(feature = "c6"))]
+        {
+            let val = unsafe { mmio_read(INTC_BASE + INT_ENABLE_REG) };
+            unsafe { mmio_write(INTC_BASE + INT_ENABLE_REG, val | (1 << irq)) };
+        }
     }
 
     fn disable_interrupt(&self, irq: u16) {
-        let val = unsafe { mmio_read(INTC_BASE + INT_ENABLE_REG) };
-        unsafe { mmio_write(INTC_BASE + INT_ENABLE_REG, val & !(1 << irq)) };
+        #[cfg(feature = "c6")]
+        {
+            let val = unsafe { mmio_read(PLIC_BASE + PLIC_MXINT_ENABLE) };
+            unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_ENABLE, val & !(1 << irq)) };
+            let mask = 1u32 << irq;
+            unsafe { core::arch::asm!("csrc mie, {0}", in(reg) mask, options(nomem, nostack)); }
+        }
+        #[cfg(not(feature = "c6"))]
+        {
+            let val = unsafe { mmio_read(INTC_BASE + INT_ENABLE_REG) };
+            unsafe { mmio_write(INTC_BASE + INT_ENABLE_REG, val & !(1 << irq)) };
+        }
     }
 
     fn set_priority(&self, irq: u16, priority: u8) {
-        let reg = INTC_BASE + INT_PRI_BASE + (irq as usize) * 4;
-        unsafe { mmio_write(reg, priority as u32) };
+        #[cfg(feature = "c6")]
+        {
+            let reg = PLIC_BASE + PLIC_MXINT_PRI_BASE + (irq as usize) * 4;
+            unsafe { mmio_write(reg, priority as u32) };
+        }
+        #[cfg(not(feature = "c6"))]
+        {
+            let reg = INTC_BASE + INT_PRI_BASE + (irq as usize) * 4;
+            unsafe { mmio_write(reg, priority as u32) };
+        }
     }
 
     fn enable_global(&self) {

@@ -59,11 +59,16 @@ pub trait Serial {
     /// Returns `true` if at least one byte is available to read without blocking.
     fn has_data(&self) -> bool { false }
 
-    /// Convenience: write an entire byte slice.
+    /// Flush any buffered TX data to the wire.  Default is no-op (for
+    /// byte-at-a-time UART drivers); USB-CDC drivers should override.
+    fn flush(&self) {}
+
+    /// Convenience: write an entire byte slice, then flush.
     fn write_bytes(&self, bytes: &[u8]) {
         for &b in bytes {
             self.write_byte(b);
         }
+        self.flush();
     }
 }
 
@@ -101,6 +106,7 @@ impl<S: Serial> fmt::Write for Console<S> {
             }
             self.serial.write_byte(b);
         }
+        self.serial.flush();
         Ok(())
     }
 }
@@ -229,7 +235,8 @@ impl MemPerms {
 }
 
 /// Maximum number of memory regions per task.
-pub const MAX_TASK_REGIONS: usize = 4;
+/// 8 regions: stack, guard, code, rodata, + up to 4 MMIO grants for userspace drivers.
+pub const MAX_TASK_REGIONS: usize = 8;
 
 /// A memory region descriptor associated with a task.
 #[derive(Debug, Clone, Copy)]

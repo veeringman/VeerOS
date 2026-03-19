@@ -87,14 +87,24 @@ pub fn ipc_sender_task() -> ! {
     for i in 0u32..3 {
         let opcode = 0x42u8;
         let ok = userlib::ipc::send(receiver_id, opcode, i as usize, 0xDEAD);
-        println!(
-            "[ipc-tx] sent msg #{} to task {} — ok={}",
-            i, receiver_id, ok
-        );
+        // Minimal output: just a dot per send to avoid flooding screen.
+        userlib::io::write_byte(b'.');
+        if !ok { userlib::io::write_byte(b'!'); }
         userlib::time::sleep(20);
     }
+    userlib::io::write_byte(b'\n');
 
     println!("[ipc-tx] done — exiting");
+    // Diagnostic: unmistakable marker before exit
+    userlib::io::write_byte(b'[');
+    userlib::io::write_byte(b'T');
+    userlib::io::write_byte(b'X');
+    userlib::io::write_byte(b'-');
+    userlib::io::write_byte(b'B');
+    userlib::io::write_byte(b'Y');
+    userlib::io::write_byte(b'E');
+    userlib::io::write_byte(b']');
+    userlib::io::write_byte(b'\n');
     userlib::task::exit(0);
 }
 
@@ -116,6 +126,15 @@ pub fn ipc_receiver_task() -> ! {
     }
 
     println!("[ipc-rx] done — exiting");
+    userlib::io::write_byte(b'[');
+    userlib::io::write_byte(b'R');
+    userlib::io::write_byte(b'X');
+    userlib::io::write_byte(b'-');
+    userlib::io::write_byte(b'B');
+    userlib::io::write_byte(b'Y');
+    userlib::io::write_byte(b'E');
+    userlib::io::write_byte(b']');
+    userlib::io::write_byte(b'\n');
     userlib::task::exit(0);
 }
 

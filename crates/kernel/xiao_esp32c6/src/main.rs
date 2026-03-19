@@ -6,9 +6,66 @@ mod trap;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 
-use arch::{Console, InterruptController, SavedContext, TickTimer};
+// ---------------------------------------------------------------------------
+// ESP-IDF app descriptor — required by the 2nd-stage bootloader to validate
+// the application image.  The struct is 256 bytes and must live in the
+// `.flash.appdesc` section so that `espflash` places it at the start of
+// the first flash segment.
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+struct EspAppDesc {
+    magic_word: u32,
+    secure_version: u32,
+    reserv1: [u32; 2],
+    version: [u8; 32],
+    project_name: [u8; 32],
+    time: [u8; 16],
+    date: [u8; 16],
+    idf_ver: [u8; 32],
+    app_elf_sha256: [u8; 32],
+    min_efuse_blk_rev_full: u16,
+    max_efuse_blk_rev_full: u16,
+    mmu_page_size: u8,
+    reserv3: [u8; 3],
+    reserv2: [u32; 18],
+}
+
+unsafe impl Sync for EspAppDesc {}
+
+const fn str_to_arr<const N: usize>(s: &str) -> [u8; N] {
+    let mut arr = [0u8; N];
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && i < N - 1 {
+        arr[i] = bytes[i];
+        i += 1;
+    }
+    arr
+}
+
+#[unsafe(link_section = ".veeros.appdesc")]
+#[used]
+static ESP_APP_DESC: EspAppDesc = EspAppDesc {
+    magic_word: 0xABCD5432,
+    secure_version: 0,
+    reserv1: [0; 2],
+    version: str_to_arr::<32>("0.1.0"),
+    project_name: str_to_arr::<32>("VeerOS"),
+    time: str_to_arr::<16>("00:00:00"),
+    date: str_to_arr::<16>("Jan  1 2026"),
+    idf_ver: str_to_arr::<32>("v5.5-veeros"),
+    app_elf_sha256: [0; 32],
+    min_efuse_blk_rev_full: 0,
+    max_efuse_blk_rev_full: 0xFFFF,
+    mmu_page_size: 16,  // log2(64KB)
+    reserv3: [0; 3],
+    reserv2: [0; 18],
+};
+
+use arch::{Console, InterruptController, SavedContext, Serial, TickTimer};
 use soc_esp32::{
-    default_serial, interrupt_controller, system_timer,
+    usb_serial, interrupt_controller, system_timer,
     systimer::SysTimer, Esp32Riscv,
 };
 use microkernel::Kernel;
@@ -30,8 +87,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Kernel tick period in microseconds (1 ms).
 const TICK_PERIOD_US: u32 = 1_000;
 
-/// SYSTIMER comparator 0 is routed to CPU interrupt source 7 on ESP32-C3/C6.
-const SYSTIMER_IRQ_SOURCE: u16 = 7;
+/// SYSTIMER comparator 0 interrupt source on ESP32-C6 (source 57).
+const SYSTIMER_IRQ_SOURCE: u16 = 57;
 /// We map it to CPU interrupt line 1.
 const SYSTIMER_CPU_INT: u8 = 1;
 
@@ -248,6 +305,11 @@ pub(crate) static KLOG: KlogCell = KlogCell(UnsafeCell::new(KernelLog::new()));
 /// RISC-V initial mstatus: MPIE=1 so mret enables interrupts, MPP=M-mode.
 const INITIAL_MSTATUS: usize = (1 << 7) | (3 << 11);
 
+/// RISC-V mstatus for U-mode tasks: MPIE=1, MPP=U-mode (0).
+/// When `mret` executes, MPP is copied to privilege and MPIE→MIE,
+/// so the task runs in U-mode with interrupts enabled.
+const UMODE_MSTATUS: usize = (1 << 7) | (0 << 11);
+
 // ---------------------------------------------------------------------------
 // Idle task — runs when nothing else is runnable
 // ---------------------------------------------------------------------------
@@ -265,8 +327,8 @@ fn idle_task() -> ! {
 
 /// Small stack for the idle task (lives in .bss).
 #[repr(align(16))]
-struct IdleStack([u8; 512]);
-static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
+struct IdleStack([u8; 2048]);
+static mut IDLE_STACK: IdleStack = IdleStack([0u8; 2048]);
 
 // ---------------------------------------------------------------------------
 // Shell task
@@ -277,11 +339,11 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
 #[repr(align(16))]
 struct ShellStack([u8; 4096]);
 #[cfg(feature = "shell")]
-static SHELL_STACK: ShellStack = ShellStack([0u8; 4096]);
+static mut SHELL_STACK: ShellStack = ShellStack([0u8; 4096]);
 
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
-    let serial = default_serial();
+    let serial = usb_serial();
     let mut con = Console::new(serial);
     let env = ShellEnv {
         version: VERSION,
@@ -339,6 +401,227 @@ fn shell_task() -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// Userspace driver tasks — run in U-mode with PMP-granted MMIO regions
+// ---------------------------------------------------------------------------
+
+/// Stacks for driver tasks (live in .bss).
+#[repr(align(16))]
+struct DrvStack4K([u8; 4096]);
+#[repr(align(16))]
+struct DrvStack2K([u8; 2048]);
+
+#[cfg(feature = "wifi")]
+static mut WIFI_DRV_STACK: DrvStack4K = DrvStack4K([0u8; 4096]);
+#[cfg(feature = "ble")]
+static mut BLE_DRV_STACK: DrvStack2K = DrvStack2K([0u8; 2048]);
+#[cfg(feature = "ieee802154")]
+static mut IEEE802154_DRV_STACK: DrvStack2K = DrvStack2K([0u8; 2048]);
+
+// ── Syscall wrappers (U-mode ecall) ────────────────────────────────────
+
+/// Write a 32-bit value to an MMIO register via kernel syscall.
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+fn drv_mmio_write32(addr: usize, val: u32) {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") addr,
+            in("a1") val as usize,
+            in("a7") 0xC1usize, // SYS_DRV_MMIO_WRITE32
+            options(nostack),
+        );
+    }
+}
+
+/// Read a 32-bit value from an MMIO register via kernel syscall.
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+fn drv_mmio_read32(addr: usize) -> u32 {
+    let ret: usize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") 0xC0usize, // SYS_DRV_MMIO_READ32
+            inlateout("a0") addr => ret,
+            options(nostack),
+        );
+    }
+    ret as u32
+}
+
+/// Block until the assigned IRQ fires.
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+fn drv_irq_wait(irq_line: usize) {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") irq_line,
+            in("a7") 0xC2usize, // SYS_DRV_IRQ_WAIT
+            options(nostack),
+        );
+    }
+}
+
+/// Log a message to the kernel console from a driver task.
+#[cfg(target_arch = "riscv32")]
+fn drv_log(msg: &[u8]) {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") msg.as_ptr() as usize,
+            in("a1") msg.len(),
+            in("a7") 0xC5usize, // SYS_DRV_LOG
+            options(nostack),
+        );
+    }
+}
+
+/// Yield CPU to the scheduler (SYS_YIELD = 1).
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+fn drv_yield() {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") 0x00usize, // SYS_YIELD
+            options(nostack),
+        );
+    }
+}
+
+/// Sleep for N ticks (SYS_SLEEP = 2).
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+fn drv_sleep(ticks: usize) {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") ticks,
+            in("a7") 0x31usize, // SYS_SLEEP
+            options(nostack),
+        );
+    }
+}
+
+// ── Wi-Fi driver task ──────────────────────────────────────────────────
+
+#[cfg(all(feature = "wifi", target_arch = "riscv32"))]
+fn wifi_driver_task() -> ! {
+    use soc_esp32::modem;
+
+    drv_log(b"[wifi-drv] starting\n");
+
+    // Step 1: Enable modem clocks — write to MODEM_LPCON clock-enable register.
+    let clk_reg = modem::MODEM_LPCON_BASE + modem::MODEM_CLK_EN;
+    let cur = drv_mmio_read32(clk_reg);
+    drv_mmio_write32(clk_reg, cur | modem::CLK_WIFI_EN | modem::CLK_FE_EN);
+    drv_log(b"[wifi-drv] modem clocks enabled\n");
+
+    // Step 2: Release WiFi MAC from reset.
+    let rst_reg = modem::MODEM_LPCON_BASE + modem::MODEM_RST_CTRL;
+    let rst = drv_mmio_read32(rst_reg);
+    // Assert reset, then deassert.
+    drv_mmio_write32(rst_reg, rst | modem::RST_WIFI_MAC);
+    // Small delay: yield a few times to let the reset propagate.
+    drv_yield();
+    drv_mmio_write32(rst_reg, rst & !modem::RST_WIFI_MAC);
+    drv_log(b"[wifi-drv] wifi MAC reset complete\n");
+
+    // Step 3: Read MAC base register to verify MMIO access is working.
+    let mac_base_val = drv_mmio_read32(modem::WIFI_MAC_BASE);
+    if mac_base_val != usize::MAX as u32 {
+        drv_log(b"[wifi-drv] MAC base accessible\n");
+    } else {
+        drv_log(b"[wifi-drv] MAC base read failed\n");
+    }
+
+    drv_log(b"[wifi-drv] hw init done, entering event loop\n");
+
+    // Main driver loop: service modem-level events.
+    // WiFi credential config and association is handled by the
+    // kernel WifiManager (M-mode) — this task owns the hardware.
+    loop {
+        drv_sleep(1000);
+    }
+}
+
+// ── BLE driver task ────────────────────────────────────────────────────
+
+#[cfg(all(feature = "ble", target_arch = "riscv32"))]
+fn ble_driver_task() -> ! {
+    use soc_esp32::modem;
+
+    drv_log(b"[ble-drv] starting\n");
+
+    // Enable BLE clocks.
+    let clk_reg = modem::MODEM_LPCON_BASE + modem::MODEM_CLK_EN;
+    let cur = drv_mmio_read32(clk_reg);
+    drv_mmio_write32(clk_reg, cur | modem::CLK_BLE_EN | modem::CLK_FE_EN);
+    drv_log(b"[ble-drv] BLE clocks enabled\n");
+
+    // Release BLE baseband from reset.
+    let rst_reg = modem::MODEM_LPCON_BASE + modem::MODEM_RST_CTRL;
+    let rst = drv_mmio_read32(rst_reg);
+    drv_mmio_write32(rst_reg, rst | modem::RST_BLE_BB);
+    drv_yield();
+    drv_mmio_write32(rst_reg, rst & !modem::RST_BLE_BB);
+    drv_log(b"[ble-drv] BLE baseband reset complete\n");
+
+    // Verify MMIO access.
+    let bb_val = drv_mmio_read32(modem::BLE_BB_BASE);
+    if bb_val != usize::MAX as u32 {
+        drv_log(b"[ble-drv] BLE BB accessible\n");
+    } else {
+        drv_log(b"[ble-drv] BLE BB read failed\n");
+    }
+
+    drv_log(b"[ble-drv] ready (idle)\n");
+
+    loop {
+        drv_sleep(2000);
+    }
+}
+
+// ── IEEE 802.15.4 driver task ──────────────────────────────────────────
+
+#[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
+fn ieee802154_driver_task() -> ! {
+    use soc_esp32::modem;
+
+    drv_log(b"[802154-drv] starting\n");
+
+    // Enable 802.15.4 clocks.
+    let clk_reg = modem::MODEM_LPCON_BASE + modem::MODEM_CLK_EN;
+    let cur = drv_mmio_read32(clk_reg);
+    drv_mmio_write32(clk_reg, cur | modem::CLK_IEEE802154_EN | modem::CLK_FE_EN);
+    drv_log(b"[802154-drv] 802.15.4 clocks enabled\n");
+
+    // Release 802.15.4 MAC from reset.
+    let rst_reg = modem::MODEM_LPCON_BASE + modem::MODEM_RST_CTRL;
+    let rst = drv_mmio_read32(rst_reg);
+    drv_mmio_write32(rst_reg, rst | modem::RST_IEEE802154_MAC);
+    drv_yield();
+    drv_mmio_write32(rst_reg, rst & !modem::RST_IEEE802154_MAC);
+    drv_log(b"[802154-drv] MAC reset complete\n");
+
+    // Verify MMIO access.
+    let mac_val = drv_mmio_read32(modem::IEEE802154_MAC_BASE);
+    if mac_val != usize::MAX as u32 {
+        drv_log(b"[802154-drv] MAC accessible\n");
+    } else {
+        drv_log(b"[802154-drv] MAC read failed\n");
+    }
+
+    drv_log(b"[802154-drv] ready (idle)\n");
+
+    loop {
+        drv_sleep(2000);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Assembly entry point (BSS zero, stack setup, jump to Rust)
 // ---------------------------------------------------------------------------
 
@@ -379,8 +662,13 @@ pub extern "C" fn _rust_start() -> ! {
     // ── disable watchdogs (ROM bootloader enables them) ──────────
     soc_esp32::wdt::disable_watchdogs();
 
+    // ── wait for USB Serial/JTAG enumeration ─────────────────
+    // After a reset the USB host needs ~200 ms to re-enumerate
+    // the CDC-ACM device.  Wait for first SOF from host.
+    let serial = usb_serial();
+    serial.wait_for_usb_ready();
+
     // ── early console ────────────────────────────────────────
-    let serial = default_serial();
     let mut con = Console::new(serial);
 
     // ── platform + kernel init ───────────────────────────────
@@ -475,10 +763,11 @@ pub extern "C" fn _rust_start() -> ! {
     #[cfg(target_arch = "riscv32")]
     {
         extern "C" {
-            fn _veer_trap_entry();
+            fn _veer_vector_table();
         }
         unsafe {
-            let addr = _veer_trap_entry as *const () as usize;
+            // Use vectored mode (mode=1): the ESP32-C6 PLIC forces bit 0.
+            let addr = (_veer_vector_table as *const () as usize & !0x3) | 1;
             core::arch::asm!("csrw mtvec, {0}", in(reg) addr, options(nomem, nostack));
         }
         let _ = writeln!(con, "[boot] trap vector installed");
@@ -537,8 +826,8 @@ pub extern "C" fn _rust_start() -> ! {
         user_tbl.init_defaults();
 
         // Idle task (priority 0).
-        let sb = IDLE_STACK.0.as_ptr() as usize;
-        let st = sb + IDLE_STACK.0.len();
+        let sb = (&raw const IDLE_STACK) as usize;
+        let st = sb + core::mem::size_of::<IdleStack>();
         if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
             sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
         }
@@ -546,10 +835,81 @@ pub extern "C" fn _rust_start() -> ! {
         // Shell task (priority 1).
         #[cfg(feature = "shell")]
         {
-            let sb = SHELL_STACK.0.as_ptr() as usize;
-            let st = sb + SHELL_STACK.0.len();
+            let sb = (&raw const SHELL_STACK) as usize;
+            let st = sb + core::mem::size_of::<ShellStack>();
             if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0) {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+            }
+        }
+
+        // ── Userspace driver tasks (U-mode, PMP-isolated) ─────────
+
+        #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
+        {
+            use soc_esp32::modem;
+            let sb = (&raw const WIFI_DRV_STACK) as usize;
+            let st = sb + core::mem::size_of::<DrvStack4K>();
+            if let Some(idx) = sched.create_task("wifi-drv", wifi_driver_task as *const () as usize, st, sb, 2, 0) {
+                // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
+                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+                // Grant MMIO: modem clock/reset registers.
+                sched.grant_region(idx, arch::TaskMemRegion {
+                    base: modem::MODEM_LPCON_BASE,
+                    size: 0x1000,
+                    perms: arch::MemPerms::RW,
+                });
+                // Grant MMIO: WiFi MAC + baseband.
+                sched.grant_region(idx, arch::TaskMemRegion {
+                    base: modem::WIFI_MMIO_BASE,
+                    size: modem::WIFI_MMIO_SIZE,
+                    perms: arch::MemPerms::RW,
+                });
+            }
+        }
+
+        #[cfg(all(feature = "ble", target_arch = "riscv32"))]
+        {
+            use soc_esp32::modem;
+            let sb = (&raw const BLE_DRV_STACK) as usize;
+            let st = sb + core::mem::size_of::<DrvStack2K>();
+            if let Some(idx) = sched.create_task("ble-drv", ble_driver_task as *const () as usize, st, sb, 2, 0) {
+                // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
+                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+                // Grant MMIO: modem clock/reset.
+                sched.grant_region(idx, arch::TaskMemRegion {
+                    base: modem::MODEM_LPCON_BASE,
+                    size: 0x1000,
+                    perms: arch::MemPerms::RW,
+                });
+                // Grant MMIO: BLE baseband.
+                sched.grant_region(idx, arch::TaskMemRegion {
+                    base: modem::BLE_MMIO_BASE,
+                    size: modem::BLE_MMIO_SIZE,
+                    perms: arch::MemPerms::RW,
+                });
+            }
+        }
+
+        #[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
+        {
+            use soc_esp32::modem;
+            let sb = (&raw const IEEE802154_DRV_STACK) as usize;
+            let st = sb + core::mem::size_of::<DrvStack2K>();
+            if let Some(idx) = sched.create_task("802154-drv", ieee802154_driver_task as *const () as usize, st, sb, 2, 0) {
+                // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
+                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+                // Grant MMIO: modem clock/reset.
+                sched.grant_region(idx, arch::TaskMemRegion {
+                    base: modem::MODEM_LPCON_BASE,
+                    size: 0x1000,
+                    perms: arch::MemPerms::RW,
+                });
+                // Grant MMIO: 802.15.4 MAC.
+                sched.grant_region(idx, arch::TaskMemRegion {
+                    base: modem::IEEE802154_MMIO_BASE,
+                    size: modem::IEEE802154_MMIO_SIZE,
+                    perms: arch::MemPerms::RW,
+                });
             }
         }
     }
@@ -564,14 +924,41 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(con, "[boot] idle task registered");
     #[cfg(feature = "shell")]
     let _ = writeln!(con, "[boot] shell task registered");
+    #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
+    let _ = writeln!(con, "[boot] wifi-drv task registered (M-mode)");
+    #[cfg(all(feature = "ble", target_arch = "riscv32"))]
+    let _ = writeln!(con, "[boot] ble-drv task registered (M-mode)");
+    #[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
+    let _ = writeln!(con, "[boot] 802154-drv task registered (M-mode)");
+
+    // ── WiFi auto-connect (pre-configure credentials) ────────
+    #[cfg(feature = "wifi")]
+    {
+        unsafe {
+            let mgr = &mut *WIFI.0.get();
+            mgr.set_credentials(b"MARS5", b"Naitla123");
+        }
+        let _ = writeln!(con, "[boot] wifi: SSID=MARS5 configured (auto-connect)");
+        unsafe {
+            let mgr = &mut *WIFI.0.get();
+            match mgr.connect() {
+                Ok(()) => { let _ = writeln!(con, "[boot] wifi: connected to MARS5"); }
+                Err(_) => { let _ = writeln!(con, "[boot] wifi: connect deferred (driver will handle)"); }
+            }
+        }
+    }
 
     // ── start the first task (never returns) ─────────────────
     let _ = writeln!(con, "[boot] starting scheduler — preemptive mode");
-    let _ = writeln!(con, "");
 
     unsafe {
         let sched = &mut *SCHEDULER.0.get();
         let ctx_ptr = sched.start().expect("no runnable task");
+        let _ = writeln!(con, "[boot] first task: idx={} name={}",
+            sched.current,
+            sched.tasks[sched.current].name,
+        );
+        let _ = writeln!(con, "");
 
         #[cfg(target_arch = "riscv32")]
         {
@@ -1182,7 +1569,7 @@ fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
 
 #[allow(dead_code)]
 pub(crate) fn console_write_byte(b: u8) {
-    let serial = default_serial();
+    let serial = usb_serial();
     let mut con = Console::new(serial);
     let _ = con.write_str(unsafe {
         core::str::from_utf8_unchecked(core::slice::from_ref(&b))
@@ -1191,6 +1578,10 @@ pub(crate) fn console_write_byte(b: u8) {
 
 #[allow(dead_code)]
 pub(crate) fn console_read_byte() -> u8 {
-    // Blocking read not yet supported on ESP32 — return 0xFF (no data).
-    0xFF
+    let serial = usb_serial();
+    if serial.has_data() {
+        serial.read_byte()
+    } else {
+        0xFF
+    }
 }

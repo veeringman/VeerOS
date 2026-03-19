@@ -18,7 +18,7 @@ use arch::TickTimer;
 const SYSTIMER_BASE: usize = 0x6002_3000;
 
 #[cfg(feature = "c6")]
-const SYSTIMER_BASE: usize = 0x6002_3000;
+const SYSTIMER_BASE: usize = 0x6000_A000;
 
 #[cfg(feature = "h2")]
 const SYSTIMER_BASE: usize = 0x6002_3000;
@@ -41,18 +41,18 @@ const CONF_REG: usize = 0x00;
 const UNIT0_OP: usize = 0x04;
 
 /// Comparator 0 target value (high / low) for periodic alarm.
-const TARGET0_HI: usize = 0x24;
-const TARGET0_LO: usize = 0x28;
+const TARGET0_HI: usize = 0x1C;
+const TARGET0_LO: usize = 0x20;
 
 /// Comparator 0 period for periodic mode (26-bit).
-const TARGET0_CONF: usize = 0x2C;
+const TARGET0_CONF: usize = 0x34;
 
 /// Write to apply comparator 0 config (load trigger).
-const COMP0_LOAD: usize = 0x48;
+const COMP0_LOAD: usize = 0x50;
 
 /// Unit 0 value registers (52-bit counter split across two words).
-const UNIT0_VALUE_HI: usize = 0x54;
-const UNIT0_VALUE_LO: usize = 0x58;
+const UNIT0_VALUE_HI: usize = 0x40;
+const UNIT0_VALUE_LO: usize = 0x44;
 
 /// Comparator 0 interrupt enable / clear.
 const INT_ENA: usize = 0x64;
@@ -123,8 +123,17 @@ impl TickTimer for SysTimer {
     }
 
     fn clear_pending(&self) {
-        // Write 1 to clear comparator 0 interrupt.
-        unsafe { mmio_write(SYSTIMER_BASE + INT_CLR, 1) };
+        unsafe {
+            // Clear comparator 0 interrupt.
+            mmio_write(SYSTIMER_BASE + INT_CLR, 1);
+            // Re-arm the alarm: the ESP32-C6 hardware latches the alarm as
+            // disabled after a match.  Toggle TARGET0_WORK_EN (CONF bit 24)
+            // to re-start the periodic comparator — this matches ESP-IDF's
+            // systimer_ll_enable_alarm().
+            let conf = mmio_read(SYSTIMER_BASE + CONF_REG);
+            mmio_write(SYSTIMER_BASE + CONF_REG, conf & !(1 << 24));
+            mmio_write(SYSTIMER_BASE + CONF_REG, conf | (1 << 24));
+        }
     }
 
     fn counter_us(&self) -> u64 {

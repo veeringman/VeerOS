@@ -23,6 +23,52 @@ pub mod pmp;
 #[cfg(target_arch = "riscv32")]
 core::arch::global_asm!(
     r#"
+# ── Vector table for RISC-V vectored interrupt mode ──────────────────
+# On ESP32-C6, the PLIC forces mtvec.mode = 1 (vectored).
+# In vectored mode: exceptions → base+0, interrupt N → base + 4*N.
+# Each slot is a 4-byte `j` (JAL x0) to the common handler.
+.section .text._veer_vector_table
+.global  _veer_vector_table
+.balign  128
+.option push
+.option norvc
+
+_veer_vector_table:
+    j _veer_trap_entry   /* 0  exception */
+    j _veer_trap_entry   /* 1  CPU int 1 (systimer) */
+    j _veer_trap_entry   /* 2  */
+    j _veer_trap_entry   /* 3  */
+    j _veer_trap_entry   /* 4  */
+    j _veer_trap_entry   /* 5  */
+    j _veer_trap_entry   /* 6  */
+    j _veer_trap_entry   /* 7  */
+    j _veer_trap_entry   /* 8  */
+    j _veer_trap_entry   /* 9  */
+    j _veer_trap_entry   /* 10 */
+    j _veer_trap_entry   /* 11 */
+    j _veer_trap_entry   /* 12 */
+    j _veer_trap_entry   /* 13 */
+    j _veer_trap_entry   /* 14 */
+    j _veer_trap_entry   /* 15 */
+    j _veer_trap_entry   /* 16 */
+    j _veer_trap_entry   /* 17 */
+    j _veer_trap_entry   /* 18 */
+    j _veer_trap_entry   /* 19 */
+    j _veer_trap_entry   /* 20 */
+    j _veer_trap_entry   /* 21 */
+    j _veer_trap_entry   /* 22 */
+    j _veer_trap_entry   /* 23 */
+    j _veer_trap_entry   /* 24 */
+    j _veer_trap_entry   /* 25 */
+    j _veer_trap_entry   /* 26 */
+    j _veer_trap_entry   /* 27 */
+    j _veer_trap_entry   /* 28 */
+    j _veer_trap_entry   /* 29 */
+    j _veer_trap_entry   /* 30 */
+    j _veer_trap_entry   /* 31 */
+.option pop
+
+# ── Common trap entry ────────────────────────────────────────────────
 .section .text._veer_trap_entry
 .global  _veer_trap_entry
 .balign  4

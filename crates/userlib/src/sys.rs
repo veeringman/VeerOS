@@ -1,13 +1,10 @@
 //! Raw syscall interface — the lowest layer of the userlib.
 //!
-//! Each function issues a single RISC-V `ecall` instruction with the
-//! syscall number in `a7` and arguments in `a0`–`a3`.  The kernel
-//! returns results in `a0`–`a1`.
-//!
-//! On non-RISC-V hosts (used for `cargo check`) the functions are
-//! no-ops that return 0, allowing the userlib to type-check everywhere.
+//! On RISC-V: `ecall` with syscall number in `a7`, args in `a0`–`a4`.
+//! On AArch64: `svc #0` with syscall number in `x8`, args in `x0`–`x4`.
+//! On other hosts: no-ops returning 0 (allows `cargo check` everywhere).
 
-/// Issue a syscall with 0 arguments.  Returns `(a0,)`.
+/// Issue a syscall with 0 arguments.  Returns `a0`.
 #[inline(always)]
 pub fn syscall0(nr: usize) -> usize {
     let ret: usize;
@@ -20,7 +17,16 @@ pub fn syscall0(nr: usize) -> usize {
             options(nostack),
         );
     }
-    #[cfg(not(target_arch = "riscv32"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") nr,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64")))]
     {
         let _ = nr;
         ret = 0;
@@ -41,7 +47,16 @@ pub fn syscall1(nr: usize, a0: usize) -> usize {
             options(nostack),
         );
     }
-    #[cfg(not(target_arch = "riscv32"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") nr,
+            inlateout("x0") a0 => ret,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64")))]
     {
         let _ = (nr, a0);
         ret = 0;
@@ -64,7 +79,17 @@ pub fn syscall2(nr: usize, a0: usize, a1: usize) -> (usize, usize) {
             options(nostack),
         );
     }
-    #[cfg(not(target_arch = "riscv32"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") nr,
+            inlateout("x0") a0 => r0,
+            inlateout("x1") a1 => r1,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64")))]
     {
         let _ = (nr, a0, a1);
         r0 = 0;
@@ -88,7 +113,18 @@ pub fn syscall3(nr: usize, a0: usize, a1: usize, a2: usize) -> usize {
             options(nostack),
         );
     }
-    #[cfg(not(target_arch = "riscv32"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") nr,
+            inlateout("x0") a0 => ret,
+            in("x1") a1,
+            in("x2") a2,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64")))]
     {
         let _ = (nr, a0, a1, a2);
         ret = 0;
@@ -112,7 +148,19 @@ pub fn syscall4(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> usize 
             options(nostack),
         );
     }
-    #[cfg(not(target_arch = "riscv32"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") nr,
+            inlateout("x0") a0 => ret,
+            in("x1") a1,
+            in("x2") a2,
+            in("x3") a3,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64")))]
     {
         let _ = (nr, a0, a1, a2, a3);
         ret = 0;
@@ -137,7 +185,20 @@ pub fn syscall5(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             options(nostack),
         );
     }
-    #[cfg(not(target_arch = "riscv32"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") nr,
+            inlateout("x0") a0 => ret,
+            in("x1") a1,
+            in("x2") a2,
+            in("x3") a3,
+            in("x4") a4,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64")))]
     {
         let _ = (nr, a0, a1, a2, a3, a4);
         ret = 0;
@@ -164,7 +225,19 @@ pub fn syscall_ret4(nr: usize, a0: usize) -> (usize, usize, usize, usize) {
             options(nostack),
         );
     }
-    #[cfg(not(target_arch = "riscv32"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") nr,
+            inlateout("x0") a0 => r0,
+            lateout("x1") r1,
+            lateout("x2") r2,
+            lateout("x3") r3,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64")))]
     {
         let _ = (nr, a0);
         r0 = 0;

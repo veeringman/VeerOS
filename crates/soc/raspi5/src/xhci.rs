@@ -1258,6 +1258,62 @@ impl UsbHostController for Xhci {
     }
 }
 
+impl Xhci {
+    /// Count of HID keyboard devices detected during enumeration.
+    pub fn hid_keyboard_count(&self) -> usize {
+        self.devices.iter().filter(|d| {
+            d.active
+                && (d.protocol == USB_PROTOCOL_KEYBOARD
+                    || (d.class == USB_CLASS_HID && d.protocol == 0x01))
+        }).count()
+    }
+
+    /// Poll all HID keyboard devices for boot-protocol reports.
+    ///
+    /// For each keyboard that has data ready, calls `on_report` with the
+    /// 8-byte boot keyboard report. This is designed to be called
+    /// periodically from the timer tick handler.
+    pub fn poll_hid_keyboards(&mut self, mut on_report: impl FnMut(&[u8; 8])) {
+        for i in 0..MAX_SLOTS {
+            let dev = &self.devices[i];
+            if !dev.active { continue; }
+            // Boot protocol keyboard: class=HID(0x03), protocol=1
+            let is_kbd = dev.protocol == USB_PROTOCOL_KEYBOARD
+                || (dev.class == USB_CLASS_HID && dev.protocol == 0x01);
+            if !is_kbd { continue; }
+
+            let mut buf = [0u8; 8];
+            // Non-blocking interrupt IN — returns None on NAK/timeout.
+            if let Some(n) = self.interrupt_in_nb(i, &mut buf) {
+                if n >= 8 {
+                    on_report(&buf);
+                }
+            }
+        }
+    }
+
+    /// Non-blocking interrupt-IN: queue transfer, poll briefly, return data
+    /// if available. Returns `None` immediately on NAK (no data).
+    fn interrupt_in_nb(&mut self, slot_idx: usize, buf: &mut [u8]) -> Option<usize> {
+        self.queue_interrupt_in(slot_idx, buf);
+        // Short poll — check for immediate completion only.
+        for _ in 0..2000u32 {
+            if let Some(evt) = self.poll_event() {
+                if evt.trb_type() == TRB_TRANSFER_EVENT {
+                    let cc = evt.completion_code();
+                    if cc == TRB_COMP_SUCCESS || cc == TRB_COMP_SHORT_PKT {
+                        let residual = evt.status & 0xFFFFFF;
+                        return Some(buf.len() - residual as usize);
+                    }
+                    return None; // error
+                }
+            }
+            core::hint::spin_loop();
+        }
+        None // timeout — no data ready
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // USB HID class driver (boot protocol)
 // ═══════════════════════════════════════════════════════════════════════════

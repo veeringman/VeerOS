@@ -159,6 +159,10 @@ pub unsafe fn apply_task_regions(regions: &TaskRegions, region_count: usize) {
         TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
         TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
         TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
+        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
+        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
+        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
+        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
     ];
     let n = if region_count > MAX_TASK_REGIONS { MAX_TASK_REGIONS } else { region_count };
 
