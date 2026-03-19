@@ -358,6 +358,156 @@ _Serve the VeerOS shell on a TCP port so you can `nc <device-ip> 2323` or `ssh` 
 - [ ] **Rate limiting** — limit TCP connection attempts to prevent brute-force
 - [ ] **Firewall rules** — simple port allow/deny table in kernel (default: only port 2323 open)
 
+### ESP32-C6 Bluetooth LE — Full Stack (HCI → GAP/GATT → HID/Services)
+_Bring up real BLE on XIAO ESP32-C6: initialize HCI transport, scan/advertise, connect to peripherals, and support HOGP HID input + custom GATT services._
+
+#### Prerequisites
+- [x] **BLE driver skeleton** — `crates/soc/esp32/src/ble.rs`: `BleManager` state machine, `Esp32Ble` driver, modem clock enable, BB reset
+- [x] **BLE HID client (HOGP)** — `crates/soc/esp32/src/ble_hid.rs`: `HogpManager` (4 devices), GATT UUID constants, boot keyboard/mouse report parsing
+- [x] **Shell commands** — `bt scan/list/advertise/stop/status` wired through `ShellEnv.bt_cmd`
+- [x] **Input subsystem** — `crates/microkernel/src/input.rs`: keyboard + mouse queues, `/dev/keyboard` and `/dev/mouse` device nodes
+- [x] **Driver task** — BLE driver task runs in M-mode, enables BLE clocks, resets BB, verifies MMIO at `0x600A_C000`
+
+#### Phase B1 — Espressif BLE Firmware / HCI Transport
+_ESP32-C6 BLE controller is firmware-driven. Need HCI command/event transport layer._
+
+- [ ] **Obtain BLE blobs** — extract `libbtbb.a`, `libbtdm_app.a` (or `esp-ble` equivalent) from ESP-IDF v5.x; or evaluate `esp-wifi` crate's BLE support
+- [ ] **Link BLE blobs** — add archives to `build.rs`; resolve extern FFI symbols
+- [ ] **HCI transport layer** — implement shared-memory HCI between RISC-V CPU and BLE controller (command ring → controller, event ring → host)
+- [ ] **HCI command serialization** — build HCI command packets: `Reset`, `Read_BD_ADDR`, `LE_Set_Scan_Parameters`, `LE_Set_Scan_Enable`, `LE_Create_Connection`, `LE_Set_Advertising_Data`, `LE_Set_Advertising_Enable`, `Disconnect`
+- [ ] **HCI event parsing** — parse event packets: `Command_Complete`, `Command_Status`, `LE_Meta_Event` (advertising reports, connection complete), `Disconnection_Complete`
+- [ ] **FFI OS shim** — provide C-callable functions BLE blobs expect: `malloc`/`free`, `vTaskDelay`, timer, mutex, semaphore
+
+#### Phase B2 — GAP (Scanning + Advertising + Connection)
+_Generic Access Profile — device discovery and link management._
+
+- [ ] **Real BLE scanning** — `LE_Set_Scan_Parameters` + `LE_Set_Scan_Enable` → receive `LE_Advertising_Report` events → parse AD structures (flags, name, service UUIDs, TX power)
+- [ ] **Populate scan results** — replace hardcoded 5 fake devices with real advertising reports; update `BleScanResult` with parsed AD data
+- [ ] **BLE advertising** — `LE_Set_Advertising_Data` (device name, flags, service UUIDs) + `LE_Set_Advertising_Enable`; configurable interval
+- [ ] **Connection establishment** — `LE_Create_Connection` with target device address → handle `LE_Connection_Complete` event → store connection handle
+- [ ] **Disconnect handling** — `Disconnect` command + `Disconnection_Complete` event → clean up state, notify `HogpManager`
+- [ ] **`bt scan` shows real devices** — live RF scan with RSSI, device name, address type, connectable flag
+- [ ] **`bt connect <addr>` command** — connect to a specific BLE device by address
+
+#### Phase B3 — L2CAP + ATT + GATT Client
+_Protocol stack for attribute discovery and data exchange._
+
+- [ ] **L2CAP basic mode** — connection-oriented channel for ATT (CID 0x0004); segment/reassemble L2CAP PDUs
+- [ ] **ATT protocol client** — `ATT_READ_BY_GROUP_TYPE_REQ` (service discovery), `ATT_READ_BY_TYPE_REQ` (characteristic discovery), `ATT_FIND_INFORMATION_REQ` (descriptor discovery), `ATT_READ_REQ`, `ATT_WRITE_REQ`, `ATT_HANDLE_VALUE_NTF`
+- [ ] **GATT service discovery** — enumerate primary services → characteristics → descriptors; cache in `HidHandles`
+- [ ] **Notification subscription** — write `0x0001` to CCCD handle (Client Characteristic Configuration Descriptor) to enable notifications
+- [ ] **GATT client cache** — store discovered services/characteristics per-connection for fast re-access
+
+#### Phase B4 — HOGP HID (Keyboard + Mouse over BLE)
+_HID Over GATT Profile — connect BLE keyboards and mice._
+
+- [ ] **HOGP service discovery** — find HID Service (UUID 0x1812), Report Map (0x2A4B), Boot Keyboard Input (0x2A22), Boot Mouse Input (0x2A33)
+- [ ] **Set Protocol Mode** — write `0x00` (boot protocol) to Protocol Mode characteristic (0x2A4E) for simple 8-byte keyboard / 3-byte mouse reports
+- [ ] **Subscribe to input reports** — enable notifications on Boot Keyboard Input and/or Boot Mouse Input CCCDs
+- [ ] **Feed HID reports to input subsystem** — on notification, call `process_notification()` → `InputSubsystem.feed_keyboard_report()` / `feed_mouse_report()`; already implemented in `ble_hid.rs`
+- [ ] **BLE keyboard → VeerOS shell** — keystrokes from BLE keyboard appear at `root@veeros>` prompt via `/dev/keyboard`
+- [ ] **Multi-device support** — connect up to 4 HID devices simultaneously via `HogpManager`
+- [ ] **`input` command shows real BLE HID devices** — connected device name, type, battery level
+
+#### Phase B5 — GATT Server (Custom Services)
+_Expose VeerOS services over BLE for mobile/PC configuration._
+
+- [ ] **GATT server framework** — register custom services with characteristic array; handle ATT read/write requests from central
+- [ ] **Device Information Service (DIS)** — standard service (0x180A): manufacturer, model, firmware version, hardware revision
+- [ ] **VeerOS Config Service** — custom GATT service: read/write WiFi SSID+password, read system uptime, read task list
+- [ ] **BLE serial console** — Nordic UART Service (NUS) compatible: TX/RX characteristics for shell-over-BLE (alternative to WiFi TCP)
+- [ ] **OTA firmware update** — BLE-based firmware transfer service for field updates without USB cable
+
+#### Phase B6 — Security + Pairing
+- [ ] **LE Secure Connections** — ECDH key exchange + AES-CCM encryption (BLE 4.2+ Secure Connections)
+- [ ] **Pairing modes** — Just Works (no MITM), Passkey Entry, Numeric Comparison
+- [ ] **Bond storage** — store LTK/IRK in NVS for reconnection without re-pairing
+- [ ] **Privacy** — resolvable private addresses (RPA) to prevent BLE tracking
+- [ ] **Coexistence with WiFi** — shared 2.4 GHz antenna arbitration via esp-coex (already stub in `modem.rs`)
+
+### ESP32-C6 IEEE 802.15.4 — Full Stack (MAC → 6LoWPAN → Zigbee/Thread)
+_Bring up real 802.15.4 radio on XIAO ESP32-C6: initialize the MAC peripheral, transmit/receive frames, and support Zigbee and Thread networking._
+
+#### Prerequisites
+- [x] **802.15.4 driver skeleton** — `crates/soc/esp32/src/ieee802154.rs`: `RadioManager` state machine, `Esp32Ieee802154` driver, register offset map
+- [x] **Shell commands** — `zigbee init/scan/channel/panid/send/list/status` wired through `ShellEnv.zigbee_cmd`
+- [x] **Driver task** — 802.15.4 driver task runs in M-mode, enables 802.15.4 clocks, resets MAC, verifies MMIO at `0x600A_3000`
+- [x] **Register map** — `IEEE802154_BASE` (0x600A_3000) with offsets: CTRL, TX_POWER, ED_SCAN, CHANNEL, TX_FIFO, RX_FIFO, PAN_ID, SHORT_ADDR, EXT_ADDR, INT_ENA, INT_CLR
+
+#### Phase Z1 — MAC Peripheral Init + Register I/O
+_Write the hardware registers to bring the 802.15.4 MAC out of reset and into a usable state._
+
+- [ ] **MAC init sequence** — write `REG_CHANNEL` (default ch 15), `REG_PAN_ID` (0xFFFF), `REG_SHORT_ADDR` (0xFFFF), `REG_EXT_ADDR_LO/HI` (from eFuse MAC or random)
+- [ ] **TX power configuration** — write `REG_TX_POWER` (default 0 dBm for C6)
+- [ ] **Interrupt enable** — write `REG_INT_ENA` for TX-done, RX-done, ED-scan-done; wire IEEE 802.15.4 IRQ source through INTMATRIX → PLIC → driver task via `drv_irq_wait()`
+- [ ] **`Esp32Ieee802154::init()` returns `Ok(())`** — replace stub with real register init; set `initialised = true`
+- [ ] **`set_channel()` writes hardware** — write channel (11–26) to `REG_CHANNEL`
+- [ ] **`set_pan_id()` writes hardware** — write PAN ID to `REG_PAN_ID`
+- [ ] **Verify with `zigbee status`** — channel/PAN ID read back from registers match shell display
+
+#### Phase Z2 — TX + RX Frame Path
+_Transmit and receive raw 802.15.4 frames._
+
+- [ ] **TX path** — write frame (≤127 bytes, prepend PHR length byte) to `REG_TX_FIFO` → trigger TX via `REG_CTRL` → wait for TX-done interrupt → check status
+- [ ] **RX path** — enable RX in `REG_CTRL` → on RX-done interrupt, read frame from `REG_RX_FIFO` → parse PHR + MHR (frame control, sequence number, addressing) → deliver to upper layer
+- [ ] **Auto-ACK** — configure hardware auto-acknowledgment for frames with ACK request bit set
+- [ ] **Frame filtering** — configure hardware PAN ID / address filtering to reject non-matching frames
+- [ ] **CSMA-CA** — use hardware CSMA-CA for contention-based channel access (or implement slotted CSMA in software)
+- [ ] **`zigbee send <data>` transmits over air** — build a data frame with addressing and send via TX FIFO
+- [ ] **`zigbee recv` command** — display received frames (hex dump + parsed header)
+
+#### Phase Z3 — Energy Detection + Real Scanning
+_Scan the 2.4 GHz band for active 802.15.4 networks._
+
+- [ ] **ED scan** — use `REG_ED_SCAN` to measure energy level on channels 11–26; returns RSSI/ED per channel
+- [ ] **Active scan** — send beacon request frames on each channel → collect beacon responses → parse PAN descriptor (PAN ID, coordinator address, superframe spec)
+- [ ] **Populate real scan results** — replace 4 hardcoded fake networks with actual beacon data
+- [ ] **Protocol detection** — distinguish Zigbee vs Thread vs generic 802.15.4 from beacon payload / network layer headers
+- [ ] **`zigbee scan` shows real networks** — live RF scan with PAN ID, channel, coordinator, protocol, LQI, permit-join status
+
+#### Phase Z4 — Zigbee Stack (ZigBee 3.0)
+_Full Zigbee protocol stack for home automation and IoT sensor networks._
+
+- [ ] **NWK layer** — network formation (coordinator), join (router/end-device), mesh routing (AODV), network-layer encryption (NWK key)
+- [ ] **APS layer** — application support: binding table, group management, APS-level encryption (link key)
+- [ ] **ZDO (Zigbee Device Object)** — device/service discovery, network management commands, permit joining
+- [ ] **ZCL (Zigbee Cluster Library)** — implement key clusters: On/Off (0x0006), Level Control (0x0008), Color Control (0x0300), Temperature Measurement (0x0402), Occupancy Sensing (0x0406)
+- [ ] **Zigbee coordinator mode** — form a PAN, assign short addresses, manage routing table
+- [ ] **Zigbee end-device mode** — join existing PAN, periodic polling for sleepy end devices
+- [ ] **Zigbee2MQTT compatibility** — standard ZCL reporting so off-the-shelf coordinators (CC2531, SONOFF) can discover VeerOS Zigbee devices
+- [ ] **`zigbee join <panid>` command** — join an existing Zigbee network
+- [ ] **`zigbee form` command** — create a new Zigbee PAN as coordinator
+
+#### Phase Z5 — Thread / OpenThread (Thread 1.3)
+_Thread networking for IP-based IoT mesh — native IPv6 over 802.15.4._
+
+- [ ] **6LoWPAN** — IPv6 header compression (RFC 6282) for IEEE 802.15.4 frames; fragmentation/reassembly
+- [ ] **MLE (Mesh Link Establishment)** — discover routers, attach to network, negotiate link parameters
+- [ ] **Thread network roles** — Leader, Router, REED (Router-Eligible End Device), SED (Sleepy End Device)
+- [ ] **Thread Commissioner / Joiner** — secure device commissioning (DTLS handshake + PSKc)
+- [ ] **CoAP** — Constrained Application Protocol for Thread service discovery and management
+- [ ] **SRP (Service Registration Protocol)** — register services on Thread Border Router
+- [ ] **DNS-SD over Thread** — mDNS-like service discovery for Thread devices
+- [ ] **OpenThread port** — evaluate porting OpenThread (C library) as an alternative to from-scratch implementation; provide platform abstraction layer
+- [ ] **Border Router stub** — if WiFi is also active, relay Thread traffic to WiFi/IP network (Thread Border Router function)
+- [ ] **`thread attach` command** — join an existing Thread network
+- [ ] **`thread dataset` command** — view/set Thread network dataset (PAN ID, channel, network key, mesh-local prefix)
+
+#### Phase Z6 — Matter (Project CHIP)
+_Matter application layer on top of Thread (or WiFi) for smart home interoperability._
+
+- [ ] **Matter device types** — On/Off Light, Dimmable Light, Temperature Sensor, Door Lock, etc.
+- [ ] **Matter commissioning** — BLE-based commissioning flow (QR code / manual pairing code → Thread/WiFi onboarding)
+- [ ] **Matter clusters** — implement Matter application clusters mapped to ZCL equivalents
+- [ ] **Interop with Apple Home / Google Home / Alexa** — standard Matter certification path
+
+#### Phase Z7 — Security + Coexistence
+- [ ] **802.15.4 MAC security** — AES-128-CCM frame encryption/authentication (security level 5)
+- [ ] **Zigbee network key management** — Trust Center key distribution, transport key, network key rotation
+- [ ] **Thread security** — DTLS for commissioning, MLE frame encryption, network key rotation
+- [ ] **RF coexistence** — 802.15.4 shares 2.4 GHz with WiFi and BLE; coordinate via esp-coex or time-division scheduling
+- [ ] **Channel selection** — auto-select least-interfered 802.15.4 channel based on WiFi channel and ED scan
+
 ## Phase 4 — Distribution Profiles (Complete)
 - [x] Distribution matrix design — two axes: profile (minimal/app/rt/full) × components (shell/net/userlib/samples/wifi/ble/ieee802154)
 - [x] `distributions` crate restructured — aligned feature names (`dist-minimal`/`dist-app`/`dist-rt`/`dist-full`), component flags, documentation
