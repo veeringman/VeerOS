@@ -3,11 +3,15 @@
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
 ## V1 Scope
-- [ ] Bootable microkernel on ESP32 RISC-V (C3/C6/H2)
-- [ ] Modular architecture interfaces for future embedded CPU families
-- [ ] Distribution variants via Rust feature flags
+- [ ] Bootable microkernel on ESP32 RISC-V (C3/C6/H2) and Xtensa (S3)
+- [ ] Multi-architecture support — ARM64 (RPi family, QEMU/KVM), x86-64 (QEMU/KVM), RISC-V 32/64
+- [ ] Distribution variants via Rust feature flags — from `dist-minimal` (bare MCU) to `dist-cloud` (full cluster)
 - [ ] Configurable single-user / multi-user system (feature-gated)
 - [ ] Security-first architecture — capability-based access, isolation domains, PQC-ready crypto, extensible security model
+- [ ] AI-native OS — inference engine, NL shell, autonomous agents, on-device and cloud AI as first-class primitives
+- [ ] Distributed OS — multiple VeerOS nodes form a single coherent system (cluster membership, distributed scheduler, shared VFS)
+- [ ] Cloud-native platform — built-in orchestration, service mesh, service discovery, rolling deployments, observability
+- [ ] Network appliance mode — firewall, packet filtering, NAT, VPN gateway, traffic shaping as a distribution profile (`dist-firewall`)
 
 ## Phase 1 — Foundation (Complete)
 - [x] Initialize Rust workspace with modular crates
@@ -510,7 +514,7 @@ _Matter application layer on top of Thread (or WiFi) for smart home interoperabi
 - [ ] **RF coexistence** — 802.15.4 shares 2.4 GHz with WiFi and BLE; coordinate via esp-coex or time-division scheduling
 - [ ] **Channel selection** — auto-select least-interfered 802.15.4 channel based on WiFi channel and ED scan
 
-## Phase 4 — Distribution Profiles (Complete)
+## Phase 4 — Distribution Profiles (Complete + Expansion Planned)
 - [x] Distribution matrix design — two axes: profile (minimal/app/rt/full) × components (shell/net/userlib/samples/wifi/ble/ieee802154)
 - [x] `distributions` crate restructured — aligned feature names (`dist-minimal`/`dist-app`/`dist-rt`/`dist-full`), component flags, documentation
 - [x] `kernel-qemu-virt` — optional deps: shell, net, userlib, smoltcp; profiles auto-bundle components; default = `dist-app`
@@ -520,6 +524,19 @@ _Matter application layer on top of Thread (or WiFi) for smart home interoperabi
 - [x] `app` distribution build recipe — `--features dist-app` (shell + net + userlib + samples)
 - [x] `real-time` distribution build recipe — `--features dist-rt` (priority scheduler, combine with component flags)
 - [x] `full` distribution build recipe — `--features dist-full` (all components + priority scheduler)
+
+### Extended Distribution Profiles (Planned)
+_New profiles to cover edge AI, cluster/distributed, cloud platform, and network appliance deployments._
+
+- [ ] **`dist-edge`** — IoT edge node: `dist-minimal` + AI inference (keyword/anomaly) + WiFi/BLE + sensor pipeline; targets ESP32 family, RPi Zero
+- [ ] **`dist-ai`** — AI-native: `dist-app` + full AI stack (inference engine, NL shell, model zoo, NPU backends); targets RPi 4/5, x86-64 with ≥ 2 GB RAM
+- [ ] **`dist-cluster`** — Distributed OS node: `dist-app` + cluster membership + distributed scheduler + distributed IPC + shared VFS; targets RPi 3+, x86-64, ARM64
+- [ ] **`dist-cloud`** — Cloud platform: `dist-cluster` + orchestration + service mesh + API gateway + ingress + observability + auto-scaling; targets x86-64 KVM, ARM64 KVM
+- [ ] **`dist-firewall`** — Network appliance: `dist-minimal` + packet filter + NAT + VPN + traffic shaping + DPI + firewall rules engine; targets x86-64, ARM64, RPi 4/5
+- [ ] **`dist-gateway`** — IoT gateway: `dist-edge` + Thread border router + Zigbee coordinator + MQTT broker + protocol translation; targets RPi 3+, ESP32-S3
+- [ ] **Feature composition** — profiles are additive: `dist-cloud` = `dist-cluster` + `cloud-orchestrate` + `cloud-mesh` + `cloud-observe`; any combination valid
+- [ ] **Build flag matrix** — `distributions/src/lib.rs` updated with new feature gates; cross-feature dependency validation at compile time
+- [ ] **Per-target defaults** — ESP32-C3/C6: `dist-edge`; RPi Zero: `dist-edge`; RPi 4/5: `dist-ai` or `dist-cluster`; x86-64 KVM: `dist-cloud`; x86-64 bare: `dist-firewall`
 
 ## Phase 7 — Multi-Architecture Targets
 
@@ -547,11 +564,62 @@ _USB keyboard/mouse via xHCI (RPi5) and Bluetooth keyboard/mouse via BLE HOGP (E
 - [x] **Shell commands** — `input` (status + BLE HID + USB lists), `lsusb` (USB device listing); ShellEnv callbacks: `input_status`, `usb_list`, `ble_hid_list`
 - [x] **Kernel wiring** — `InputCell`/`INPUT` statics in all 3 kernels; trap.rs passes `input` to dispatch(); ShellEnv callbacks wired (QEMU: input_status, RPi5: input_status + usb_list, ESP32: input_status + ble_hid_list); all 4 build targets clean (0 errors)
 
-### ARM64
-- [ ] `soc-qemu-virt-aarch64` crate — PL011 UART, GICv2 interrupt controller, ARM generic timer
-- [ ] `kernel-qemu-virt-aarch64` — `aarch64-unknown-none` target, EL1 boot, PSCI
-- [ ] ARM64 exception vector table — sync/IRQ/FIQ/SError handlers, context save/restore
-- [ ] QEMU `virt` machine aarch64 validation
+### ARM64 (QEMU virt + KVM)
+_Full AArch64 bring-up on QEMU `virt` machine and Linux KVM. QEMU-TCG for development, KVM for near-native performance on ARM64 hosts (RPi 5, Apple Silicon, Ampere, Graviton)._
+
+#### ARM64 Architecture Crate
+- [ ] **`arch_aarch64` crate** — `SavedContext` for AArch64: 31 GPRs (X0–X30) + SP_EL0 + ELR_EL1 + SPSR_EL1 + TPIDR_EL0 (TLS); `SavedContext` trait impl with `set_pc`/`get_pc`/`advance_pc`, `set_sp`/`get_sp`, `set_arg`/`get_arg` (X0–X7), `set_ret`/`get_ret` (X0), `get_syscall_nr` (X8)
+- [ ] **Exception vector table** — `VBAR_EL1` aligned vector table (4 × 4 entries): Sync/IRQ/FIQ/SError × {currentEL_SP0, currentEL_SPx, lowerEL_AArch64, lowerEL_AArch32}; full 31-GPR + SP + PSTATE + ELR save/restore in assembly
+- [ ] **Syscall entry** — `svc #0` from EL0 → sync exception at EL1; extract syscall number from X8, args from X0–X5; dispatch via `dispatch.rs`; return via `eret`
+- [ ] **Context switch** — save callee-saved regs (X19–X30, SP), swap task pointers, restore; timer IRQ preemption from EL0 and EL1
+- [ ] **`#[cfg(target_arch = "aarch64")]`** — wire `TaskContext = Aarch64Context` type alias in `arch/src/lib.rs`
+
+#### ARM64 SoC + Kernel (QEMU virt)
+- [ ] **`soc-qemu-virt-aarch64` crate** — PL011 UART (0x0900_0000), GICv2 (dist 0x0800_0000, cpu 0x0801_0000), ARM generic timer (CNTP_*), VIRTIO MMIO (0x0a00_0000+), RTC (PL031), flash (CFI), PCIe host bridge
+- [ ] **`kernel-qemu-virt-aarch64` crate** — `aarch64-unknown-none-softfloat` target, EL2→EL1 drop (PSCI or direct), DTB from x0, linker script (RAM 0x4000_0000+)
+- [ ] **EL2→EL1 transition** — set `HCR_EL2.RW=1` (AArch64 at EL1), configure `SCTLR_EL1`, `eret` to EL1 `_start_el1`; handle both EL2 (QEMU default) and EL1 (KVM) boot
+- [ ] **GICv2 driver** — distributor init (GICD_CTLR, GICD_ISENABLER, GICD_IPRIORITYR, GICD_ITARGETSR), CPU interface init (GICC_CTLR, GICC_PMR), IRQ acknowledge (`GICC_IAR`) → dispatch → end (`GICC_EOIR`)
+- [ ] **GICv3 driver (stubs)** — system register interface (`ICC_*_EL1`), redistributor per-core; needed for KVM on modern ARM64 hosts
+- [ ] **ARM generic timer** — `CNTFRQ_EL0` for frequency, `CNTPCT_EL0` for monotonic time, `CNTP_TVAL_EL0` + `CNTP_CTL_EL0` for periodic tick (10ms); timer IRQ (PPI 30) → GIC → scheduler
+- [ ] **PL011 UART** — TX/RX MMIO (UARTDR, UARTFR, UARTIBRD, UARTFBRD, UARTLCR_H, UARTCR); polled + interrupt-driven modes; implements `Serial` trait
+- [ ] **VIRTIO-NET** — reuse existing VIRTIO MMIO driver from QEMU RISC-V (same register set); share `net` crate TCP/IP stack
+- [ ] **VIRTIO-BLK** — block device for testing FAT32/VFS without SD hardware
+- [ ] **VIRTIO-GPU (future)** — framebuffer for graphical console; `DisplayDevice` trait impl
+
+#### ARM64 MMU + Memory Management
+- [ ] **4 KB granule page tables** — 4-level (L0→L3) translation, 48-bit VA (256 TB), `TTBR0_EL1` (user, 0x0000...) / `TTBR1_EL1` (kernel, 0xFFFF...)
+- [ ] **Kernel identity map** — map kernel text/data/stack 1:1 at boot; MMIO regions mapped as Device-nGnRnE
+- [ ] **Per-process page tables** — each `Process` gets own L0 table in `TTBR0_EL1`; ASID tagging (`TTBR0_EL1[63:48]`) avoids TLB flush on switch
+- [ ] **EL1/EL0 privilege split** — kernel pages PXN (Privileged Execute Never cleared), user pages UXN cleared; AP[2:1] for R/W/RO permissions
+- [ ] **Demand paging stubs** — translation fault (ESR_EL1 DFSC/IFSC) → allocate page → map → resume; foundation for mmap/swap
+
+#### KVM Acceleration
+- [ ] **QEMU `-enable-kvm` validation** — `qemu-system-aarch64 -M virt -cpu host -enable-kvm` on ARM64 Linux hosts; verify VeerOS boots at near-native speed
+- [ ] **KVM boot differences** — KVM starts guest at EL1 (not EL2); detect via `CurrentEL` read; skip EL2→EL1 transition
+- [ ] **GICv3 for KVM** — KVM prefers GICv3 (`-M virt,gic-version=3`); system register access for IRQ management (`ICC_IAR1_EL1`, `ICC_EOIR1_EL1`, `ICC_SRE_EL1`)
+- [ ] **VirtIO performance** — KVM + vhost-net for near-native networking; verify no MMIO emulation bottlenecks
+- [ ] **Apple Silicon / UTM** — verify QEMU on macOS Apple Silicon via Hypervisor.framework (similar to KVM); document UTM setup
+- [ ] **AWS Graviton / Ampere Altra** — CI/CD pipeline on ARM64 cloud instances with KVM; automated boot + test
+
+#### ARM64 SMP (Multi-Core)
+- [ ] **PSCI CPU_ON** — bring up secondary cores via PSCI `CPU_ON` (SMC/HVC call); each core enters `_secondary_start` → init GIC CPU interface → enter idle
+- [ ] **Per-core state** — per-CPU idle task, per-CPU GIC interface, per-CPU timer; TPIDR_EL1 points to per-CPU data struct
+- [ ] **Scheduler SMP** — run-queue per core, work stealing, IPI for cross-core wake-up (SGI via GIC)
+- [ ] **Spinlocks** — `LDXR`/`STXR` (load-exclusive/store-exclusive) based spinlocks for SMP kernel data structures
+
+#### ARM64 QEMU Launch Recipes
+```
+# TCG (any host)
+qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
+  -kernel target/aarch64-unknown-none-softfloat/release/kernel-qemu-virt-aarch64 \
+  -nographic -serial stdio \
+  -device virtio-net-device,netdev=n0 -netdev user,id=n0,hostfwd=tcp::2323-:2323
+
+# KVM (ARM64 Linux host)
+qemu-system-aarch64 -M virt -cpu host -enable-kvm -m 256M \
+  -kernel target/aarch64-unknown-none-softfloat/release/kernel-qemu-virt-aarch64 \
+  -nographic -serial stdio
+```
 
 ### RISC-V 64
 - [ ] `soc-qemu-virt-riscv64` crate — reuse NS16550/CLINT with `usize = u64`
@@ -559,17 +627,126 @@ _USB keyboard/mouse via xHCI (RPi5) and Bluetooth keyboard/mouse via BLE HOGP (E
 - [ ] S-mode trap delegation — `sstatus`/`scause`/`sepc` instead of M-mode CSRs
 - [ ] Sv39 page table support (if MMU path enabled)
 
-### Xtensa (ESP32-S3)
-- [ ] `arch_xtensa` crate — `SavedContext` for Xtensa windowed ABI (A0–A15 + SAR + PS + PC), trap/exception frame
-- [ ] `soc-esp32s3` crate — ESP32-S3 UART0 (0x6000_0000), interrupt matrix, SysTimer, WDT disable
-- [ ] `kernel-esp32s3` crate — `xtensa-esp32s3-none-elf` target, single-core PRO_CPU boot (APP_CPU parked)
-- [ ] Xtensa trap entry/exit — `call0` ABI exception vector, window overflow/underflow handlers
-- [ ] ESP32-S3 memory map — 512 KB SRAM (IRAM 0x4037_0000 / DRAM 0x3FC8_8000), 16 KB RTC FAST
-- [ ] ESP32-S3 interrupt controller — level + edge triggered, 32 CPU interrupts, priority 1–15
-- [ ] Dual-core SMP stub — APP_CPU bring-up via `SYSTEM_CORE_1_CONTROL_0_REG`, per-core idle tasks
-- [ ] ESP32-S3 radio drivers (stubs) — WiFi 802.11 b/g/n, BLE 5.0 (shared RF with C6 radio abstraction)
-- [ ] PSRAM support — optional 2–8 MB octal SPI PSRAM mapped at 0x3C00_0000 (cache-through)
-- [ ] USB-OTG serial — ESP32-S3 USB-OTG peripheral for console I/O (alternative to UART0)
+### ESP32-C3 (RISC-V riscv32imc, 400 KB SRAM)
+_Full bring-up on ESP32-C3: same RISC-V ISA as C6 but simpler — WiFi 4 + BLE 5.0, no 802.15.4, no USB. Single-core. Ideal for cost-optimized IoT nodes._
+
+#### ESP32-C3 Architecture + SoC
+- [ ] **`soc-esp32c3` crate** — ESP32-C3 peripherals: UART0 (0x6000_0000), UART1 (0x6001_0000), interrupt matrix (0x600C_2000), SysTimer (0x6002_3000), WDT (TG0/TG1), GPIO (0x6000_4000), SPI2 (0x6000_3000), I2C0 (0x6001_3000), RNG (0x6002_6000), eFuse (0x6000_8800)
+- [ ] **`kernel-esp32c3` crate** — `riscv32imc-unknown-none-elf` target, M-mode boot, linker script (IRAM 0x4037_C000, DRAM 0x3FC8_0000, flash 0x4200_0000)
+- [ ] **ESP32-C3 memory map** — 400 KB SRAM total (IRAM 0x4037_C000–0x4037_FFFF + DRAM 0x3FC8_0000–0x3FCE_FFFF), 16 KB RTC FAST (0x5000_0000), 4 MB flash (0x4200_0000)
+- [ ] **UART0 driver** — TX/RX MMIO, polled + interrupt-driven; implements `Serial` trait; console I/O
+- [ ] **WDT disable** — disable TG0 WDT + TG1 WDT + super WDT + RTC WDT early in boot (same pattern as C6)
+- [ ] **SysTimer driver** — 52-bit counter, 3 comparators; periodic tick for scheduler; implements `TickTimer` trait
+- [ ] **Interrupt matrix** — route peripheral IRQs to CPU interrupt lines; PLIC-like priority/enable; implements `InterruptController` trait
+- [ ] **GPIO driver** — 22 GPIOs, function select, pull up/down, drive strength; GPIO_OUT/SET/CLR registers; implements `GpioPin` trait
+- [ ] **SPI driver** — GPSPI2 for SD card and external peripherals; SPI-mode SD reuse from C6
+- [ ] **I2C driver** — I2C0 for sensors; standard/fast mode
+- [ ] **Build script + linker** — `build.rs` with `esp-wifi-sys` blob linkage (same structure as C6), `link/esp32c3.x` linker script
+
+#### ESP32-C3 WiFi + BLE
+- [ ] **WiFi blob integration** — `esp-wifi-sys` provides ESP32-C3 blobs (`libphy.a`, `libnet80211.a`, `libpp.a`); same OSI adapter pattern as C6 (`wifi_os_adapter.rs`)
+- [ ] **WiFi STA mode** — scan, connect, WPA2/WPA3; shared `WifiManager` state machine from C6
+- [ ] **WiFi AP mode** — software access point for configuration; captive portal for initial setup
+- [ ] **BLE integration** — BLE 5.0 via Espressif blobs; HCI transport, GAP scan/advertise, GATT client/server
+- [ ] **BLE HID client** — reuse `HogpManager` from C6 for BLE keyboard/mouse
+- [ ] **Coexistence** — WiFi + BLE shared antenna arbitration via esp-coex stubs
+- [ ] **DHCP + TCP shell** — smoltcp integration, shell-over-TCP on port 2323 (reuse net crate)
+
+#### ESP32-C3 Specific
+- [ ] **Hardware AES** — AES accelerator at 0x6003_A000 for crypto performance (8C integration)
+- [ ] **Hardware SHA** — SHA accelerator at 0x6003_B000; offload hash computation
+- [ ] **Hardware RSA** — RSA accelerator for public-key operations
+- [ ] **Temperature sensor** — on-chip temperature sensor via SAR ADC; expose via `/dev/temp`
+- [ ] **Deep sleep support** — RTC domain wakeup (timer, GPIO, UART); ultra-low-power mode for battery IoT
+- [ ] **Flash encryption** — eFuse-based flash encryption (AES-XTS-256) for secure storage
+- [ ] **Secure boot V2** — RSA-3072 signature verification from eFuse key
+- [ ] **QEMU validation** — `qemu-system-riscv32 -M esp32c3` (if available) or shared QEMU virt testing
+
+#### ESP32-C3 QEMU Launch Recipe
+```
+# Build
+cargo build --release -p kernel-esp32c3
+
+# Flash via esptool
+esptool.py --chip esp32c3 --port /dev/ttyUSB0 write_flash \
+  0x0 target/riscv32imc-unknown-none-elf/release/kernel-esp32c3
+```
+
+### Xtensa (ESP32-S3) — Full Bring-Up
+_ESP32-S3: Xtensa LX7 dual-core, WiFi 802.11 b/g/n, BLE 5.0, 512 KB SRAM, 2–8 MB PSRAM, USB-OTG, PIE vector extensions for AI acceleration. The most capable ESP32 variant._
+
+#### ESP32-S3 Architecture Crate
+- [ ] **`arch_xtensa` crate** — `SavedContext` for Xtensa windowed ABI: A0–A15 + SAR + PS + PC + LBEG/LEND/LCOUNT (zero-overhead loop) + WINDOWBASE/WINDOWSTART; trap/exception frame layout
+- [ ] **Window overflow/underflow handlers** — Xtensa register windowing: `WindowOverflow4/8/12` + `WindowUnderflow4/8/12` exception vectors; critical for function call ABI
+- [ ] **Exception vector table** — vectors at 0x4003_7000 (VECBASE): Reset, DebugException, NMI, KernelException, UserException, DoubleException, plus window handlers
+- [ ] **Context switch** — save/restore windowed registers (A0–A15 + special regs); flush register windows via `ROTW` + spill; swap task pointers
+- [ ] **Syscall entry** — Xtensa `SYSCALL` instruction (causes exception level 1); extract args from A2–A7, syscall number from A2; return via `RFE`
+- [ ] **`#[cfg(target_arch = "xtensa")]`** — wire `TaskContext = XtensaContext` type alias in `arch/src/lib.rs`
+
+#### ESP32-S3 SoC + Kernel
+- [ ] **`soc-esp32s3` crate** — ESP32-S3 peripherals: UART0 (0x6000_0000), UART1 (0x6001_0000), UART2 (0x6002_E000), interrupt matrix PRO_CPU (0x600C_2000) + APP_CPU (0x600C_2800), SysTimer (0x6002_3000), GPIO (0x6000_4000, 49 GPIOs), SPI2/SPI3 (0x6000_3000/0x6002_4000), I2C0/I2C1, GDMA (0x6003_F000), RNG (0x6003_5110), USB-OTG (0x6008_0000), LCD_CAM (0x6004_1000), ADC1/ADC2, SDMMC (0x6000_6000)
+- [ ] **`kernel-esp32s3` crate** — `xtensa-esp32s3-none-elf` target, single-core PRO_CPU boot (APP_CPU parked), linker script
+- [ ] **ESP32-S3 memory map** — 512 KB SRAM: IRAM (0x4037_0000–0x4037_FFFF), DRAM (0x3FC8_8000–0x3FCE_FFFF); 16 KB RTC FAST (0x600F_E000); 4/8/16 MB flash (0x4200_0000); optional 2–8 MB PSRAM (0x3C00_0000)
+- [ ] **UART0 driver** — TX/RX MMIO; implements `Serial` trait
+- [ ] **WDT disable** — TG0/TG1 + super WDT + RTC WDT
+- [ ] **SysTimer driver** — periodic tick; implements `TickTimer` trait
+- [ ] **Interrupt controller** — level + edge triggered, 32 CPU interrupts per core, priority 1–15; `InterruptController` trait
+- [ ] **GPIO driver** — 49 GPIOs, strapping pins, function select, pull up/down; implements `GpioPin` trait
+- [ ] **SPI driver** — SPI2 (GP-SPI) + SPI3; GDMA support for bulk transfers
+- [ ] **I2C driver** — I2C0 + I2C1; standard/fast mode; sensor interface
+- [ ] **GDMA controller** — General DMA for SPI, I2C, UART, LCD_CAM; channel allocation, linked-list descriptors
+
+#### ESP32-S3 USB-OTG
+- [ ] **USB-OTG peripheral** — ESP32-S3 built-in USB 1.1 OTG at 0x6008_0000; full-speed (12 Mbps)
+- [ ] **USB CDC-ACM** — USB serial console as alternative to UART0; implements `Serial` trait
+- [ ] **USB HID device** — present as USB HID keyboard/mouse (for demo/testing)
+- [ ] **USB MSC device** — USB mass storage class; expose SD/flash as USB drive for easy file transfer
+- [ ] **USB host mode** — enumerate external USB devices (keyboards, flash drives); reuse HID framework from 7D
+
+#### ESP32-S3 Dual-Core SMP
+- [ ] **APP_CPU bring-up** — write entry address to `SYSTEM_CORE_1_CONTROL_0_REG` (0x600C_0000); un-stall via `SYSTEM_CORE_1_CONTROL_1_REG`; APP_CPU enters `_secondary_start`
+- [ ] **Per-core idle tasks** — each core runs independent idle task; core affinity for tasks
+- [ ] **Per-core interrupt routing** — interrupt matrix routes peripherals to PRO_CPU or APP_CPU independently
+- [ ] **Cross-core signaling** — IPC interrupt (interrupt line 0) for cross-core wake-up; hardware spinlocks via ATOMIC_LOCKER
+- [ ] **SMP scheduler** — per-core run queue, work stealing, core affinity bitmask in TCB
+
+#### ESP32-S3 WiFi + BLE
+- [ ] **WiFi blob integration** — `esp-wifi-sys` ESP32-S3 blobs; same OSI adapter pattern; dual-band WiFi 802.11 b/g/n (2.4 GHz)
+- [ ] **WiFi STA/AP modes** — station + soft-AP; concurrent STA+AP for provisioning
+- [ ] **BLE 5.0** — Espressif BLE blobs; HCI transport; GAP + GATT; shared framework with C6
+- [ ] **Coexistence** — WiFi + BLE coex on shared 2.4 GHz radio
+- [ ] **WiFi throughput** — S3 has stronger CPU (dual-core 240 MHz); target higher throughput than C6
+
+#### ESP32-S3 AI Acceleration (PIE)
+- [ ] **PIE (Processor Instruction Extensions)** — ESP32-S3 Xtensa PIE SIMD: 128-bit vector ops, 8/16-bit integer MAC; accelerates INT8 inference
+- [ ] **PIE operator kernels** — optimized MatMul, Conv2D, depthwise-conv using PIE intrinsics; 4–8× speedup over scalar
+- [ ] **AI inference backend** — `PieBackend: InferenceBackend`; auto-dispatch quantized models to PIE; fallback to scalar for unsupported ops
+- [ ] **Keyword spotter on PIE** — 20 KB wake-word model running at < 2ms inference via PIE acceleration
+- [ ] **Camera + vision pipeline** — LCD_CAM peripheral for camera input (OV2640/OV5640); capture frame → PIE inference → classification
+
+#### ESP32-S3 PSRAM
+- [ ] **PSRAM init** — detect octal SPI PSRAM size (2/4/8 MB) at boot; configure cache-through mapping at 0x3C00_0000
+- [ ] **PSRAM heap** — extend kernel heap into PSRAM for large allocations (model weights, frame buffers)
+- [ ] **PSRAM-backed model store** — load AI models from flash into PSRAM for fast inference; memory-mapped access
+- [ ] **PSRAM for frame buffers** — camera + LCD frame buffers in PSRAM (avoids SRAM pressure)
+
+#### ESP32-S3 Peripherals
+- [ ] **SDMMC host** — native SD/MMC interface (4-bit data bus); faster than SPI-mode SD; FAT32 integration
+- [ ] **ADC** — ADC1 (10 channels) + ADC2 (10 channels); 12-bit resolution; sensor input
+- [ ] **DAC** — 2-channel 8-bit DAC for audio output
+- [ ] **LCD interface** — parallel 8/16-bit LCD via LCD_CAM; SPI LCD support; `DisplayDevice` trait impl
+- [ ] **Camera interface** — DVP 8/16-bit camera via LCD_CAM; OV2640 frame capture
+- [ ] **Touch sensor** — 14 capacitive touch GPIOs; touch-based UI input
+
+#### ESP32-S3 Build Recipe
+```
+# Build
+cargo build --release -p kernel-esp32s3
+
+# Flash via esptool
+esptool.py --chip esp32s3 --port /dev/ttyUSB0 write_flash \
+  0x0 target/xtensa-esp32s3-none-elf/release/kernel-esp32s3
+```
 
 ### Raspberry Pi Family (5, 4, 3, Zero)
 _Full Raspberry Pi lineup — from the flagship RPi 5 (Cortex-A76, 8 GB) down to the tiny Zero 2 W (Cortex-A53, 512 MB). All AArch64. Primary focus: real hardware, tested end-to-end._
@@ -656,11 +833,86 @@ _Microcontroller class. Dual-core Cortex-M33 or RISC-V Hazard3 (selectable), 520
 - [ ] **RISC-V Hazard3 mode** — boot in RISC-V mode (reuse `arch_riscv32`), ISA selected via OTP/boot pin
 - [ ] **PIO + USB serial** — Programmable I/O state machines, TinyUSB CDC-ACM console
 
-### x86-64
-- [ ] `soc-qemu-pc` crate — serial (COM1 0x3F8), APIC timer, PIC/IOAPIC
-- [ ] `kernel-qemu-pc` — `x86_64-unknown-none` target, multiboot2 boot, long mode
-- [ ] IDT setup — interrupt descriptor table, ISR stubs, syscall via `syscall`/`sysret`
-- [ ] GDT + TSS — kernel/user segment selectors, per-CPU task state segment
+### x86-64 (QEMU PC + KVM)
+_Full x86-64 bring-up on QEMU `q35`/`pc` machine and Linux KVM. The path to running VeerOS on standard PCs, servers, and cloud VMs. KVM gives near-native performance for development, testing, and production edge deployments._
+
+#### x86-64 Architecture Crate
+- [ ] **`arch_x86_64` crate** — `SavedContext` for x86-64: 16 GPRs (RAX–R15) + RIP + RFLAGS + RSP + CS + SS + FS_BASE (TLS); `SavedContext` trait impl; `get_syscall_nr` from RAX, args from RDI/RSI/RDX/R10/R8/R9 (Linux ABI)
+- [ ] **GDT (Global Descriptor Table)** — kernel CS/DS (Ring 0), user CS/DS (Ring 3), TSS descriptor; loaded via `lgdt` at boot
+- [ ] **TSS (Task State Segment)** — per-CPU TSS with `RSP0` (kernel stack on privilege transition), IST (Interrupt Stack Table) entries for NMI/DF/MCE
+- [ ] **IDT (Interrupt Descriptor Table)** — 256-entry IDT; ISR stubs (0–31 exceptions, 32–47 IRQs, 48+ software); each stub saves all GPRs → calls Rust handler → `iretq`
+- [ ] **`syscall`/`sysret` fast path** — MSR setup (`IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`); `syscall` entry saves RCX/R11, loads kernel RSP from per-CPU, dispatches, `sysret` back to Ring 3
+- [ ] **Context switch** — save callee-saved (RBX, RBP, R12–R15, RSP), swap task pointers, restore; FPU/SSE state via `xsave`/`xrstor` (lazy or eager)
+- [ ] **`#[cfg(target_arch = "x86_64")]`** — wire `TaskContext = X86_64Context` type alias in `arch/src/lib.rs`
+
+#### x86-64 Boot (Multiboot2 / UEFI)
+- [ ] **Multiboot2 header** — `.multiboot2` section in kernel ELF; tags: framebuffer request, module align, EFI services; loaded by GRUB2 or QEMU `-kernel`
+- [ ] **Boot assembly** — `_start` in long mode (Multiboot2 hands off in 32-bit protected mode → set up 64-bit page tables → jump to long mode → call `kernel_main`)
+- [ ] **Identity-map bootstrap page tables** — 2 MB huge pages, first 4 GB identity-mapped; kernel maps itself into high half (0xFFFF_8000_0000_0000+) before enabling full paging
+- [ ] **UEFI boot path (future)** — `x86_64-unknown-uefi` stub that exits boot services, sets up page tables, jumps to kernel; for real hardware without Multiboot
+- [ ] **Boot info parsing** — Multiboot2 info struct: memory map (E820), framebuffer, ACPI RSDP pointer, boot command line
+
+#### x86-64 SoC + Kernel (QEMU q35)
+- [ ] **`soc-qemu-pc` crate** — COM1 UART (I/O ports 0x3F8), APIC (Local APIC + I/O APIC), HPET/PIT timer, ACPI tables, VGA/framebuffer, VIRTIO-PCI, PS/2 keyboard
+- [ ] **`kernel-qemu-pc` crate** — `x86_64-unknown-none` target, Multiboot2 boot, custom linker script (kernel at 1 MB physical, higher-half virtual at 0xFFFF_8000_0010_0000)
+- [ ] **Serial console (COM1)** — I/O port 0x3F8; divisor latch for baud rate; polled TX/RX + IRQ4 interrupt-driven RX; implements `Serial` trait
+- [ ] **Local APIC** — MMIO at 0xFEE0_0000 (or MSR-based x2APIC); timer in periodic mode (IRQ vector 32); ICR for IPI; spurious vector; EOI
+- [ ] **I/O APIC** — MMIO at 0xFEC0_0000; redirection table entries for ISA IRQs (COM1→IRQ4, keyboard→IRQ1, HPET→IRQ0/2); route to LAPIC
+- [ ] **ACPI table parsing** — RSDP → RSDT/XSDT → MADT (APIC topology), FADT (PM timer, shutdown), HPET table; minimal AML interpreter deferred
+- [ ] **HPET timer** — High Precision Event Timer; 64-bit monotonic counter; periodic comparator for tick interrupt; fallback to PIT 8254 if no HPET
+- [ ] **PIC 8259 (legacy)** — remap to vectors 32–47, then mask all (use APIC); needed for initial boot before APIC init
+- [ ] **PS/2 keyboard** — IRQ1 scancode processing; scan set 1 → ASCII; implements `InputDevice` trait; primary input for early boot
+- [ ] **VGA text mode (early boot)** — 80×25 @ 0xB8000; boot messages before framebuffer init; implements `Serial` trait
+- [ ] **VIRTIO-PCI** — PCI config space enumeration; VIRTIO devices as PCI functions; reuse VIRTIO-NET/BLK backends with PCI transport
+- [ ] **PCI bus enumeration** — walk bus 0–255, device 0–31, function 0–7; read config space (BAR, class code, vendor/device ID); build device table
+
+#### x86-64 Memory Management
+- [ ] **4-level page tables** — PML4 → PDPT → PD → PT; 4 KB pages (+ 2 MB / 1 GB huge pages for kernel mapping)
+- [ ] **Higher-half kernel** — kernel linked at 0xFFFF_8000_0000_0000+; user space in lower half 0x0000_0000–0x0000_7FFF_FFFF_FFFF; canonical address enforcement
+- [ ] **Per-process page tables** — each `Process` gets own PML4; `CR3` swap on context switch; PCID (Process Context Identifier) to avoid TLB flush
+- [ ] **Physical memory allocator** — bitmap or buddy allocator initialized from E820 memory map; 4 KB frame granularity
+- [ ] **Kernel heap** — `slab` or bump allocator for kernel-internal allocations; mapped in higher-half
+- [ ] **Ring 0/Ring 3 split** — kernel pages with `Supervisor` bit; user pages with `User` bit; NX (No-Execute) on data pages; SMEP + SMAP enforcement
+
+#### KVM Acceleration
+- [ ] **QEMU `-enable-kvm` validation** — `qemu-system-x86_64 -enable-kvm -cpu host -M q35` on x86-64 Linux hosts; verify VeerOS boots at near-native speed
+- [ ] **KVM boot differences** — KVM provides proper hardware timer (TSC/APIC) fidelity; verify LAPIC timer works in KVM mode (vs TCG emulation quirks)
+- [ ] **KVM paravirt clock** — `kvm_clock` MSR (0x4B564D01) for stable TSC; KVM pvclock for accurate timekeeping under VM migration
+- [ ] **KVM VIRTIO (vhost)** — vhost-net kernel module for near-native networking; vhost-blk for disk I/O; bypasses QEMU userspace emulation
+- [ ] **Nested virtualization (future)** — VeerOS as a hypervisor: Intel VT-x (VMX) support, run guest VMs inside VeerOS; foundation for MicroVM isolation (Phase 8B)
+- [ ] **Cloud deployment** — test on AWS EC2 (metal/kvm), GCP Compute Engine, Azure VM; automated CI with `qemu-system-x86_64 -enable-kvm`
+
+#### x86-64 SMP (Multi-Core)
+- [ ] **BSP/AP model** — Bootstrap Processor (BSP) runs boot, then wakes Application Processors (APs) via LAPIC INIT-SIPI-SIPI sequence
+- [ ] **AP trampoline** — real-mode trampoline code at < 1 MB; AP wakes in real mode → protected mode → long mode → jumps to `_ap_start`
+- [ ] **Per-CPU state** — per-CPU Local APIC, per-CPU TSS, per-CPU idle task; `GS_BASE` MSR points to per-CPU data struct
+- [ ] **Scheduler SMP** — per-core run queue, cross-core IPI wake-up (LAPIC ICR), work stealing
+- [ ] **Spinlocks** — `lock cmpxchg`-based spinlocks; ticket locks or MCS locks for fairness
+
+#### x86-64 Hardware Targets (Beyond QEMU)
+- [ ] **Intel NUC / Mini-PC** — UEFI boot, NVMe storage, Intel Ethernet, USB keyboard; full desktop-class VeerOS
+- [ ] **Intel N100 / Celeron edge boxes** — low-power x86-64 for IoT gateways; 8–16 GB RAM; runs full AI stack (Phase 10)
+- [ ] **Framework Laptop (stubs)** — keyboard, trackpad, USB-C, eDP display; long-term goal for VeerOS-on-laptop
+
+#### x86-64 QEMU Launch Recipes
+```
+# TCG (any host)
+qemu-system-x86_64 -M q35 -cpu qemu64 -m 256M \
+  -kernel target/x86_64-unknown-none/release/kernel-qemu-pc \
+  -nographic -serial stdio \
+  -device virtio-net-pci,netdev=n0 -netdev user,id=n0,hostfwd=tcp::2323-:2323
+
+# KVM (x86-64 Linux host)
+qemu-system-x86_64 -M q35 -cpu host -enable-kvm -m 256M \
+  -kernel target/x86_64-unknown-none/release/kernel-qemu-pc \
+  -nographic -serial stdio
+
+# KVM + vhost-net (production-like)
+qemu-system-x86_64 -M q35 -cpu host -enable-kvm -m 1G -smp 4 \
+  -kernel target/x86_64-unknown-none/release/kernel-qemu-pc \
+  -nographic -serial stdio \
+  -netdev tap,id=n0,vhost=on -device virtio-net-pci,netdev=n0
+```
 
 ## Phase 8 — Security Architecture
 _Design the security model as a core OS primitive, not a bolt-on. Every subsystem respects these boundaries. Feature-gated tiers: `sec-base` (always on), `sec-sandbox`, `sec-crypto`, `sec-verified`._
@@ -949,7 +1201,7 @@ _Ergonomic Rust API for quantum programming from userspace._
 - [ ] **Shell `qasm` command** — load and execute OpenQASM files: `qasm run circuit.qasm --shots 1024`
 
 ## Phase 10 — AI as First-Class OS Citizen
-_Machine learning inference, neural processing unit abstraction, and AI-assisted OS services — built into the kernel as a core capability, not a userspace afterthought. Feature-gated: `ai` (core traits + tiny inference), `ai-npu` (hardware accelerator), `ai-cloud` (cloud inference), `ai-os` (AI-enhanced kernel services)._
+_Machine learning inference, neural processing unit abstraction, and AI-assisted OS services — built into the kernel as a core capability, not a userspace afterthought. Feature-gated: `ai` (core traits + tiny inference), `ai-npu` (hardware accelerator), `ai-cloud` (cloud inference), `ai-os` (AI-enhanced kernel services), `ai-nlp` (natural language shell), `ai-agents` (autonomous agents), `ai-vision` (computer vision pipeline), `ai-voice` (speech I/O)._
 
 ### 10A — Neural Processing Abstraction Layer (`crates/ai/`)
 _Unified interface for inference across CPU, GPU compute, NPU, TPU, and cloud endpoints._
@@ -1023,22 +1275,29 @@ _The OS itself uses AI to improve scheduling, security, and user experience. The
 - [ ] **Task behavior model** — tiny RNN/MLP (< 5 KB) predicts task CPU burst length, sleep duration, IPC patterns from recent history
 - [ ] **Predictive priority adjustment** — scheduler uses model predictions to pre-boost tasks about to become I/O-ready; reduces latency
 - [ ] **Power-aware scheduling** — model predicts idle periods; proactively enters low-power states; wake-up prediction reduces resume latency
+- [ ] **Adaptive time-slice tuning** — AI adjusts scheduler time quantum per-task based on workload classification (interactive vs batch vs real-time)
+- [ ] **Thermal-aware task placement (SMP)** — on multi-core targets, model predicts per-core thermal trajectory; migrate hot tasks to cooler cores before throttling
 
 #### Anomaly Detection + Security
 - [ ] **Syscall anomaly detector** — per-process syscall sequence model (Markov chain or tiny LSTM); flags unusual patterns → security audit log (8F)
 - [ ] **Memory access anomaly** — detect unusual memory access patterns that may indicate exploitation; raise `IntegrityViolation` event
 - [ ] **Network traffic classifier** — classify inbound packets (benign/suspicious/malicious) using tiny CNN on packet headers; integrates with firewall rules
-
-#### Smart Shell + User Experience
-- [ ] **Shell command prediction** — suggest next command based on history + context (tiny GPT-2-like model or n-gram)
-- [ ] **Natural language commands (future)** — `veeros> "show me running tasks sorted by priority"` → auto-translates to `tasks --sort=priority`
-- [ ] **On-device AI assistant** — LLM-powered help system: `veeros> ai "how do I create a new process?"` → contextual VeerOS documentation answer
-- [ ] **Log summarization** — AI-generated summary of recent audit log, boot messages, or error patterns
+- [ ] **Behavioral process fingerprinting** — learn normal syscall/IPC/memory patterns per process; detect compromised processes deviating from profile
+- [ ] **AI-powered intrusion detection** — correlate anomalies across syscall, network, and memory domains; generate threat score; auto-quarantine above threshold
+- [ ] **Adversarial robustness** — model hardening against evasion attacks; input validation before inference; rate-limit anomaly detector updates
 
 #### Sensor Fusion + IoT Intelligence
 - [ ] **Sensor pipeline** — raw sensor data → preprocessing → inference → action; declarative configuration: `{sensor: "temp", model: "anomaly", action: "alert"}`
 - [ ] **Edge inference orchestrator** — fleet of VeerOS devices coordinate inference: split model across nodes, aggregate results
 - [ ] **Federated learning (stubs)** — on-device model training with gradient sharing; no raw data leaves the device; privacy-preserving AI
+- [ ] **Predictive maintenance** — learn sensor baselines, predict hardware failure (fan, motor, battery) before it happens; alert via IPC/network
+- [ ] **Time-series forecasting** — tiny temporal model for sensor prediction: temperature, vibration, power consumption; enables proactive control loops
+
+#### Auto-Tuning + Self-Optimizing Kernel
+- [ ] **Memory allocator tuning** — AI-selected allocation strategy per-workload (bump vs slab vs buddy); learned from allocation pattern history
+- [ ] **I/O scheduler optimization** — model predicts disk/flash access patterns; reorder and coalesce block I/O requests; reduce latency and wear
+- [ ] **Network stack tuning** — auto-tune TCP window size, retransmit timers, buffer counts based on observed RTT and throughput
+- [ ] **Self-healing kernel** — detect repeated service crashes, auto-restart with different configuration; learn stable config over time
 
 ### 10F — Cloud AI Integration (`ai-cloud` feature)
 _Offload heavy inference to cloud when local resources are insufficient._
@@ -1091,6 +1350,385 @@ Target capabilities:
   RPi 4 (4/8 GB)      → ai + ai-npu + ai-cloud: TinyLlama local, Coral TPU
   RPi 5 (8 GB)        → ai + ai-npu + ai-cloud + ai-os: Phi-3-mini local, Hailo-8, full AI-OS
   QEMU virt            → ai + ai-cloud: development/testing
+```
+
+### 10I — Natural Language Shell (`ai-nlp` feature)
+_The VeerOS shell understands natural language. Toggle with `ai on`/`ai off`. When active, plain English commands get translated to shell commands. When off, the shell behaves as a traditional CLI._
+
+#### NL Shell Core
+- [ ] **`ai on` / `ai off` toggle** — shell variable `ai_mode: bool`; persists in `ShellVars`; displayed in prompt (`veeros [AI]>` vs `veeros>`); default off
+- [ ] **`ai` command** — `ai on` / `ai off` / `ai status` / `ai query <text>` / `ai explain <cmd>`; gateway to NL features
+- [ ] **Intent classifier** — tiny model (< 50 KB) classifies NL input into intent categories: `FileOp`, `ProcessMgmt`, `NetworkCmd`, `SystemInfo`, `ConfigChange`, `Search`, `Help`, `Unknown`
+- [ ] **Entity extraction** — parse file paths, process names, IP addresses, port numbers, flag values from NL input
+- [ ] **NL → Command translator** — `"show me what's running"` → `ps`, `"list files in /tmp"` → `ls /tmp`, `"connect to wifi MyNet"` → `wifi connect MyNet`
+- [ ] **Confirmation prompt** — before executing translated command, show: `→ ps [Y/n]?`; user confirms or edits; bypass with `ai! <text>` (force-execute)
+- [ ] **Context-aware suggestions** — track recent commands; `"do that again but for /var"` → re-run last command with path substituted
+- [ ] **Conversational mode** — `ai chat` enters multi-turn conversation; context window of last 5 exchanges; `exit` returns to normal shell
+- [ ] **`ai explain <cmd>`** — explain what a command does: `ai explain "mount /dev/sd0 /mnt fat32"` → human-readable explanation
+- [ ] **Error recovery** — on command failure, AI suggests fix: `"Permission denied" → "Try: su root, then re-run"`
+- [ ] **Safety guardrails** — NL commands that would destroy data (`rm -rf /`, `format`) require double confirmation; AI warns about destructive operations
+
+#### NL Models + Backends
+- [ ] **Local tiny NL model (< 5 MB)** — distilled intent classifier + entity extractor; runs on ESP32-S3+ / RPi; no network required
+- [ ] **Cloud LLM backend** — for complex queries, escalate to cloud LLM (OpenAI/Anthropic/Ollama); requires `ai-cloud` feature + network
+- [ ] **Hybrid pipeline** — local intent classification first; if confidence < threshold, escalate to cloud; minimizes latency and cost
+- [ ] **Custom training data** — VeerOS-specific command corpus; fine-tune on OS commands, man pages, system concepts
+- [ ] **Offline command dictionary** — fallback: keyword→command lookup table (50+ common patterns) when no model/cloud available
+
+### 10J — AI Agents (`ai-agents` feature)
+_Autonomous task execution — AI agents that can plan, execute multi-step operations, and recover from failures._
+
+- [ ] **Agent framework** — `Agent` struct: goal description, action plan (sequence of shell commands), execution state, rollback plan
+- [ ] **`ai agent <goal>`** — describe a goal in plain text; agent decomposes into steps, executes sequentially, reports progress
+- [ ] **Tool use** — agents can invoke shell commands, read files, query system status, call other agents; sandboxed via capabilities (8A)
+- [ ] **Planning engine** — LLM-based or rule-based planner; generate action plan from goal + context; re-plan on failure
+- [ ] **Execution sandbox** — agents run in restricted domain (8B sandbox); limited syscall set; memory/CPU budget
+- [ ] **Rollback on failure** — agent tracks modifications; on error, attempts undo (delete created files, restart stopped services)
+- [ ] **Agent registry** — pre-built agents: `setup-wifi` (configure and connect), `deploy-app` (load and start process), `diagnose-network` (troubleshoot connectivity), `optimize-system` (tune kernel parameters)
+- [ ] **Human-in-the-loop** — agents pause at dangerous operations and request user approval; `--auto` flag for fully autonomous mode
+- [ ] **Multi-agent coordination** — agents can delegate sub-tasks to specialist agents; shared context via IPC channels
+- [ ] **Agent audit log** — all agent actions logged to security audit (8F); reviewable via `ai agent log`
+
+### 10K — Computer Vision Pipeline (`ai-vision` feature)
+_Camera input → inference → action. Integrated with ESP32-S3 LCD_CAM and RPi camera modules._
+
+- [ ] **Frame capture abstraction** — `CameraDevice` trait: `capture_frame() -> FrameBuffer`; implementations for ESP32-S3 DVP, RPi CSI-2
+- [ ] **Frame preprocessing** — resize, crop, normalize, color space conversion (RGB→grayscale, YUV→RGB); fixed-point math
+- [ ] **Image classification** — MobileNet-v2 INT8 on captured frames; top-K class labels
+- [ ] **Object detection** — YOLO-tiny / SSD-MobileNet for bounding box detection; real-time on RPi 4/5
+- [ ] **Face detection** — lightweight face detector for presence/count sensing; no recognition (privacy)
+- [ ] **OCR (basic)** — character recognition for reading displays, labels, signs; 7-segment + printed text
+- [ ] **Motion detection** — frame differencing for security/trigger applications; zero-model, pure image processing
+- [ ] **Vision pipeline config** — declarative: `{camera: "csi0", model: "mobilenet", action: "classify", interval_ms: 1000}`
+- [ ] **`/dev/camera`** — device node for frame capture; `read()` returns latest frame; `ioctl` for resolution/format config
+- [ ] **Shell `vision` command** — `vision capture` (save frame), `vision classify` (run model), `vision detect` (object detection), `vision stream` (continuous)
+- [ ] **Vision → network** — stream classification results via MQTT/TCP for remote monitoring dashboards
+
+### 10L — Voice / Speech I/O (`ai-voice` feature)
+_Microphone input → speech recognition → command execution. Speaker output → text-to-speech._
+
+- [ ] **Audio capture abstraction** — `AudioDevice` trait: `read_samples(buf, count)`, `sample_rate()`, `channels()`; I2S/PDM microphone drivers
+- [ ] **I2S driver** — ESP32-S3 I2S peripheral for digital microphone (INMP441, SPH0645); RPi I2S for USB audio class
+- [ ] **Voice Activity Detection (VAD)** — energy-based + tiny model VAD; detect speech onset/offset; avoid processing silence
+- [ ] **Wake word detection** — always-on keyword spotter (< 20 KB model); `"Hey Veer"` triggers speech capture; runs on ESP32-C6+
+- [ ] **Speech-to-Text (STT)** — Whisper-tiny (75 MB) on RPi 4/5 for on-device transcription; cloud STT fallback
+- [ ] **Text-to-Speech (TTS)** — tiny TTS model for spoken feedback; I2S/speaker output; `say "WiFi connected"`
+- [ ] **Voice command pipeline** — wake word → capture → STT → NL shell (10I) → execute → TTS response
+- [ ] **`/dev/mic`** — device node for audio capture; `/dev/speaker` for audio output
+- [ ] **Shell `voice` command** — `voice listen` (start capturing), `voice say <text>`, `voice status`
+- [ ] **Hands-free mode** — continuous voice command loop: listen → transcribe → execute → speak result → listen
+
+### 10M — On-Device Training / Fine-Tuning (`ai-train` feature)
+_Learn and adapt on the device itself — federated learning, transfer learning, continual adaptation._
+
+- [ ] **Gradient computation** — backpropagation through small networks (< 100K params); fixed-point gradients on embedded
+- [ ] **SGD optimizer** — stochastic gradient descent with momentum; `no_alloc`, fixed working set
+- [ ] **Transfer learning** — freeze pre-trained feature layers, fine-tune classifier head on device-specific data
+- [ ] **Federated learning framework** — on-device training → encrypted gradient upload → aggregation server → updated model download; privacy-preserving
+- [ ] **Continual learning** — model adapts to changing data distribution over time; catastrophic forgetting mitigation via EWC/replay buffer
+- [ ] **Training data collection** — sensor data + labels stored in flash/SD; incremental dataset building
+- [ ] **Model export** — save fine-tuned model to flash in TFLite/ONNX/GGUF format; hot-swap without reboot
+- [ ] **Training scheduler** — kernel-aware: run training during idle periods; pause when real-time tasks need CPU; battery-aware on portable devices
+
+### 10N — Retrieval-Augmented Generation (RAG) for VeerOS
+_LLM + local knowledge base. AI assistant that knows about YOUR VeerOS instance — its configuration, logs, man pages, and documentation._
+
+- [ ] **Document index** — index man pages, `/etc/` config files, kernel log, command history into vector store
+- [ ] **Embedding model** — tiny sentence embedding model (< 10 MB) for semantic search; INT8 quantized
+- [ ] **Vector store** — fixed-size vector database in RAM/PSRAM (cosine similarity search); `heapless::Vec` backed
+- [ ] **RAG pipeline** — user query → embed → top-K retrieval → augment LLM prompt with context → generate response
+- [ ] **Auto-indexing** — on boot, index system docs; on config change, re-index affected files; incremental
+- [ ] **`ai ask <question>`** — RAG-powered Q&A: `ai ask "how do I mount an SD card?"` → retrieves man page + example, generates answer
+- [ ] **Context injection** — system status (uptime, memory, running tasks) automatically injected into LLM context for aware responses
+
+## Phase 11 — Distributed OS (VeerOS Cluster)
+_Multiple VeerOS nodes form a single coherent computer. Processes can spawn on any node, IPC crosses node boundaries transparently, and a unified VFS presents all nodes' storage as one namespace. Feature-gated: `cluster` (core membership + discovery), `cluster-sched` (distributed scheduler), `cluster-vfs` (shared filesystem), `cluster-ipc` (cross-node channels)._
+
+### 11A — Cluster Membership + Discovery
+_Node discovery, health monitoring, and membership management._
+
+- [ ] **Node identity** — `NodeId` (128-bit UUID, derived from MAC or hardware serial); `NodeInfo { id, hostname, arch, capabilities, memory, cores, ip_addr, uptime }`
+- [ ] **mDNS/DNS-SD discovery** — broadcast `_veeros._tcp.local` service; auto-discover peers on LAN; zero-config clustering
+- [ ] **Gossip protocol** — SWIM-based (Scalable Weakly-consistent Infection-style Membership); heartbeat + suspicion + death detection; O(log N) convergence
+- [ ] **Cluster join/leave** — `cluster join <addr>` / `cluster leave`; graceful drain (migrate tasks) before leave; forced eviction on unresponsive nodes
+- [ ] **Membership table** — `[NodeEntry; MAX_CLUSTER_NODES]` (32–256 nodes); replicated across all members via gossip
+- [ ] **Health monitoring** — periodic heartbeat (1s); suspicion timer (5s); dead declaration (15s); configurable per-cluster
+- [ ] **Split-brain detection** — partition detection via quorum; minority partition enters read-only mode; auto-heal on reconnect
+- [ ] **Node roles** — `Leader` (elected, coordinates), `Worker` (runs tasks), `Gateway` (ingress/egress), `Storage` (persistent data); configurable per-node
+- [ ] **Shell `cluster` commands** — `cluster status`, `cluster nodes`, `cluster join <addr>`, `cluster leave`, `cluster elect`, `cluster drain <node>`
+- [ ] **Bootstrap modes** — static seeds (predefined IP list), mDNS auto-discovery, cloud seed (fetch peers from a registry endpoint)
+
+### 11B — Consensus + Coordination
+_Distributed agreement for leader election, configuration updates, and atomic operations._
+
+- [ ] **Raft consensus** — `no_std` Raft implementation: leader election, log replication, commit; persistent log in flash/SD; 3/5/7-node quorum
+- [ ] **Leader election** — automatic leader election on cluster formation or leader failure; election timeout + randomized backoff
+- [ ] **Distributed configuration** — cluster-wide key-value store (Raft-replicated); `/etc/cluster.conf` synced across all nodes
+- [ ] **Distributed locks** — `SYS_CLUSTER_LOCK` / `SYS_CLUSTER_UNLOCK` — cross-node mutex via Raft; fencing tokens for correctness
+- [ ] **Atomic counters** — cluster-wide monotonic counters (useful for distributed IDs, sequence numbers)
+- [ ] **Etcd-compatible API (stubs)** — basic key-value watch/put/get compatible with etcd wire protocol for tooling interop
+
+### 11C — Distributed Scheduler
+_Transparent process migration and placement — the cluster acts as one big computer._
+
+- [ ] **Global task registry** — leader maintains cluster-wide task table; each node reports local tasks via gossip
+- [ ] **`SYS_REMOTE_SPAWN`** — spawn a process on a specific node or let scheduler pick: `spawn_remote(binary, args, node_hint)`
+- [ ] **Placement policies** — round-robin, least-loaded, affinity-based (pin to node with required hardware), anti-affinity (spread replicas)
+- [ ] **Resource-aware placement** — scheduler considers CPU, memory, accelerators (NPU, radio), network proximity
+- [ ] **Task migration** — checkpoint process state → serialize → transfer to target node → resume; requires architecture compatibility
+- [ ] **Cross-node process visibility** — `ps` shows all processes across cluster with `[node]` prefix; `kill` works across nodes
+- [ ] **Resource quotas** — per-node and per-user cluster-wide resource limits; prevents single user from consuming all cluster resources
+- [ ] **Scheduler plugins** — pluggable scheduling strategies: `SchedulerPlugin` trait; custom placement logic for domain-specific workloads
+
+### 11D — Distributed IPC
+_Transparent cross-node message passing — channels and sockets work identically whether local or remote._
+
+- [ ] **Cluster-aware channels** — `SYS_CHAN_CREATE` with `CHAN_FLAG_CLUSTER` flag; kernel routes messages across nodes transparently
+- [ ] **Cross-node message transport** — TCP/TLS between nodes for reliable message delivery; UDP for low-latency unreliable
+- [ ] **Location-transparent addressing** — `NodeId:ChannelId` globally unique; sender doesn't need to know receiver's node
+- [ ] **Cluster sockets** — sockets can `connect()` to `NodeId:Port`; kernel routes to correct node
+- [ ] **Service ports** — well-known cluster-wide service names: `"cluster://log-service"`, `"cluster://config-store"`; resolved via membership table
+- [ ] **Message serialization** — compact binary serialization for cross-node messages; version-tagged for compatibility
+- [ ] **Backpressure** — flow control between nodes; sender blocks when receiver overwhelmed; prevents cascading failures
+- [ ] **Encrypted cross-node IPC** — all inter-node communication encrypted with per-link session keys (TLS 1.3, Phase 8E)
+
+### 11E — Distributed VFS
+_One filesystem namespace spanning all cluster nodes — files accessible from any node._
+
+- [ ] **Global namespace** — `/cluster/<node>/` mount points auto-created; root node mounts all peers: `/cluster/node2/`, `/cluster/node3/`
+- [ ] **Remote file operations** — `open("/cluster/node2/data/file.txt")` transparently routes I/O over network to node2
+- [ ] **NFS-like protocol** — lightweight RPC for file ops (open/read/write/stat/readdir/close); runs over cluster IPC
+- [ ] **Caching** — local read cache with TTL; write-through for consistency; cache invalidation via gossip
+- [ ] **Replicated directories** — mark directories for N-way replication across nodes; write quorum for durability
+- [ ] **Path-based routing** — `/local/` always stays on current node; `/cluster/` routes to remote; `/shared/` = replicated
+- [ ] **Consistency levels** — configurable per-file: `strong` (linearizable), `eventual` (AP), `session` (read-your-writes)
+- [ ] **Storage pooling** — aggregate free space across nodes; distributed block allocator for large files spanning multiple nodes
+
+### 11F — Cluster Observability + Management
+_Monitoring, debugging, and operating the cluster._
+
+- [ ] **Cluster metrics** — per-node: CPU, memory, network, disk, task count; aggregated at leader; exposed via `/proc/cluster/`
+- [ ] **Distributed logging** — `klog` entries tagged with `NodeId`; aggregated at leader or forwarded to external log collector
+- [ ] **`cluster top`** — `top`-like view across all nodes: global process list, per-node resource usage, network I/O
+- [ ] **Node drain + cordon** — `cluster drain <node>` migrates all tasks; `cluster cordon <node>` prevents new task placement
+- [ ] **Rolling restart** — restart nodes one-by-one without downtime; drain → restart → rejoin → uncordon
+- [ ] **Cluster events** — event stream: node_joined, node_left, task_migrated, leader_elected, split_brain; subscribe via channel
+
+## Phase 12 — Cloud Platform (VeerOS Cloud)
+_VeerOS as a cloud-native operating system with built-in orchestration, service mesh, and platform services. Not running ON the cloud — VeerOS IS the cloud. Feature-gated: `cloud-orchestrate`, `cloud-mesh`, `cloud-observe`, `cloud-api`._
+
+### 12A — Container + Service Orchestration
+_Schedule and manage containerized workloads across the cluster — a native, sidecar-free alternative to Kubernetes._
+
+- [ ] **Service definition** — `ServiceSpec { name, image, replicas, resources, ports, env, health_check, restart_policy }`
+- [ ] **Desired state reconciliation** — controller loop: compare desired state vs actual → schedule/kill/restart to converge; runs on leader
+- [ ] **Service lifecycle** — create → scale → update (rolling) → pause → resume → destroy
+- [ ] **Rolling deployments** — update containers one at a time; health check between steps; auto-rollback on failure
+- [ ] **Replica placement** — spread replicas across nodes (anti-affinity); respect resource requests/limits
+- [ ] **Restart policies** — `always`, `on-failure`, `never`; configurable backoff (1s, 2s, 4s, max 5m)
+- [ ] **Resource requests + limits** — CPU, memory, accelerator quotas per service; scheduler enforces at placement time
+- [ ] **Namespaces** — logical grouping of services; resource quotas per namespace; RBAC per namespace
+- [ ] **Labels + selectors** — key-value labels on services/containers; selector-based queries for grouping/targeting
+- [ ] **CronJob scheduler** — time-based service execution: `CronSpec { schedule: "*/5 * * * *", service }` ; Raft-replicated schedule
+
+### 12B — Service Mesh (Native, Sidecar-Free)
+_Service-to-service communication with built-in load balancing, retries, circuit breaking, and mTLS. No sidecar bloat — the kernel IS the mesh._
+
+- [ ] **Service registry** — all services auto-registered at start; `{ name, node, port, health, metadata }`; gossip-replicated
+- [ ] **Service discovery** — `connect("my-service")` resolves to healthy instance via registry; client-side or kernel-mediated
+- [ ] **Load balancing** — round-robin, least-connections, weighted, random; per-service configurable; kernel routes at socket layer
+- [ ] **Health checks** — TCP connect, HTTP GET, custom probe; configurable interval, timeout, threshold; unhealthy → removed from LB
+- [ ] **Circuit breaker** — per-service failure counter; open circuit after N failures → fast-fail for timeout period → half-open probe → close
+- [ ] **Retry policy** — automatic retries with backoff: `{ retries: 3, backoff: "exponential", max_delay_ms: 5000 }`
+- [ ] **Timeout policy** — per-request timeout; per-service default; kernel enforces at socket/channel level
+- [ ] **mTLS (mutual TLS)** — all service-to-service traffic encrypted; auto-provisioned per-service certificates (Phase 8E + 8C)
+- [ ] **Rate limiting** — per-service request rate limits; token bucket algorithm; 429 response on overflow
+- [ ] **Traffic splitting** — canary deployments: route X% traffic to new version; header-based routing for A/B testing
+- [ ] **Observability injection** — auto-inject trace headers (W3C Trace Context); latency histograms per service pair
+
+### 12C — API Gateway + Ingress
+_External traffic entry point — routing, authentication, rate limiting, protocol translation._
+
+- [ ] **Ingress controller** — listen on public ports (80/443); route inbound traffic to backend services by hostname/path
+- [ ] **Route table** — `{ host: "api.example.com", path: "/v1/*", service: "api-svc", port: 8080 }`; regex path matching
+- [ ] **TLS termination** — terminate TLS at ingress; forward plaintext to backend services (or re-encrypt for mTLS)
+- [ ] **Authentication** — API key validation, JWT verification, OAuth2 token introspection at gateway level
+- [ ] **Rate limiting** — per-client, per-route rate limits; API key-based quotas
+- [ ] **Request/response transformation** — header injection, path rewriting, body transformation (JSON→CBOR for embedded clients)
+- [ ] **WebSocket support** — HTTP upgrade → WebSocket pass-through to backend services
+- [ ] **gRPC proxy** — HTTP/2 gRPC routing; content-type detection for automatic protocol handling
+- [ ] **CORS handling** — configurable Cross-Origin Resource Sharing headers per route
+
+### 12D — Secrets + Configuration Management
+_Secure secret storage and dynamic configuration for cluster services._
+
+- [ ] **Secret store** — encrypted key-value store (Raft-replicated); at-rest encryption via kernel keystore (8C); per-namespace access control
+- [ ] **`SYS_SECRET_GET` / `SYS_SECRET_PUT`** — syscalls for secret access; requires `Secret(name)` capability
+- [ ] **Secret injection** — services declare secret refs in spec; kernel injects into environment or mounted tmpfs at start
+- [ ] **Secret rotation** — automatic key/cert rotation with configurable TTL; services notified via event channel
+- [ ] **ConfigMap** — non-secret configuration data; Raft-replicated; mountable as virtual files in container namespace
+- [ ] **Hot reload** — config changes trigger notification to running services; services can subscribe to config change events
+- [ ] **Shell `secret` commands** — `secret create <name> <value>`, `secret get <name>`, `secret list`, `secret delete <name>`, `secret rotate <name>`
+
+### 12E — Observability Stack
+_Metrics, traces, and logs — built into the kernel, not bolted on._
+
+#### Metrics
+- [ ] **Kernel metrics collector** — per-service: request count, latency histogram (P50/P95/P99), error rate, active connections
+- [ ] **System metrics** — CPU per-core, memory usage, network I/O, disk I/O, scheduler stats; sampled at 1s intervals
+- [ ] **Prometheus exposition** — `/metrics` HTTP endpoint on each node; Prometheus-compatible text format for scraping
+- [ ] **Push metrics** — UDP/TCP push to remote collector for environments without pull infrastructure
+- [ ] **Custom metrics** — `SYS_METRIC_EMIT` syscall; services publish custom counters/gauges/histograms
+
+#### Distributed Tracing
+- [ ] **W3C Trace Context** — auto-propagate `traceparent`/`tracestate` headers across service calls; kernel injects at socket layer
+- [ ] **Span collection** — per-request span: start time, duration, service, operation, status, parent span ID
+- [ ] **Trace storage** — ring buffer of recent traces in kernel memory; configurable depth (1K–100K spans)
+- [ ] **Jaeger/Zipkin export** — serialize traces to Jaeger Thrift or Zipkin JSON format; push to external collector
+- [ ] **Trace query** — `trace list`, `trace show <trace_id>`; filter by service, latency, error status
+
+#### Logging
+- [ ] **Structured logging** — JSON log entries: `{ ts, level, node, service, msg, trace_id, fields }`
+- [ ] **Log aggregation** — forward logs from all nodes to leader or external collector (syslog, Loki, Elasticsearch)
+- [ ] **Log levels** — per-service configurable: `trace`, `debug`, `info`, `warn`, `error`; runtime-adjustable
+- [ ] **Shell `logs` command** — `logs <service> [--tail N] [--follow] [--node <id>] [--level warn]`
+
+#### Alerting
+- [ ] **Alert rules** — threshold-based: `if error_rate > 0.05 for 5m → alert`; configurable per-service
+- [ ] **Alert channels** — IPC notification, shell `alerts` command, network webhook (HTTP POST), GPIO (LED/buzzer on embedded)
+- [ ] **Alert silencing** — `alert silence <rule> --duration 1h`; prevents alert storms during maintenance
+
+### 12F — Auto-Scaling + Resource Management
+_Dynamic scaling of services based on load._
+
+- [ ] **Horizontal Pod Autoscaler (HPA) equivalent** — scale service replicas based on CPU/memory/custom metric thresholds
+- [ ] **Scale-to-zero** — idle services scaled down to 0 replicas; re-created on first request (cold start ~100ms target)
+- [ ] **Vertical scaling** — adjust resource limits dynamically based on observed usage; recommend right-size
+- [ ] **Cluster autoscaler stubs** — for cloud/VM environments: provision/deprovision nodes based on pending workload
+- [ ] **Resource pressure signals** — kernel signals `MemoryPressure`, `CpuPressure`, `DiskPressure` to orchestrator; triggers eviction/migration
+- [ ] **Eviction policy** — low-priority services evicted first under resource pressure; priority-based preemption
+- [ ] **Cost-aware scheduling** — on heterogeneous clusters (mix of RPi + x86), prefer cheaper nodes; spot-instance awareness for cloud
+
+### 12G — Multi-Tenancy
+_Isolate tenants sharing the same cluster._
+
+- [ ] **Tenant model** — `TenantId` maps to a set of namespaces + resource quotas + RBAC policies
+- [ ] **Network isolation** — per-tenant virtual network; no cross-tenant traffic without explicit policy
+- [ ] **Storage isolation** — per-tenant VFS namespace; separate encryption keys per tenant
+- [ ] **Resource quotas** — per-tenant CPU/memory/storage/network limits; enforced at scheduler and kernel level
+- [ ] **Billing stubs** — resource usage tracking per-tenant; exportable for chargeback/billing integration
+- [ ] **Tenant admin** — `tenant create <name>`, `tenant quota set <name> <resource> <limit>`, `tenant list`, `tenant delete <name>`
+
+## Phase 13 — Network Appliance / Firewall OS (`dist-firewall`)
+_VeerOS as a firewall, router, VPN gateway, and network security appliance. A dedicated distribution profile for network infrastructure. Feature-gated: `net-firewall`, `net-nat`, `net-vpn`, `net-dpi`, `net-shape`._
+
+### 13A — Packet Filter + Firewall Engine
+_Stateful packet filtering with rule chains — the core of VeerOS-as-firewall._
+
+- [ ] **Packet filter engine** — per-interface rule chains: INPUT, OUTPUT, FORWARD; match on protocol, src/dst IP, port, interface, state
+- [ ] **Rule structure** — `FilterRule { chain, priority, match_criteria, action: Accept|Drop|Reject|Log|Jump(chain), counter }`
+- [ ] **Match criteria** — IP src/dst (CIDR), protocol (TCP/UDP/ICMP/any), port range, interface, connection state (NEW/ESTABLISHED/RELATED), rate limit
+- [ ] **Stateful inspection** — connection tracking table (conntrack): track TCP state machine, UDP pseudo-connections, ICMP echo tracking; ESTABLISHED packets fast-path
+- [ ] **Default policies** — per-chain default (ACCEPT/DROP); recommended: INPUT=DROP, OUTPUT=ACCEPT, FORWARD=DROP
+- [ ] **Rule processing** — first-match wins; priority ordering; counters (packets/bytes) per rule for monitoring
+- [ ] **IPv4 + IPv6** — dual-stack filtering; separate rule sets or unified with address family match
+- [ ] **ebtables / bridge filtering (stubs)** — L2 frame filtering for bridged interfaces
+- [ ] **Shell `fw` commands** — `fw add INPUT -s 10.0.0.0/8 -p tcp --dport 22 -j ACCEPT`, `fw list`, `fw delete <id>`, `fw flush`, `fw default INPUT DROP`
+- [ ] **Rule persistence** — save rules to `/etc/firewall.rules`; auto-load on boot; `fw save` / `fw restore`
+- [ ] **Logging** — dropped/rejected packets logged with timestamp, src/dst, protocol; rate-limited logging to prevent log flood
+
+### 13B — NAT (Network Address Translation)
+_IP masquerading, port forwarding, and DNAT/SNAT for routing between networks._
+
+- [ ] **SNAT / Masquerade** — rewrite source IP for outbound traffic from private network; conntrack-based reply mapping
+- [ ] **DNAT / Port forwarding** — rewrite destination IP:port to forward inbound connections to internal servers
+- [ ] **1:1 NAT** — static bidirectional IP mapping for DMZ hosts
+- [ ] **NAT table** — `NatRule { chain: PREROUTING|POSTROUTING, match, action: SNAT(ip)|DNAT(ip:port)|MASQUERADE }`
+- [ ] **Hairpin NAT** — internal hosts access internal services via external IP; rewrite on both PREROUTING and POSTROUTING
+- [ ] **Connection tracking integration** — NAT entries tied to conntrack; reply packets automatically de-NATted
+- [ ] **Shell `nat` commands** — `nat add masquerade -o eth0`, `nat add dnat -p tcp --dport 80 --to 192.168.1.10:8080`, `nat list`
+- [ ] **NAT ALG stubs** — Application Layer Gateway for protocols that embed IP/port in payload (FTP, SIP); basic FTP passive mode
+
+### 13C — Routing + Multi-Interface
+_IP routing between multiple network interfaces — VeerOS as a router._
+
+- [ ] **Routing table** — `RouteEntry { destination: CIDR, gateway: Option<IP>, interface, metric, flags }`; longest-prefix match
+- [ ] **Static routes** — `route add 10.0.0.0/8 via 192.168.1.1 dev eth0`; persistent in `/etc/routes`
+- [ ] **Default gateway** — `route add default via 192.168.1.1`
+- [ ] **Multi-interface support** — multiple `NetworkDevice` instances (eth0, wlan0, tun0, br0); independent IP config per interface
+- [ ] **Interface management** — `ifconfig <iface> <ip> netmask <mask> up/down`; `ip addr add/del`
+- [ ] **ARP table** — `arp` command; ARP request/reply handling per interface; proxy ARP for bridging
+- [ ] **DHCP server** — lightweight DHCP server for LAN interfaces; IP pool, lease management, options (DNS, gateway, NTP)
+- [ ] **DNS forwarder** — cache-and-forward DNS queries; configurable upstream servers; ad-block lists (optional)
+- [ ] **Dynamic routing (stubs)** — OSPF/BGP protocol stubs for future enterprise routing; initially static only
+- [ ] **Policy routing** — route based on source IP, port, or mark (for multi-WAN setups)
+
+### 13D — VPN Gateway
+_Encrypted tunnel endpoints — VeerOS as a VPN concentrator._
+
+- [ ] **WireGuard** — native WireGuard implementation: Noise IK handshake, ChaCha20-Poly1305 data, Curve25519 keys; `tun` virtual interface
+- [ ] **WireGuard config** — `wg set wg0 private-key <key> listen-port 51820 peer <pubkey> allowed-ips 10.0.0.0/24 endpoint <ip>:51820`
+- [ ] **IPsec (stubs)** — IKEv2 + ESP for enterprise VPN interop; AES-GCM or ChaCha20-Poly1305 for data plane
+- [ ] **Site-to-site VPN** — connect two VeerOS networks; automatic route injection; failover with backup tunnels
+- [ ] **Road warrior VPN** — remote client connects to VeerOS gateway; split or full tunnel; DNS push
+- [ ] **VPN + NAT integration** — VPN traffic + masquerade for internet access through tunnel; split-horizon DNS
+- [ ] **PQC VPN (future)** — WireGuard with ML-KEM hybrid key exchange for post-quantum VPN security (Phase 8C integration)
+- [ ] **Shell `vpn` commands** — `vpn status`, `vpn add peer <pubkey> <endpoint>`, `vpn up/down <interface>`
+
+### 13E — Traffic Shaping + QoS
+_Bandwidth control, rate limiting, and quality of service prioritization._
+
+- [ ] **Traffic classes** — `QosClass { name, priority, rate_limit, burst, ceil }`; hierarchical: parent + child classes
+- [ ] **HTB (Hierarchical Token Bucket)** — rate limiting with borrowing: guaranteed rate + ceiling rate per class
+- [ ] **Packet classification** — classify into QoS classes by: src/dst IP, port, protocol, DSCP, firewall mark
+- [ ] **Per-interface shaping** — independent shaping per network interface; ingress + egress
+- [ ] **Priority queuing** — latency-sensitive traffic (VoIP, SSH) prioritized over bulk (downloads, backups)
+- [ ] **Rate limiting** — per-IP, per-service, per-interface rate caps; token bucket with configurable burst
+- [ ] **Shell `qos` commands** — `qos add class <name> rate 10mbit ceil 100mbit`, `qos classify -p tcp --dport 22 -c priority`, `qos status`
+- [ ] **Bandwidth monitoring** — per-interface, per-class byte/packet counters; real-time throughput display
+
+### 13F — Deep Packet Inspection (DPI)
+_Protocol identification and application-level filtering — understand what's in the traffic._
+
+- [ ] **Protocol detection** — identify application protocols (HTTP, HTTPS/TLS, DNS, SSH, MQTT, CoAP) from packet patterns; no decryption
+- [ ] **TLS fingerprinting** — JA3/JA4 TLS client fingerprints; identify clients by their TLS hello parameters
+- [ ] **Application filter rules** — block/allow by detected protocol: `fw add FORWARD -m app --app bittorrent -j DROP`
+- [ ] **DNS filtering** — inspect DNS queries; block domains from configurable blocklists (ad-blocking, malware, parental control)
+- [ ] **HTTP header inspection** — for plaintext HTTP: filter by Host, URL path, User-Agent; redirect or block
+- [ ] **IDS/IPS integration** — pattern-matching engine for known attack signatures (Snort/Suricata rule format stubs); alert or block
+- [ ] **AI-assisted DPI (Phase 10 integration)** — ML classifier for encrypted traffic identification; detect anomalous flows without decryption
+
+### 13G — Network Appliance Hardware Targets
+_Specific hardware profiles optimized for firewall/router deployment._
+
+- [ ] **RPi 4/5 router** — dual NIC via USB-C Ethernet adapter (WAN) + built-in Ethernet (LAN); WiFi AP mode for wireless clients
+- [ ] **x86-64 mini-PC** — Intel N100 with dual/quad NIC; NVMe for log storage; 8–16 GB RAM; production-grade firewall
+- [ ] **ESP32-S3 IoT gateway** — WiFi AP + STA simultaneous; BLE gateway; 802.15.4 border router; packet filtering at the edge
+- [ ] **ARM64 cloud VM** — VeerOS as virtual network appliance; KVM virtio-net multi-queue; cloud security group enforcement
+- [ ] **Appliance image builder** — script to produce ready-to-flash images with pre-configured firewall rules, VPN, DHCP; zero-touch deploy
+
+### 13H — Firewall Feature Integration Matrix
+```
+                    net-firewall  net-nat   net-vpn   net-dpi   net-shape
+                    (feature)     (feature) (feature) (feature) (feature)
+───────────────────────────────────────────────────────────────────────────
+Packet filter          ✓            ✓          ─          ─          ─
+Conntrack              ✓            ✓          ─          ✓          ─
+NAT/SNAT/DNAT          ─            ✓          ─          ─          ─
+WireGuard VPN          ─            ─          ✓          ─          ─
+IPsec (stubs)          ─            ─          ✓          ─          ─
+Protocol detection     ─            ─          ─          ✓          ─
+DNS filtering          ─            ─          ─          ✓          ─
+IDS/IPS                ─            ─          ─          ✓          ─
+Traffic shaping        ─            ─          ─          ─          ✓
+QoS classes            ─            ─          ─          ─          ✓
+Bandwidth monitor      ─            ─          ─          ─          ✓
+───────────────────────────────────────────────────────────────────────────
+
+Profile defaults:
+  dist-firewall      → net-firewall + net-nat + net-vpn + net-dpi + net-shape
+  dist-gateway       → net-firewall + net-nat (subset for IoT edge)
+  dist-cloud         → net-firewall (basic filtering for cloud workloads)
 ```
 
 ## Session Log
