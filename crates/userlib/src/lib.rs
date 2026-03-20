@@ -50,3 +50,4 @@ pub mod user;
 pub mod fs;
 pub mod gpio;
 pub mod hw;
+pub mod config;

@@ -1,13 +1,11 @@
-//! ESP32-C3 Wi-Fi driver integration for VeerOS.
+//! ESP32-C6 Wi-Fi driver — bridges Espressif radio blobs to VeerOS.
 //!
-//! This module bridges the Espressif Wi-Fi radio to VeerOS's
-//! `arch::NetworkDevice` trait, allowing the same `net` crate
-//! (smoltcp + TcpSerial) to work over Wi-Fi.
+//! This module wraps the Espressif proprietary WiFi firmware blobs
+//! (linked via `esp-wifi-sys`) and exposes them through VeerOS's
+//! `arch::NetworkDevice` trait so that the `net` crate (smoltcp +
+//! TcpSerial) works transparently over WiFi.
 //!
 //! ## Connection flow
-//!
-//! On ESP32, the serial UART shell is always available. Wi-Fi is
-//! configured **from the shell** at runtime:
 //!
 //! ```text
 //! veeros> wifi set MyNetwork MyPassword
@@ -17,16 +15,62 @@
 //!
 //! Configuration is stored in a static `WifiManager`. Once Wi-Fi is
 //! connected, the network task picks it up and starts TCP services.
-//!
-//! # Build requirements
-//!
-//! Enable the `wifi` feature on `soc-esp32`:
-//! ```toml
-//! soc-esp32 = { path = "../../soc/esp32", features = ["wifi"] }
-//! ```
 
 use arch::NetworkDevice;
+use core::ffi::c_void;
 use core::fmt;
+use core::ptr;
+
+use esp_wifi_sys::include::{
+    esp_wifi_connect_internal, esp_wifi_init_internal, esp_wifi_internal_free_rx_buffer,
+    esp_wifi_internal_reg_rxcb, esp_wifi_internal_tx, esp_wifi_scan_get_ap_num,
+    esp_wifi_scan_get_ap_records, esp_wifi_scan_start, esp_wifi_set_config,
+    esp_wifi_set_mode, esp_wifi_set_tx_done_cb, esp_wifi_start, esp_supplicant_init,
+    g_wifi_default_wpa_crypto_funcs, wifi_ap_record_t, wifi_config_t, wifi_init_config_t,
+    wifi_interface_t_WIFI_IF_STA, wifi_mode_t_WIFI_MODE_STA, wifi_sta_config_t,
+    ESP_OK, WIFI_INIT_CONFIG_MAGIC,
+    wifi_auth_mode_t_WIFI_AUTH_OPEN, wifi_auth_mode_t_WIFI_AUTH_WEP,
+    wifi_auth_mode_t_WIFI_AUTH_WPA_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA2_PSK,
+    wifi_auth_mode_t_WIFI_AUTH_WPA3_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_PSK,
+};
+
+// ---------------------------------------------------------------------------
+// RX ring buffer — filled by the blob's RX callback
+// ---------------------------------------------------------------------------
+
+const NUM_RX_DESC: usize = 8;
+const FRAME_SIZE: usize = 1600;
+
+/// RX ring — blob callback writes frames here, NetworkDevice reads them.
+static mut RX_RING: [[u8; FRAME_SIZE]; NUM_RX_DESC] = [[0u8; FRAME_SIZE]; NUM_RX_DESC];
+static mut RX_LEN: [usize; NUM_RX_DESC] = [0usize; NUM_RX_DESC];
+static mut RX_READY: [bool; NUM_RX_DESC] = [false; NUM_RX_DESC];
+static mut RX_WRITE: usize = 0;
+static mut RX_READ: usize = 0;
+
+/// RX callback registered with the blob via `esp_wifi_internal_reg_rxcb`.
+///
+/// Called from blob context whenever a WiFi frame is received.
+/// We copy the payload into our ring buffer and release the blob's buffer.
+unsafe extern "C" fn recv_cb_sta(
+    buffer: *mut c_void,
+    len: u16,
+    eb: *mut c_void,
+) -> i32 {
+    let frame_len = len as usize;
+    if frame_len > 0 && frame_len <= FRAME_SIZE {
+        let wi = RX_WRITE;
+        if !RX_READY[wi] {
+            ptr::copy_nonoverlapping(buffer as *const u8, RX_RING[wi].as_mut_ptr(), frame_len);
+            RX_LEN[wi] = frame_len;
+            RX_READY[wi] = true;
+            RX_WRITE = (wi + 1) % NUM_RX_DESC;
+        }
+        // else: ring full, drop frame
+    }
+    esp_wifi_internal_free_rx_buffer(eb);
+    0 // ESP_OK
+}
 
 // ---------------------------------------------------------------------------
 // Scan results
@@ -108,6 +152,19 @@ impl fmt::Display for AuthMode {
     }
 }
 
+/// Convert blob auth mode to our enum.
+fn authmode_from_blob(m: u32) -> AuthMode {
+    match m {
+        x if x == wifi_auth_mode_t_WIFI_AUTH_OPEN => AuthMode::Open,
+        x if x == wifi_auth_mode_t_WIFI_AUTH_WEP => AuthMode::WEP,
+        x if x == wifi_auth_mode_t_WIFI_AUTH_WPA_PSK => AuthMode::WPA,
+        x if x == wifi_auth_mode_t_WIFI_AUTH_WPA2_PSK => AuthMode::WPA2,
+        x if x == wifi_auth_mode_t_WIFI_AUTH_WPA3_PSK => AuthMode::WPA3,
+        x if x == wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_PSK => AuthMode::WPA2WPA3,
+        _ => AuthMode::WPA2,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -164,15 +221,10 @@ impl WifiConfig {
 /// Current state of the Wi-Fi subsystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WifiState {
-    /// No SSID configured yet.
     Unconfigured,
-    /// SSID/password set, not connected.
     Configured,
-    /// Attempting to connect.
     Connecting,
-    /// Associated with AP, IP obtained.
     Connected,
-    /// Connection failed or lost.
     Disconnected,
 }
 
@@ -189,21 +241,14 @@ impl fmt::Display for WifiState {
 }
 
 // ---------------------------------------------------------------------------
-// WifiManager — static config store + state machine
+// WifiManager
 // ---------------------------------------------------------------------------
 
-/// Manages Wi-Fi configuration and connection lifecycle.
-///
-/// Lives in a kernel static. The shell writes config via `set_credentials()`,
-/// triggers connection via `connect()`, and reads state via `state()`.
 pub struct WifiManager {
     config: WifiConfig,
     state: WifiState,
-    /// The actual driver handle (initialised on first connect).
     driver: Esp32Wifi,
-    /// IP address once connected (assigned via DHCP or static).
     pub ip: [u8; 4],
-    /// Last scan results.
     scan_results: [ScanResult; MAX_SCAN_RESULTS],
     scan_count: usize,
 }
@@ -220,17 +265,11 @@ impl WifiManager {
         }
     }
 
-    /// Set the SSID and password. Does not connect yet.
     pub fn set_credentials(&mut self, ssid: &[u8], password: &[u8]) {
         self.config = WifiConfig::new(ssid, password);
         self.state = WifiState::Configured;
     }
 
-    /// Attempt to connect using the stored credentials.
-    ///
-    /// On real hardware (with the `wifi` feature), this calls into the
-    /// Espressif radio blobs. Without it, transitions to `Disconnected`
-    /// with a descriptive error.
     pub fn connect(&mut self) -> Result<(), WifiError> {
         if !self.config.is_configured() {
             return Err(WifiError::NotConfigured);
@@ -250,7 +289,6 @@ impl WifiManager {
         }
     }
 
-    /// Disconnect from the current AP.
     pub fn disconnect(&mut self) {
         self.driver.connected = false;
         if self.config.is_configured() {
@@ -260,39 +298,32 @@ impl WifiManager {
         }
     }
 
-    /// Current Wi-Fi state.
     pub fn state(&self) -> WifiState {
         self.state
     }
 
-    /// Reference to the stored config.
     pub fn config(&self) -> &WifiConfig {
         &self.config
     }
 
-    /// Reference to the underlying driver (for passing to NetStack).
     pub fn driver(&self) -> &Esp32Wifi {
         &self.driver
     }
 
-    /// Mutable reference to the driver (for polling).
     pub fn driver_mut(&mut self) -> &mut Esp32Wifi {
         &mut self.driver
     }
 
-    /// Trigger a scan for nearby APs. Results stored in `scan_results`.
     pub fn scan(&mut self) -> Result<usize, WifiError> {
         let count = self.driver.scan(&mut self.scan_results)?;
         self.scan_count = count;
         Ok(count)
     }
 
-    /// Number of APs found in the last scan.
     pub fn scan_count(&self) -> usize {
         self.scan_count
     }
 
-    /// Write scan results to the given writer (for the `wifi list` command).
     pub fn write_scan_results(&self, w: &mut dyn fmt::Write) {
         if self.scan_count == 0 {
             let _ = writeln!(w, "  No scan results. Run 'wifi scan' first.");
@@ -314,7 +345,6 @@ impl WifiManager {
         }
     }
 
-    /// Write status info to the given writer (for the `wifi status` command).
     pub fn write_status(&self, w: &mut dyn fmt::Write) {
         let _ = writeln!(w, "  Wi-Fi state : {}", self.state);
         if self.config.is_configured() {
@@ -340,34 +370,22 @@ impl WifiManager {
 }
 
 // ---------------------------------------------------------------------------
-// Wi-Fi driver state
+// Wi-Fi driver (blob-backed)
 // ---------------------------------------------------------------------------
 
-/// ESP32-C3 Wi-Fi driver — wraps the Espressif radio for VeerOS.
-///
-/// This struct holds the runtime state of the Wi-Fi connection.
-/// It is meant to live in a static and be accessed by the network task.
+/// ESP32-C6 Wi-Fi driver backed by Espressif radio blobs.
 pub struct Esp32Wifi {
-    /// Cached MAC address.
     mac: [u8; 6],
-    /// Whether we are associated with an AP.
     connected: bool,
-    /// Internal RX buffer for one frame.
-    rx_buf: [u8; 1514],
-    rx_len: usize,
-    rx_ready: bool,
+    initialized: bool,
 }
 
 /// Errors from the Wi-Fi subsystem.
 #[derive(Debug, Clone, Copy)]
 pub enum WifiError {
-    /// Wi-Fi hardware not found or init failed.
     InitFailed,
-    /// Could not associate with the configured SSID.
     ConnectionFailed,
-    /// Feature not compiled in.
     NotAvailable,
-    /// No SSID configured — call `set_credentials()` first.
     NotConfigured,
 }
 
@@ -383,111 +401,323 @@ impl fmt::Display for WifiError {
 }
 
 impl Esp32Wifi {
-    /// Create an uninitialised Wi-Fi handle.
     pub const fn new() -> Self {
         Self {
             mac: [0u8; 6],
             connected: false,
-            rx_buf: [0u8; 1514],
-            rx_len: 0,
-            rx_ready: false,
+            initialized: false,
         }
     }
 
-    /// Initialise the Wi-Fi radio and connect to the configured AP.
-    ///
-    /// On real hardware this calls into the Espressif Wi-Fi blobs via
-    /// `esp-wifi` / `esp-radio`.  The current build is a **stub** that
-    /// returns `WifiError::NotAvailable` — the full implementation is
-    /// activated when the `wifi` Cargo feature is enabled and the
-    /// `esp-hal` + `esp-wifi` crates are present.
-    ///
-    /// # Requirements
-    /// - Heap must be initialised (≥72 KiB for the Wi-Fi blobs).
-    /// - SYSTIMER must be running (used for timeouts).
-    pub fn init(&mut self, _config: &WifiConfig) -> Result<(), WifiError> {
-        // ─── Real implementation (behind `wifi` feature) ─────
-        //
-        // When building with the `wifi` feature and esp-hal/esp-wifi:
-        //
-        //   1. Call esp_hal::init() for clock + peripheral setup
-        //   2. Init esp_alloc heap (≥72 KiB)
-        //   3. Init esp_wifi::wifi::new() with STA config
-        //   4. Call controller.connect() (blocking)
-        //   5. Read MAC from controller
-        //   6. Start the internal RX polling loop
-        //
-        // For now, return NotAvailable on builds without the blob.
+    /// Initialise the WiFi radio blobs and connect to the configured AP.
+    pub fn init(&mut self, config: &WifiConfig) -> Result<(), WifiError> {
+        use crate::modem;
 
-        Err(WifiError::NotAvailable)
+        fn dbg(b: u8) {
+            unsafe {
+                core::ptr::write_volatile(0x6000_f000 as *mut u32, b as u32);
+                // Flush USB FIFO
+                core::ptr::write_volatile(0x6000_f004 as *mut u32, 1);
+                for _ in 0..10_000u32 {
+                    if core::ptr::read_volatile(0x6000_f004 as *const u32) & 2 != 0 { break; }
+                    core::hint::spin_loop();
+                }
+            }
+        }
+
+        if self.initialized {
+            // Already initialized — just connect (polled from driver task).
+            dbg(b'B');
+            let ret = unsafe { esp_wifi_connect_internal() };
+            if ret != ESP_OK as i32 {
+                dbg(b'!');
+                let ret_u = ret as u32;
+                dbg(b"0123456789abcdef"[((ret_u >> 12) & 0xf) as usize]);
+                dbg(b"0123456789abcdef"[((ret_u >> 8) & 0xf) as usize]);
+                dbg(b"0123456789abcdef"[((ret_u >> 4) & 0xf) as usize]);
+                dbg(b"0123456789abcdef"[(ret_u & 0xf) as usize]);
+                return Err(WifiError::ConnectionFailed);
+            }
+            // esp_wifi_connect_internal() queued the connect command.
+            // The WPA handshake happens asynchronously via interrupts + ppTask.
+            // Yield to let ppTask process the handshake, then poll timers.
+            dbg(b'C');
+            for _ in 0..200u32 {
+                crate::wifi_os_adapter::poll_timers();
+                crate::wifi_os_adapter::yield_to_scheduler();
+            }
+            dbg(b'D');
+            self.connected = true;
+            return Ok(());
+        }
+
+        if !config.is_configured() {
+            return Err(WifiError::NotConfigured);
+        }
+
+        // Step 1: Enable modem clocks and reset.
+        dbg(b'1');
+        modem::enable_all_clocks();
+        modem::reset_all_modems();
+
+        // Step 2: Read factory MAC from eFuse.
+        dbg(b'2');
+        self.mac = modem::read_efuse_mac();
+
+        // Step 3: Ensure the OS adapter globals are set.
+        dbg(b'3');
+        unsafe {
+            use crate::wifi_os_adapter::g_wifi_osi_funcs as local_osi;
+            // Copy our OSI funcs to the blob's extern symbol.
+            let dst = &raw mut esp_wifi_sys::include::g_wifi_osi_funcs;
+            ptr::copy_nonoverlapping(&raw const local_osi, dst, 1);
+            // Also set g_osi_funcs_p (ROM data pointer at fixed SRAM address).
+            let g_osi_funcs_p = 0x4087ff6c as *mut *mut esp_wifi_sys::include::wifi_osi_funcs_t;
+            core::ptr::write_volatile(g_osi_funcs_p, dst);
+
+            // Verify OSI table: dump address of table, and the fn ptrs at offsets 8 (set_intr) and 16 (set_isr)
+            let base = dst as usize as u32;
+            dbg(b'@');
+            for shift in [28u32,24,20,16,12,8,4,0] {
+                let nib = ((base >> shift) & 0xF) as u8;
+                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+            }
+            dbg(b',');
+            // Read g_osi_funcs_p to verify it points to our table
+            let readback = core::ptr::read_volatile(g_osi_funcs_p);
+            let rb = readback as usize as u32;
+            dbg(b'P');
+            for shift in [28u32,24,20,16,12,8,4,0] {
+                let nib = ((rb >> shift) & 0xF) as u8;
+                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+            }
+            dbg(b',');
+            // Read offset 8 (set_intr fn ptr) and offset 16 (set_isr fn ptr)
+            let fn_set_intr = core::ptr::read_volatile((dst as *const u8).add(8) as *const u32);
+            dbg(b'F');
+            for shift in [28u32,24,20,16,12,8,4,0] {
+                let nib = ((fn_set_intr >> shift) & 0xF) as u8;
+                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+            }
+            dbg(b',');
+            let fn_set_isr = core::ptr::read_volatile((dst as *const u8).add(16) as *const u32);
+            dbg(b'G');
+            for shift in [28u32,24,20,16,12,8,4,0] {
+                let nib = ((fn_set_isr >> shift) & 0xF) as u8;
+                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+            }
+            dbg(b',');
+        }
+
+        // Step 3b: Configure WiFi interrupt routing (INTMATRIX + PLIC).
+        crate::wifi_os_adapter::setup_wifi_interrupts();
+
+        // Step 4: Build wifi_init_config_t.
+        let init_cfg = wifi_init_config_t {
+            osi_funcs: unsafe { &raw mut esp_wifi_sys::include::g_wifi_osi_funcs },
+            wpa_crypto_funcs: unsafe { g_wifi_default_wpa_crypto_funcs },
+            static_rx_buf_num: 4,
+            dynamic_rx_buf_num: 4,
+            tx_buf_type: 0,           // static TX buffers
+            static_tx_buf_num: 4,
+            dynamic_tx_buf_num: 0,
+            rx_mgmt_buf_type: 0,
+            rx_mgmt_buf_num: 2,
+            cache_tx_buf_num: 0,
+            csi_enable: 0,
+            ampdu_rx_enable: 0,
+            ampdu_tx_enable: 0,
+            amsdu_tx_enable: 0,
+            nvs_enable: 0,
+            nano_enable: 0,
+            rx_ba_win: 0,
+            wifi_task_core_id: 0,
+            beacon_max_len: 752,
+            mgmt_sbuf_num: 6,
+            feature_caps: crate::wifi_os_adapter::WIFI_FEATURE_CAPS,
+            sta_disconnected_pm: false,
+            espnow_max_encrypt_num: 0,
+            tx_hetb_queue_num: 3,
+            dump_hesigb_enable: false,
+            magic: WIFI_INIT_CONFIG_MAGIC as i32,
+        };
+
+        // Step 5: Initialize WiFi internals.
+        dbg(b'5');
+        let ret = unsafe { esp_wifi_init_internal(&init_cfg) };
+        if ret != ESP_OK as i32 {
+            dbg(b'!'); dbg(b'5');
+            // Output error code as hex: 4 nibbles
+            let code = ret as u32;
+            for shift in [12u32, 8, 4, 0] {
+                let nib = ((code >> shift) & 0xF) as u8;
+                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+            }
+            dbg(b'\n');
+            return Err(WifiError::InitFailed);
+        }
+
+        // Step 6: Initialize supplicant (WPA2 handshake).
+        dbg(b'6');
+        let ret = unsafe { esp_supplicant_init() };
+        if ret != ESP_OK as i32 {
+            dbg(b'!'); dbg(b'6');
+            return Err(WifiError::InitFailed);
+        }
+
+        // Step 7: Set STA mode.
+        dbg(b'7');
+        let ret = unsafe { esp_wifi_set_mode(wifi_mode_t_WIFI_MODE_STA) };
+        if ret != ESP_OK as i32 {
+            dbg(b'!'); dbg(b'7');
+            return Err(WifiError::InitFailed);
+        }
+
+        // Step 8: Configure STA with SSID and password.
+        dbg(b'8');
+        let mut sta_cfg: wifi_sta_config_t = unsafe { core::mem::zeroed() };
+        sta_cfg.ssid[..config.ssid_len].copy_from_slice(&config.ssid[..config.ssid_len]);
+        sta_cfg.password[..config.pass_len].copy_from_slice(&config.password[..config.pass_len]);
+
+        let mut wifi_cfg = wifi_config_t { sta: sta_cfg };
+        let ret = unsafe {
+            esp_wifi_set_config(wifi_interface_t_WIFI_IF_STA, &mut wifi_cfg)
+        };
+        if ret != ESP_OK as i32 {
+            dbg(b'!'); dbg(b'8');
+            return Err(WifiError::InitFailed);
+        }
+
+        // Step 9: Register RX callback and TX done callback.
+        dbg(b'9');
+        unsafe {
+            esp_wifi_internal_reg_rxcb(
+                wifi_interface_t_WIFI_IF_STA,
+                Some(recv_cb_sta),
+            );
+            esp_wifi_set_tx_done_cb(None);
+        }
+
+        // Step 10: Start WiFi.
+        dbg(b'A');
+        // Dump the two assertion bytes that wifi_hw_start checks
+        // Address: 0x408573ED (byte1) and 0x408573EE (byte2)
+        // If (byte >> mode) & 1, wifi_hw_start infinite-loops.
+        // mode=3 for STA when called from wifi_start_process with mode==0
+        unsafe {
+            let b1 = core::ptr::read_volatile(0x408573ED as *const u8);
+            let b2 = core::ptr::read_volatile(0x408573EE as *const u8);
+            dbg(b'<');
+            let h1 = (b1 >> 4) & 0xF;
+            let l1 = b1 & 0xF;
+            dbg(if h1 < 10 { b'0' + h1 } else { b'a' + h1 - 10 });
+            dbg(if l1 < 10 { b'0' + l1 } else { b'a' + l1 - 10 });
+            dbg(b',');
+            let h2 = (b2 >> 4) & 0xF;
+            let l2 = b2 & 0xF;
+            dbg(if h2 < 10 { b'0' + h2 } else { b'a' + h2 - 10 });
+            dbg(if l2 < 10 { b'0' + l2 } else { b'a' + l2 - 10 });
+            dbg(b'>');
+        }
+        let ret = unsafe { esp_wifi_start() };
+        if ret != ESP_OK as i32 {
+            dbg(b'!'); dbg(b'A');
+            return Err(WifiError::InitFailed);
+        }
+
+        self.initialized = true;
+
+        // Defer connect until a subsequent call so start can settle asynchronously.
+        Err(WifiError::ConnectionFailed)
     }
 
-    /// Returns `true` if associated with an AP.
     pub fn is_connected(&self) -> bool {
         self.connected
     }
 
-    /// Scan for nearby access points.
-    ///
-    /// Fills `results` with discovered APs and returns the count.
-    /// On real hardware this calls esp-wifi's scan API.
-    /// The stub returns a few fake APs for shell development/testing.
+    /// Scan for nearby access points using the blob's scan API.
     pub fn scan(&self, results: &mut [ScanResult]) -> Result<usize, WifiError> {
-        // ─── Stub: return synthetic scan results for testing ─────
-        let fake_aps: &[(&[u8], [u8; 6], u8, i8, AuthMode)] = &[
-            (b"VeerOS-Lab",     [0xAA, 0xBB, 0xCC, 0x11, 0x22, 0x33], 6, -42, AuthMode::WPA2),
-            (b"HomeNetwork",    [0x10, 0x20, 0x30, 0x40, 0x50, 0x60], 1, -58, AuthMode::WPA2WPA3),
-            (b"CoffeeShop",     [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01], 11, -71, AuthMode::WPA2),
-            (b"OpenGuest",      [0x00, 0x11, 0x22, 0x33, 0x44, 0x55], 6, -80, AuthMode::Open),
-        ];
+        // Start a blocking scan (pass null config for default params).
+        let ret = unsafe { esp_wifi_scan_start(ptr::null(), true) };
+        if ret != ESP_OK as i32 {
+            return Ok(0);
+        }
 
-        let count = fake_aps.len().min(results.len());
-        for (i, &(ssid, bssid, ch, rssi, auth)) in fake_aps.iter().enumerate().take(count) {
-            let mut r = ScanResult::empty();
-            let len = ssid.len().min(MAX_SSID_LEN);
-            r.ssid[..len].copy_from_slice(&ssid[..len]);
-            r.ssid_len = len;
-            r.bssid = bssid;
-            r.channel = ch;
-            r.rssi = rssi;
-            r.auth = auth;
-            results[i] = r;
+        let mut ap_count: u16 = 0;
+        unsafe { esp_wifi_scan_get_ap_num(&mut ap_count) };
+        if ap_count == 0 {
+            return Ok(0);
+        }
+
+        let max = ap_count.min(results.len() as u16).min(MAX_SCAN_RESULTS as u16);
+        let mut records: [wifi_ap_record_t; MAX_SCAN_RESULTS] =
+            unsafe { core::mem::zeroed() };
+        let mut num = max;
+        unsafe { esp_wifi_scan_get_ap_records(&mut num, records.as_mut_ptr()) };
+
+        let count = num as usize;
+        for i in 0..count {
+            let r = &records[i];
+            let mut sr = ScanResult::empty();
+            // Copy SSID — find null terminator.
+            let ssid_len = r.ssid.iter().position(|&b| b == 0).unwrap_or(33).min(MAX_SSID_LEN);
+            sr.ssid[..ssid_len].copy_from_slice(&r.ssid[..ssid_len]);
+            sr.ssid_len = ssid_len;
+            sr.bssid = r.bssid;
+            sr.channel = r.primary;
+            sr.rssi = r.rssi;
+            sr.auth = authmode_from_blob(r.authmode);
+            results[i] = sr;
         }
 
         Ok(count)
     }
 
-    /// Poll the Wi-Fi driver for new received frames.
-    ///
-    /// Must be called frequently from the network task.
-    /// On real hardware this drains the radio's RX queue.
+    /// Poll timers for the blob — call from the network task loop.
     pub fn poll_rx(&mut self) {
-        // Stub — real implementation reads from esp-wifi's internal queue.
+        crate::wifi_os_adapter::poll_timers();
+        // Run blob tasks (ppTask, etc.) cooperatively.
+        for i in 0..4 {
+            crate::wifi_os_adapter::poll_blob_task(i, 1000);
+        }
     }
 }
 
 impl NetworkDevice for Esp32Wifi {
     fn mtu(&self) -> usize {
-        1514
+        FRAME_SIZE
     }
 
     fn has_rx(&self) -> bool {
-        self.rx_ready
+        unsafe { RX_READY[RX_READ] }
     }
 
     fn recv(&self, buf: &mut [u8]) -> usize {
-        if !self.rx_ready || self.rx_len == 0 {
+        let ri = unsafe { RX_READ };
+        if !unsafe { RX_READY[ri] } || unsafe { RX_LEN[ri] } == 0 {
             return 0;
         }
-        let len = self.rx_len.min(buf.len());
-        buf[..len].copy_from_slice(&self.rx_buf[..len]);
-        // Note: in the real implementation, rx_ready/rx_len are cleared
-        // via interior mutability (UnsafeCell) since NetworkDevice takes &self.
+        let len = unsafe { RX_LEN[ri] }.min(buf.len());
+        buf[..len].copy_from_slice(unsafe { &RX_RING[ri][..len] });
+        unsafe {
+            RX_READY[ri] = false;
+            RX_LEN[ri] = 0;
+            RX_READ = (ri + 1) % NUM_RX_DESC;
+        }
         len
     }
 
-    fn send(&self, _buf: &[u8]) {
-        // Stub — real implementation calls esp_wifi::wifi_transmit().
+    fn send(&self, buf: &[u8]) {
+        if !self.connected || buf.is_empty() {
+            return;
+        }
+        unsafe {
+            esp_wifi_internal_tx(
+                wifi_interface_t_WIFI_IF_STA,
+                buf.as_ptr() as *mut c_void,
+                buf.len() as u16,
+            );
+        }
     }
 
     fn mac_address(&self) -> [u8; 6] {

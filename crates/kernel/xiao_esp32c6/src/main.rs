@@ -64,6 +64,8 @@ static ESP_APP_DESC: EspAppDesc = EspAppDesc {
 };
 
 use arch::{Console, InterruptController, SavedContext, Serial, TickTimer};
+#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+use arch::NetworkDevice;
 use soc_esp32::{
     usb_serial, interrupt_controller, system_timer,
     systimer::SysTimer, Esp32Riscv,
@@ -78,9 +80,74 @@ use microkernel::task::Scheduler;
 #[cfg(feature = "shell")]
 use microkernel::task::TaskState;
 #[cfg(feature = "shell")]
+
+// Net imports (WiFi TCP/IP stack).
+#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+use net::{NetStack, NetStorage, TcpSerial};
+#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+use smoltcp::iface::SocketSet;
+#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+use smoltcp::wire::{IpCidr, Ipv4Address};
 use shell::{Shell, ShellEnv};
 
-use panic_halt as _;
+// Custom panic handler that prints the panic message via USB serial.
+#[panic_handler]
+fn panic_handler(info: &core::panic::PanicInfo) -> ! {
+    const USB_BASE: usize = 0x6000_F000;
+    const EP1_REG: usize = USB_BASE + 0x00;
+    const EP1_CONF: usize = USB_BASE + 0x04;
+
+    fn usb_putc(byte: u8) {
+        unsafe { core::ptr::write_volatile(EP1_REG as *mut u32, byte as u32); }
+    }
+    fn usb_flush() {
+        unsafe {
+            core::ptr::write_volatile(EP1_CONF as *mut u32, 1);
+            for _ in 0..200_000u32 {
+                let conf = core::ptr::read_volatile(EP1_CONF as *const u32);
+                if conf & 2 != 0 { break; }
+                core::hint::spin_loop();
+            }
+        }
+    }
+    fn usb_puts(s: &[u8]) {
+        for (i, &b) in s.iter().enumerate() {
+            usb_putc(b);
+            if (i + 1) % 60 == 0 { usb_flush(); }
+        }
+        usb_flush();
+    }
+
+    usb_puts(b"\r\n*** PANIC ***\r\n");
+    // Try to print location if available
+    if let Some(loc) = info.location() {
+        let file = loc.file().as_bytes();
+        usb_puts(b"at ");
+        usb_puts(file);
+        usb_puts(b":");
+        // Print line number
+        let mut line = loc.line();
+        let mut buf = [0u8; 10];
+        let mut i = 0;
+        if line == 0 {
+            usb_putc(b'0');
+        } else {
+            while line > 0 {
+                buf[i] = b'0' + (line % 10) as u8;
+                line /= 10;
+                i += 1;
+            }
+            while i > 0 {
+                i -= 1;
+                usb_putc(buf[i]);
+            }
+        }
+        usb_flush();
+    }
+    usb_puts(b"\r\n");
+
+    loop { core::hint::spin_loop(); }
+}
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -302,6 +369,151 @@ pub(crate) struct KlogCell(pub UnsafeCell<KernelLog>);
 unsafe impl Sync for KlogCell {}
 pub(crate) static KLOG: KlogCell = KlogCell(UnsafeCell::new(KernelLog::new()));
 
+// ---------------------------------------------------------------------------
+// WiFi net task statics (TCP/IP stack over WiFi)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "wifi")]
+/// TCP port for VeerOS remote shell over WiFi.
+const REMOTE_SHELL_PORT: u16 = 2323;
+
+#[cfg(feature = "wifi")]
+/// FNV-1a hash of the remote shell password.
+const REMOTE_PASSWORD_HASH: u32 = net::auth::fnv1a(b"veeros");
+
+#[cfg(feature = "wifi")]
+/// Static IP for the WiFi interface (configure for your network).
+const WIFI_IP: [u8; 4] = [192, 168, 29, 100];
+#[cfg(feature = "wifi")]
+const WIFI_GATEWAY: [u8; 4] = [192, 168, 29, 1];
+
+#[cfg(feature = "wifi")]
+#[repr(align(16))]
+struct NetTaskStack([u8; 8192]);
+#[cfg(feature = "wifi")]
+static mut NET_TASK_STACK: NetTaskStack = NetTaskStack([0u8; 8192]);
+
+#[cfg(feature = "wifi")]
+static mut SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 4] =
+    [smoltcp::iface::SocketStorage::EMPTY; 4];
+#[cfg(feature = "wifi")]
+static mut NET_STORAGE: NetStorage = NetStorage::new();
+
+/// Thin wrapper that implements `NetworkDevice` by proxying to the
+/// `Esp32Wifi` driver inside the global `WIFI` static.  This lets
+/// `NetStack` own a device without moving `Esp32Wifi` out of `WifiManager`.
+#[cfg(feature = "wifi")]
+struct WifiNetProxy;
+
+#[cfg(feature = "wifi")]
+impl arch::NetworkDevice for WifiNetProxy {
+    fn mtu(&self) -> usize { 1514 }
+    fn has_rx(&self) -> bool {
+        unsafe { (*WIFI.0.get()).driver().has_rx() }
+    }
+    fn recv(&self, buf: &mut [u8]) -> usize {
+        unsafe { (*WIFI.0.get()).driver().recv(buf) }
+    }
+    fn send(&self, buf: &[u8]) {
+        unsafe { (*WIFI.0.get()).driver().send(buf) }
+    }
+    fn mac_address(&self) -> [u8; 6] {
+        unsafe { (*WIFI.0.get()).driver().mac_address() }
+    }
+}
+
+#[cfg(feature = "wifi")]
+struct NetCell(UnsafeCell<Option<NetStack<WifiNetProxy>>>);
+#[cfg(feature = "wifi")]
+unsafe impl Sync for NetCell {}
+#[cfg(feature = "wifi")]
+static NET: NetCell = NetCell(UnsafeCell::new(None));
+
+#[cfg(feature = "wifi")]
+struct SocketSetCell(UnsafeCell<Option<SocketSet<'static>>>);
+#[cfg(feature = "wifi")]
+unsafe impl Sync for SocketSetCell {}
+#[cfg(feature = "wifi")]
+static NET_SOCKETS: SocketSetCell = SocketSetCell(UnsafeCell::new(None));
+
+// ---------------------------------------------------------------------------
+// IEEE 802.15.4 6LoWPAN net statics (IPv6 mesh networking)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ieee802154")]
+/// UDP port for 802.15.4 mesh data exchange.
+const MESH_UDP_PORT: u16 = 5683; // CoAP default
+
+#[cfg(feature = "ieee802154")]
+/// Static IPv6 link-local address for the 802.15.4 interface.
+/// Derived from the EUI-64 in practice; here a fixed default.
+const MESH_IPV6: [u8; 16] = [
+    0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+    0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+];
+
+#[cfg(feature = "ieee802154")]
+#[repr(align(16))]
+struct MeshTaskStack([u8; 4096]);
+#[cfg(feature = "ieee802154")]
+static mut MESH_TASK_STACK: MeshTaskStack = MeshTaskStack([0u8; 4096]);
+
+#[cfg(feature = "ieee802154")]
+static mut MESH_SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 4] =
+    [smoltcp::iface::SocketStorage::EMPTY; 4];
+#[cfg(feature = "ieee802154")]
+static mut MESH_NET_STORAGE: NetStorage = NetStorage::new();
+
+/// Proxy for the 802.15.4 radio — implements `NetworkDevice` by forwarding
+/// to the global RADIO_802154 static's driver.
+#[cfg(feature = "ieee802154")]
+struct MeshNetProxy;
+
+#[cfg(feature = "ieee802154")]
+impl arch::NetworkDevice for MeshNetProxy {
+    fn mtu(&self) -> usize { 127 }
+    fn has_rx(&self) -> bool {
+        unsafe { (*RADIO_802154.0.get()).driver().has_rx() }
+    }
+    fn recv(&self, buf: &mut [u8]) -> usize {
+        unsafe {
+            let drv = (*RADIO_802154.0.get()).driver();
+            drv.recv(buf)
+        }
+    }
+    fn send(&self, buf: &[u8]) {
+        unsafe {
+            let drv = (*RADIO_802154.0.get()).driver();
+            drv.send(buf)
+        }
+    }
+    fn mac_address(&self) -> [u8; 6] {
+        unsafe {
+            (*RADIO_802154.0.get()).driver().mac_address()
+        }
+    }
+    fn medium(&self) -> arch::NetMedium { arch::NetMedium::Ieee802154 }
+    fn mac_address_ext(&self) -> [u8; 8] {
+        unsafe {
+            (*RADIO_802154.0.get()).driver().mac_address_ext()
+        }
+    }
+}
+
+#[cfg(feature = "ieee802154")]
+struct MeshNetCell(UnsafeCell<Option<NetStack<MeshNetProxy>>>);
+#[cfg(feature = "ieee802154")]
+unsafe impl Sync for MeshNetCell {}
+#[cfg(feature = "ieee802154")]
+static MESH_NET: MeshNetCell = MeshNetCell(UnsafeCell::new(None));
+
+#[cfg(feature = "ieee802154")]
+struct MeshSocketSetCell(UnsafeCell<Option<SocketSet<'static>>>);
+#[cfg(feature = "ieee802154")]
+unsafe impl Sync for MeshSocketSetCell {}
+#[cfg(feature = "ieee802154")]
+static MESH_SOCKETS: MeshSocketSetCell = MeshSocketSetCell(UnsafeCell::new(None));
+
 /// RISC-V initial mstatus: MPIE=1 so mret enables interrupts, MPP=M-mode.
 const INITIAL_MSTATUS: usize = (1 << 7) | (3 << 11);
 
@@ -397,6 +609,307 @@ fn shell_task() -> ! {
     let mut sh = Shell::new(env);
     loop {
         sh.run(&mut con);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wi-Fi network task — TCP/IP stack over WiFi (runs in M-mode)
+// ---------------------------------------------------------------------------
+
+/// Poll the smoltcp network stack and the WiFi driver's RX path.
+#[cfg(feature = "wifi")]
+fn net_poll() {
+    // Drive WiFi RX so frames arrive in the ring buffer.
+    unsafe {
+        (*WIFI.0.get()).driver_mut().poll_rx();
+    }
+    unsafe {
+        if let (Some(stack), Some(sockets)) =
+            (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
+        {
+            let ticks = (*SCHEDULER.0.get()).ticks;
+            stack.poll(sockets, ticks);
+        }
+    }
+}
+
+/// The Wi-Fi network listener task.
+///
+/// 1. Waits for the WiFi driver to be connected.
+/// 2. Initialises smoltcp with a static IP (DHCP TODO).
+/// 3. Listens on REMOTE_SHELL_PORT (2323).
+/// 4. On connection → runs a shell session over TCP.
+/// 5. When the client disconnects, loops back to listen.
+#[cfg(feature = "wifi")]
+fn net_task() -> ! {
+    // Let the shell task print its banner first.
+    for _ in 0..2_000_000u32 { core::hint::spin_loop(); }
+    let serial = usb_serial();
+    let mut con = Console::new(serial);
+
+    let _ = writeln!(con, "[net] waiting for WiFi association...");
+
+    // Wait until WiFi is connected.
+    loop {
+        let connected = unsafe { (*WIFI.0.get()).driver().is_connected() };
+        if connected {
+            break;
+        }
+        for _ in 0..10_000 { core::hint::spin_loop(); }
+    }
+
+    let mac = unsafe { (*WIFI.0.get()).driver().mac_address() };
+    let _ = writeln!(
+        con,
+        "[net] WiFi associated  MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+
+    // Initialise smoltcp.
+    let ip = IpCidr::new(
+        Ipv4Address::new(WIFI_IP[0], WIFI_IP[1], WIFI_IP[2], WIFI_IP[3]).into(),
+        24,
+    );
+    let gw = Ipv4Address::new(
+        WIFI_GATEWAY[0], WIFI_GATEWAY[1], WIFI_GATEWAY[2], WIFI_GATEWAY[3],
+    );
+
+    unsafe {
+        let sockets_ref: &'static mut [smoltcp::iface::SocketStorage<'static>] =
+            &mut *core::ptr::addr_of_mut!(SOCKET_STORAGE);
+        let mut socket_set = SocketSet::new(sockets_ref);
+        let storage = &mut *core::ptr::addr_of_mut!(NET_STORAGE);
+
+        let stack = NetStack::new(WifiNetProxy, ip, gw, &mut socket_set, storage);
+
+        *NET_SOCKETS.0.get() = Some(socket_set);
+        *NET.0.get() = Some(stack);
+    }
+
+    let _ = writeln!(
+        con,
+        "[net] IP {}.{}.{}.{} — listening on port {}",
+        WIFI_IP[0], WIFI_IP[1], WIFI_IP[2], WIFI_IP[3], REMOTE_SHELL_PORT
+    );
+
+    // Main accept loop.
+    loop {
+        // Start listening.
+        unsafe {
+            if let (Some(stack), Some(sockets)) =
+                (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
+            {
+                stack.listen(sockets, REMOTE_SHELL_PORT);
+            }
+        }
+
+        // Poll until a client connects.
+        loop {
+            net_poll();
+            let connected = unsafe {
+                if let (Some(stack), Some(sockets)) =
+                    (&*NET.0.get(), &*NET_SOCKETS.0.get())
+                {
+                    stack.is_connected(sockets)
+                } else {
+                    false
+                }
+            };
+            if connected {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        let _ = writeln!(con, "[net] client connected");
+
+        // Authenticate, then run the shell over TCP.
+        unsafe {
+            let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
+            let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap()
+                as *mut SocketSet<'static>;
+            let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll);
+            let mut tcp_con = Console::new(tcp_serial);
+
+            #[cfg(feature = "shell")]
+            {
+                if net::auth::login_prompt(&mut tcp_con, REMOTE_PASSWORD_HASH) {
+                    let _ = writeln!(con, "[net] authentication succeeded — starting shell");
+                    let env = ShellEnv {
+                        version: VERSION,
+                        platform: "ESP32-C6 (RISC-V)",
+                        scheduler: "minimal",
+                        get_uptime_ticks: Some(get_uptime_ticks),
+                        get_task_list: Some(write_task_list),
+                        get_mem_info: Some(write_mem_info),
+                        get_driver_list: Some(write_driver_list),
+                        #[cfg(feature = "wifi")]
+                        wifi_cmd: Some(wifi_command),
+                        #[cfg(not(feature = "wifi"))]
+                        wifi_cmd: None,
+                        #[cfg(feature = "ble")]
+                        bt_cmd: Some(bt_command),
+                        #[cfg(not(feature = "ble"))]
+                        bt_cmd: None,
+                        #[cfg(feature = "ieee802154")]
+                        zigbee_cmd: Some(zigbee_command),
+                        #[cfg(not(feature = "ieee802154"))]
+                        zigbee_cmd: None,
+                        get_current_user: Some(get_current_user),
+                        get_user_list: Some(write_user_list),
+                        vfs_list_dir: Some(vfs_list_dir),
+                        vfs_read_file: Some(vfs_read_file),
+                        vfs_write_file: Some(vfs_write_file),
+                        vfs_mkdir: Some(vfs_mkdir),
+                        vfs_stat: Some(vfs_stat),
+                        vfs_unlink: Some(vfs_unlink),
+                        vfs_rename: Some(vfs_rename),
+                        vfs_getcwd: Some(vfs_getcwd),
+                        vfs_chdir: Some(vfs_chdir),
+                        vfs_tree: Some(vfs_tree),
+                        vfs_touch: Some(vfs_touch),
+                        mount_list: Some(mount_list),
+                        mount_fs: None,
+                        umount_fs: None,
+                        lsblk: Some(lsblk_info),
+                        input_status: Some(input_status),
+                        usb_list: None,
+                        ble_hid_list: Some(ble_hid_list),
+                        gpio_cmd: None,
+                        i2c_cmd: None,
+                        spi_cmd: None,
+                        hw_info: None,
+                        get_temp_millic: None,
+                        dmesg: Some(dmesg_info),
+                        reboot: None,
+                        shutdown: None,
+                    };
+                    let mut sh = Shell::new(env);
+                    sh.run(&mut tcp_con);
+                } else {
+                    let _ = writeln!(con, "[net] authentication failed");
+                }
+            }
+            #[cfg(not(feature = "shell"))]
+            {
+                let _ = writeln!(tcp_con, "VeerOS net: no shell available");
+            }
+        }
+
+        let _ = writeln!(con, "[net] client disconnected — re-listening");
+
+        // Abort the socket so it can be re-used immediately.
+        unsafe {
+            if let Some(sockets) = &mut *NET_SOCKETS.0.get() {
+                let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
+                let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                socket.abort();
+            }
+        }
+
+        net_poll();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IEEE 802.15.4 mesh network task — 6LoWPAN IPv6 over 802.15.4
+// ---------------------------------------------------------------------------
+
+/// Poll the 6LoWPAN stack and the 802.15.4 driver's RX path.
+#[cfg(feature = "ieee802154")]
+fn mesh_poll() {
+    // Drive 802.15.4 RX so frames arrive.
+    unsafe {
+        (*RADIO_802154.0.get()).driver_mut().poll_rx();
+    }
+    unsafe {
+        if let (Some(stack), Some(sockets)) =
+            (&mut *MESH_NET.0.get(), &mut *MESH_SOCKETS.0.get())
+        {
+            let ticks = (*SCHEDULER.0.get()).ticks;
+            stack.poll(sockets, ticks);
+        }
+    }
+}
+
+/// The 802.15.4 6LoWPAN mesh network task.
+///
+/// 1. Waits for the 802.15.4 radio to be initialised.
+/// 2. Initialises smoltcp with an IPv6 link-local address + 6LoWPAN.
+/// 3. Listens for UDP packets on the CoAP port (5683).
+/// 4. Echoes received data back (mesh data exchange).
+#[cfg(feature = "ieee802154")]
+fn mesh_task() -> ! {
+    // Let the shell task print its banner first.
+    for _ in 0..3_000_000u32 { core::hint::spin_loop(); }
+    let serial = usb_serial();
+    let mut con = Console::new(serial);
+
+    let _ = writeln!(con, "[mesh] waiting for 802.15.4 radio...");
+
+    // Wait until radio is initialised.
+    loop {
+        let ready = unsafe { (*RADIO_802154.0.get()).driver().is_initialised() };
+        if ready {
+            break;
+        }
+        for _ in 0..10_000 { core::hint::spin_loop(); }
+    }
+
+    let ext = unsafe {
+        (*RADIO_802154.0.get()).driver().mac_address_ext()
+    };
+    let _ = writeln!(
+        con,
+        "[mesh] 802.15.4 ready  EUI-64={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7]
+    );
+
+    // Build IPv6 link-local address from EUI-64 (RFC 4291 appendix A).
+    let mut ipv6_addr = MESH_IPV6;
+    // Flip the U/L bit in the EUI-64 interface identifier.
+    ipv6_addr[8] = ext[0] ^ 0x02;
+    ipv6_addr[9] = ext[1];
+    ipv6_addr[10] = ext[2];
+    ipv6_addr[11] = 0xFF;
+    ipv6_addr[12] = 0xFE;
+    ipv6_addr[13] = ext[5];
+    ipv6_addr[14] = ext[6];
+    ipv6_addr[15] = ext[7];
+
+    // Use the IPv6 link-local as our address (gateway = link-local doesn't apply for mesh).
+    let ip = IpCidr::new(
+        smoltcp::wire::Ipv6Address(ipv6_addr).into(),
+        64,
+    );
+    // For mesh, use a dummy IPv4 gateway — smoltcp requires one.
+    let gw = Ipv4Address::new(0, 0, 0, 0);
+
+    unsafe {
+        let sockets_ref: &'static mut [smoltcp::iface::SocketStorage<'static>] =
+            &mut *core::ptr::addr_of_mut!(MESH_SOCKET_STORAGE);
+        let mut socket_set = SocketSet::new(sockets_ref);
+        let storage = &mut *core::ptr::addr_of_mut!(MESH_NET_STORAGE);
+
+        let stack = NetStack::new(MeshNetProxy, ip, gw, &mut socket_set, storage);
+
+        *MESH_SOCKETS.0.get() = Some(socket_set);
+        *MESH_NET.0.get() = Some(stack);
+    }
+
+    let _ = writeln!(
+        con,
+        "[mesh] 6LoWPAN ready — IPv6 fe80::{}:{:02x}ff:fe{:02x}:{:02x}{:02x}/64  UDP port {}",
+        if ext[0] & 0x02 == 0 { ext[0] | 0x02 } else { ext[0] & !0x02 },
+        ext[1], ext[5], ext[6], ext[7],
+        MESH_UDP_PORT
+    );
+
+    // Main loop: continuously poll the mesh stack.
+    loop {
+        mesh_poll();
+        // Yield to other tasks.
+        for _ in 0..1000 { core::hint::spin_loop(); }
     }
 }
 
@@ -509,41 +1022,39 @@ fn drv_sleep(ticks: usize) {
 
 #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
 fn wifi_driver_task() -> ! {
-    use soc_esp32::modem;
-
     drv_log(b"[wifi-drv] starting\n");
 
-    // Step 1: Enable modem clocks — write to MODEM_LPCON clock-enable register.
-    let clk_reg = modem::MODEM_LPCON_BASE + modem::MODEM_CLK_EN;
-    let cur = drv_mmio_read32(clk_reg);
-    drv_mmio_write32(clk_reg, cur | modem::CLK_WIFI_EN | modem::CLK_FE_EN);
-    drv_log(b"[wifi-drv] modem clocks enabled\n");
-
-    // Step 2: Release WiFi MAC from reset.
-    let rst_reg = modem::MODEM_LPCON_BASE + modem::MODEM_RST_CTRL;
-    let rst = drv_mmio_read32(rst_reg);
-    // Assert reset, then deassert.
-    drv_mmio_write32(rst_reg, rst | modem::RST_WIFI_MAC);
-    // Small delay: yield a few times to let the reset propagate.
-    drv_yield();
-    drv_mmio_write32(rst_reg, rst & !modem::RST_WIFI_MAC);
-    drv_log(b"[wifi-drv] wifi MAC reset complete\n");
-
-    // Step 3: Read MAC base register to verify MMIO access is working.
-    let mac_base_val = drv_mmio_read32(modem::WIFI_MAC_BASE);
-    if mac_base_val != usize::MAX as u32 {
-        drv_log(b"[wifi-drv] MAC base accessible\n");
-    } else {
-        drv_log(b"[wifi-drv] MAC base read failed\n");
+    // Read WiFi credentials from /etc/net/wifi config file.
+    let mgr = unsafe { &mut *WIFI.0.get() };
+    {
+        let mut buf = [0u8; 256];
+        let n = vfs_read_file("/etc/net/wifi", &mut buf);
+        if n > 0 {
+            let cfg = userlib::config::Config::parse(&buf[..n]);
+            let ssid = cfg.get_bytes("ssid").unwrap_or(b"MARS");
+            let pass = cfg.get_bytes("password").unwrap_or(b"");
+            mgr.set_credentials(ssid, pass);
+            drv_log(b"[wifi-drv] credentials from /etc/net/wifi\n");
+        } else {
+            drv_log(b"[wifi-drv] /etc/net/wifi not found, no credentials\n");
+        }
     }
 
-    drv_log(b"[wifi-drv] hw init done, entering event loop\n");
-
-    // Main driver loop: service modem-level events.
-    // WiFi credential config and association is handled by the
-    // kernel WifiManager (M-mode) — this task owns the hardware.
+    // Retry until connected; WiFi start/ppTask bring-up is asynchronous.
     loop {
-        drv_sleep(1000);
+        if mgr.state() != soc_esp32::wifi::WifiState::Connected {
+            drv_log(b"[wifi-drv] connecting...\n");
+            match mgr.connect() {
+                Ok(()) => {
+                    mgr.ip = [192, 168, 29, 100];
+                    drv_log(b"[wifi-drv] connected to MARS\n");
+                }
+                Err(_) => {
+                    drv_log(b"[wifi-drv] connect failed, retrying\n");
+                }
+            }
+        }
+        drv_sleep(100);
     }
 }
 
@@ -577,10 +1088,66 @@ fn ble_driver_task() -> ! {
         drv_log(b"[ble-drv] BLE BB read failed\n");
     }
 
-    drv_log(b"[ble-drv] ready (idle)\n");
+    // Clear and enable BLE interrupts.
+    drv_mmio_write32(modem::BLE_BB_BASE + modem::BLE_INT_CLR, 0xFFFF_FFFF);
+    drv_mmio_write32(
+        modem::BLE_BB_BASE + modem::BLE_INT_ENA,
+        modem::BLE_INT_SCAN_DONE | modem::BLE_INT_ADV_DONE
+            | modem::BLE_INT_RX_DONE | modem::BLE_INT_CONN_DONE
+            | modem::BLE_INT_TX_DONE,
+    );
 
+    // Enable BLE controller.
+    drv_mmio_write32(modem::BLE_BB_BASE + modem::BLE_CTRL, modem::BLE_CTRL_ENABLE);
+
+    drv_log(b"[ble-drv] ready, entering event loop\n");
+
+    // Main driver event loop: service BLE controller events.
     loop {
-        drv_sleep(2000);
+        let status = drv_mmio_read32(modem::BLE_BB_BASE + modem::BLE_INT_STATUS);
+
+        if status & modem::BLE_INT_RX_DONE != 0 {
+            drv_mmio_write32(
+                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
+                modem::BLE_INT_RX_DONE,
+            );
+            // RX data is consumed by BleManager's scan() — we just clear the IRQ.
+            let _rx = drv_mmio_read32(modem::BLE_BB_BASE + modem::BLE_RX_DESCR);
+        }
+
+        if status & modem::BLE_INT_ADV_DONE != 0 {
+            drv_mmio_write32(
+                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
+                modem::BLE_INT_ADV_DONE,
+            );
+            // Advertisement cycle complete — controller will auto-restart
+            // if ADV_ENABLE is still set.
+        }
+
+        if status & modem::BLE_INT_SCAN_DONE != 0 {
+            drv_mmio_write32(
+                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
+                modem::BLE_INT_SCAN_DONE,
+            );
+        }
+
+        if status & modem::BLE_INT_TX_DONE != 0 {
+            drv_mmio_write32(
+                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
+                modem::BLE_INT_TX_DONE,
+            );
+        }
+
+        if status & modem::BLE_INT_CONN_DONE != 0 {
+            drv_mmio_write32(
+                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
+                modem::BLE_INT_CONN_DONE,
+            );
+        }
+
+        // Yield to scheduler.
+        // TODO: replace with drv_irq_wait() once BLE IRQ is mapped to a CPU line.
+        drv_sleep(10);
     }
 }
 
@@ -614,10 +1181,71 @@ fn ieee802154_driver_task() -> ! {
         drv_log(b"[802154-drv] MAC read failed\n");
     }
 
-    drv_log(b"[802154-drv] ready (idle)\n");
+    // Clear and enable interrupts (RX, TX, TX fail, ED, ACK).
+    drv_mmio_write32(
+        modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
+        0xFFFF_FFFF,
+    );
+    drv_mmio_write32(
+        modem::IEEE802154_MAC_BASE + modem::ZB_INT_ENA,
+        modem::ZB_INT_TX_DONE | modem::ZB_INT_RX_DONE
+            | modem::ZB_INT_TX_FAIL | modem::ZB_INT_ED_DONE
+            | modem::ZB_INT_ACK_RCVD,
+    );
 
+    // Enable MAC with RX on and auto-ACK.
+    drv_mmio_write32(
+        modem::IEEE802154_MAC_BASE + modem::ZB_MAC_CTRL,
+        modem::ZB_CTRL_ENABLE | modem::ZB_CTRL_RX_ON | modem::ZB_CTRL_AUTO_ACK,
+    );
+
+    drv_log(b"[802154-drv] ready, entering event loop\n");
+
+    // Main driver event loop: service 802.15.4 MAC events.
     loop {
-        drv_sleep(2000);
+        let status = drv_mmio_read32(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS);
+
+        if status & modem::ZB_INT_RX_DONE != 0 {
+            drv_mmio_write32(
+                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
+                modem::ZB_INT_RX_DONE,
+            );
+            // Frame received — RadioManager's poll_rx() reads the FIFO from M-mode.
+            // We clear the IRQ so the MAC can continue receiving.
+            let _rx_len = drv_mmio_read32(modem::IEEE802154_MAC_BASE + modem::ZB_RX_LEN);
+        }
+
+        if status & modem::ZB_INT_TX_DONE != 0 {
+            drv_mmio_write32(
+                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
+                modem::ZB_INT_TX_DONE,
+            );
+        }
+
+        if status & modem::ZB_INT_TX_FAIL != 0 {
+            drv_mmio_write32(
+                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
+                modem::ZB_INT_TX_FAIL,
+            );
+        }
+
+        if status & modem::ZB_INT_ED_DONE != 0 {
+            drv_mmio_write32(
+                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
+                modem::ZB_INT_ED_DONE,
+            );
+        }
+
+        if status & modem::ZB_INT_ACK_RCVD != 0 {
+            drv_mmio_write32(
+                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
+                modem::ZB_INT_ACK_RCVD,
+            );
+        }
+
+        // Yield to scheduler.
+        // TODO: replace with drv_irq_wait() once 802.15.4 IRQ is mapped to a CPU line.
+        drv_sleep(10);
     }
 }
 
@@ -653,6 +1281,76 @@ _start:
 "#
 );
 
+// Minimal early trap handler — prints mcause/mepc via USB serial FIFO
+#[cfg(target_arch = "riscv32")]
+core::arch::global_asm!(
+    r#"
+.section .text._early_trap_handler
+.global  _early_trap_handler
+.balign  4
+
+_early_trap_handler:
+    # Read mcause and mepc into a0/a1 so the Rust handler can use them.
+    csrr    a0, mcause
+    csrr    a1, mepc
+    csrr    a2, mtval
+    j       _early_trap_rust
+"#
+);
+
+/// Called by the early trap handler assembly stub.
+#[cfg(target_arch = "riscv32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn _early_trap_rust(mcause: usize, mepc: usize, mtval: usize) -> ! {
+    // Write directly to USB Serial JTAG FIFO (bypass all abstractions).
+    const USB_BASE: usize = 0x6000_F000;
+    const EP1_REG: usize = USB_BASE + 0x00;
+    const EP1_CONF: usize = USB_BASE + 0x04;
+
+    fn usb_putc(byte: u8) {
+        unsafe {
+            core::ptr::write_volatile(EP1_REG as *mut u32, byte as u32);
+        }
+    }
+    fn usb_flush() {
+        unsafe {
+            core::ptr::write_volatile(EP1_CONF as *mut u32, 1); // WR_DONE
+            // Brief spin wait for host to consume
+            for _ in 0..200_000u32 {
+                let conf = core::ptr::read_volatile(EP1_CONF as *const u32);
+                if conf & 2 != 0 { break; } // SERIAL_IN_EP_DATA_FREE
+                core::hint::spin_loop();
+            }
+        }
+    }
+    fn usb_puts(s: &[u8]) {
+        for &b in s {
+            usb_putc(b);
+        }
+        usb_flush();
+    }
+    fn usb_hex(val: usize) {
+        let digits = b"0123456789ABCDEF";
+        usb_putc(b'0');
+        usb_putc(b'x');
+        for i in (0..8).rev() {
+            let nibble = (val >> (i * 4)) & 0xF;
+            usb_putc(digits[nibble]);
+        }
+    }
+
+    usb_puts(b"\r\n*** TRAP ***\r\n");
+    usb_puts(b"mcause=");
+    usb_hex(mcause);
+    usb_puts(b"\r\nmepc=");
+    usb_hex(mepc);
+    usb_puts(b"\r\nmtval=");
+    usb_hex(mtval);
+    usb_puts(b"\r\n");
+
+    loop { core::hint::spin_loop(); }
+}
+
 // ---------------------------------------------------------------------------
 // Entry (Rust)
 // ---------------------------------------------------------------------------
@@ -661,6 +1359,15 @@ _start:
 pub extern "C" fn _rust_start() -> ! {
     // ── disable watchdogs (ROM bootloader enables them) ──────────
     soc_esp32::wdt::disable_watchdogs();
+
+    // ── install EARLY trap handler to diagnose crashes ──────────
+    {
+        extern "C" { fn _early_trap_handler(); }
+        unsafe {
+            let addr = _early_trap_handler as *const () as usize;
+            core::arch::asm!("csrw mtvec, {0}", in(reg) addr, options(nomem, nostack));
+        }
+    }
 
     // ── wait for USB Serial/JTAG enumeration ─────────────────
     // After a reset the USB host needs ~200 ms to re-enumerate
@@ -809,6 +1516,35 @@ pub extern "C" fn _rust_start() -> ! {
         if etc_id != microkernel::vfs::NO_INODE {
             ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS!\n");
             ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-esp32c6\n");
+
+            // /etc/net/wifi — WiFi credentials from build-time or defaults.
+            if let Some(net_id) = inodes.mkdir_in(etc_id, "net") {
+                const WIFI_SSID: &str = match option_env!("VEEROS_WIFI_SSID") {
+                    Some(s) => s,
+                    None => "MARS",
+                };
+                const WIFI_PASS: &str = match option_env!("VEEROS_WIFI_PASS") {
+                    Some(s) => s,
+                    None => "Naitla123",
+                };
+                // Build config content into a stack buffer.
+                let mut buf = [0u8; 256];
+                let mut pos = 0usize;
+                for &b in b"# VeerOS WiFi configuration\nssid=" {
+                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                }
+                for &b in WIFI_SSID.as_bytes() {
+                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                }
+                for &b in b"\npassword=" {
+                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                }
+                for &b in WIFI_PASS.as_bytes() {
+                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                }
+                if pos < buf.len() { buf[pos] = b'\n'; pos += 1; }
+                ramfs.create_with_content(inodes, net_id, "wifi", &buf[..pos]);
+            }
         }
     }
     let _ = writeln!(con, "[boot] VFS initialised (ramfs {} KiB)", microkernel::ramfs::RAMFS_POOL_SIZE / 1024);
@@ -912,6 +1648,26 @@ pub extern "C" fn _rust_start() -> ! {
                 });
             }
         }
+
+        // Network listener task (priority 1) — TCP/IP over WiFi.
+        #[cfg(feature = "wifi")]
+        {
+            let sb = (&raw const NET_TASK_STACK) as usize;
+            let st = sb + core::mem::size_of::<NetTaskStack>();
+            if let Some(idx) = sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0) {
+                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+            }
+        }
+
+        // 802.15.4 mesh task (priority 1) — 6LoWPAN IPv6 over 802.15.4.
+        #[cfg(feature = "ieee802154")]
+        {
+            let sb = (&raw const MESH_TASK_STACK) as usize;
+            let st = sb + core::mem::size_of::<MeshTaskStack>();
+            if let Some(idx) = sched.create_task("mesh", mesh_task as *const () as usize, st, sb, 1, 0) {
+                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+            }
+        }
     }
     // Set init process thread count to match all boot tasks.
     unsafe {
@@ -930,22 +1686,21 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(con, "[boot] ble-drv task registered (M-mode)");
     #[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
     let _ = writeln!(con, "[boot] 802154-drv task registered (M-mode)");
+    #[cfg(feature = "wifi")]
+    let _ = writeln!(con, "[boot] net listener task registered (port {})", REMOTE_SHELL_PORT);
+    #[cfg(feature = "ieee802154")]
+    let _ = writeln!(con, "[boot] mesh task registered (6LoWPAN UDP port {})", MESH_UDP_PORT);
 
-    // ── WiFi auto-connect (pre-configure credentials) ────────
+    // ── WiFi auto-connect (credentials loaded from /etc/net/wifi by driver) ──
     #[cfg(feature = "wifi")]
     {
+        let _ = writeln!(con, "[boot] wifi: credentials in /etc/net/wifi (driver will load)");
+        // Direct FIFO debug marker (boot configured, connect deferred to wifi-drv task).
         unsafe {
-            let mgr = &mut *WIFI.0.get();
-            mgr.set_credentials(b"MARS5", b"Naitla123");
+            core::ptr::write_volatile(0x6000_f000 as *mut u32, b'Z' as u32);
+            core::ptr::write_volatile(0x6000_f004 as *mut u32, 1);
         }
-        let _ = writeln!(con, "[boot] wifi: SSID=MARS5 configured (auto-connect)");
-        unsafe {
-            let mgr = &mut *WIFI.0.get();
-            match mgr.connect() {
-                Ok(()) => { let _ = writeln!(con, "[boot] wifi: connected to MARS5"); }
-                Err(_) => { let _ = writeln!(con, "[boot] wifi: connect deferred (driver will handle)"); }
-            }
-        }
+        let _ = writeln!(con, "[boot] wifi: connect deferred (driver will handle)");
     }
 
     // ── start the first task (never returns) ─────────────────

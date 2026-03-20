@@ -67,8 +67,7 @@ const SERIAL_IN_EMPTY_INT: u32        = 1 << 3;
 const TX_FIFO_SIZE: u8 = 64;
 
 /// Tracks how many bytes have been written into the TX FIFO since the last
-/// flush.  Accessed only from the (single) boot/kernel core, so Relaxed is
-/// sufficient.
+/// flush.  Relaxed ordering is fine for single-core.
 static TX_FIFO_COUNT: AtomicU8 = AtomicU8::new(0);
 
 // ---------------------------------------------------------------------------

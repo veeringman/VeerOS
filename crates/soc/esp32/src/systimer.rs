@@ -101,6 +101,21 @@ impl SysTimer {
     }
 }
 
+/// Read the free-running counter as microseconds (standalone function).
+///
+/// This can be called without a `SysTimer` instance — useful from the
+/// WiFi OS adapter and other contexts that don't hold the driver handle.
+pub fn now_us() -> u64 {
+    // Trigger snapshot of unit 0.
+    unsafe { mmio_write(SYSTIMER_BASE + UNIT0_OP, 1 << 30) };
+    while unsafe { mmio_read(SYSTIMER_BASE + UNIT0_OP) } & (1 << 29) == 0 {
+        core::hint::spin_loop();
+    }
+    let lo = unsafe { mmio_read(SYSTIMER_BASE + UNIT0_VALUE_LO) } as u64;
+    let hi = unsafe { mmio_read(SYSTIMER_BASE + UNIT0_VALUE_HI) } as u64;
+    ((hi << 32) | lo) / (TICKS_PER_US as u64)
+}
+
 impl TickTimer for SysTimer {
     fn configure_tick(&self, period_us: u32) {
         let ticks = period_us.saturating_mul(TICKS_PER_US);

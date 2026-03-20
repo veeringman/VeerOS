@@ -33,7 +33,7 @@ repository = "https://github.com/veeringman/VeerOS"
 
 [workspace.dependencies]
 bitflags = "2.6"
-smoltcp = { version = "0.11", default-features = false, features = ["proto-ipv4", "socket-tcp", "medium-ethernet"] }
+smoltcp = { version = "0.11", default-features = false, features = ["proto-ipv4", "proto-ipv6", "socket-tcp", "medium-ethernet", "medium-ieee802154", "proto-sixlowpan", "socket-udp"] }
 
 [profile.dev]
 panic = "abort"
@@ -43,4 +43,4 @@ panic = "abort"
 opt-level = "s"
 lto = true
 codegen-units = 1
-strip = "symbols"
+#strip = "symbols"

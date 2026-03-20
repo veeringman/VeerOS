@@ -78,7 +78,11 @@ pub unsafe extern "C" fn _veer_trap_dispatch(ctx: *mut TaskContext) -> *mut Task
 unsafe fn handle_interrupt(ctx: *mut TaskContext, code: usize) -> *mut TaskContext {
     match code {
         SYSTIMER_CPU_INT_CODE => handle_timer_tick(ctx),
-        _ => ctx,
+        _ => {
+            // Dispatch WiFi / BLE / other blob-registered ISRs.
+            soc_esp32::wifi_os_adapter::wifi_isr_dispatch(code);
+            ctx
+        }
     }
 }
 

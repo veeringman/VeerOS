@@ -13,12 +13,12 @@
 
 pub mod auth;
 
-use arch::{NetworkDevice, Serial};
+use arch::{NetMedium, NetworkDevice, Serial};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, Ieee802154Address, IpCidr, Ipv4Address};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // smoltcp phy adapter — bridges our `NetworkDevice` trait to smoltcp's
@@ -60,7 +60,10 @@ impl<D: NetworkDevice> Device for DeviceAdapter<'_, D> {
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
-        caps.medium = Medium::Ethernet;
+        caps.medium = match self.inner.medium() {
+            NetMedium::Ethernet => Medium::Ethernet,
+            NetMedium::Ieee802154 => Medium::Ieee802154,
+        };
         caps.max_transmission_unit = self.inner.mtu();
         caps
     }
@@ -143,8 +146,16 @@ impl<D: NetworkDevice> NetStack<D> {
         sockets: &mut SocketSet<'_>,
         storage: &'static mut NetStorage,
     ) -> Self {
-        let mac = dev.mac_address();
-        let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
+        let hw_addr = match dev.medium() {
+            NetMedium::Ethernet => {
+                let mac = dev.mac_address();
+                HardwareAddress::Ethernet(EthernetAddress(mac))
+            }
+            NetMedium::Ieee802154 => {
+                let ext = dev.mac_address_ext();
+                HardwareAddress::Ieee802154(Ieee802154Address::Extended(ext))
+            }
+        };
 
         let config = Config::new(hw_addr);
         let mut adapter = DeviceAdapter::new(&dev);

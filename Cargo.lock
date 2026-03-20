@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "anyhow"
+version = "1.0.102"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+
+[[package]]
 name = "arch"
 version = "0.1.0"
 
@@ -33,6 +39,15 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "distributions"
 version = "0.1.0"
+
+[[package]]
+name = "esp-wifi-sys"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89b6544f6f0cb86169d1f93ba2101a8d50358a040c5043676ed86b793e09b12c"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "hash32"
@@ -85,9 +100,12 @@ version = "0.1.0"
 dependencies = [
  "arch",
  "microkernel",
+ "net",
  "panic-halt",
  "shell",
+ "smoltcp",
  "soc-esp32",
+ "userlib",
 ]
 
 [[package]]
@@ -149,6 +167,7 @@ name = "soc-esp32"
 version = "0.1.0"
 dependencies = [
  "arch",
+ "esp-wifi-sys",
 ]
 
 [[package]]

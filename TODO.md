@@ -302,6 +302,8 @@ _Unified file abstraction for in-memory files, device nodes, and future block st
 ### ESP32-C6 Wi-Fi — Full Stack (RF → IP → Shell-over-TCP)
 _Bring up real Wi-Fi on XIAO ESP32-C6: associate with AP, get an IP via DHCP, and serve a VeerOS shell over TCP so the device is accessible from the network._
 
+> **Current blocker (W1):** `register_chipv7_phy()` hangs inside ppTask context during `wifi_hw_start → phy_enable`. The call chain is `esp_wifi_start() → ppTask → wifi_start_process() → wifi_hw_start() → phy_enable() → register_chipv7_phy() → BLOCKS`. Serial trace ends at `...rggCY12`. **Next step:** call `register_chipv7_phy()` early from the wifi-drv thread (before `esp_wifi_init_internal`), matching esp-wifi's init order. See [docs/wifi-bringup-esp32c6.md](docs/wifi-bringup-esp32c6.md) for full analysis.
+
 #### Prerequisites
 - [x] **WiFi driver skeleton** — `crates/soc/esp32/src/wifi.rs`: `WifiManager` state machine, `Esp32Wifi` driver struct, MAC init, clock/modem enable
 - [x] **WiFi shell commands** — `wifi scan/list/set/connect/status` wired through `ShellEnv.wifi_cmd`
@@ -312,21 +314,21 @@ _Bring up real Wi-Fi on XIAO ESP32-C6: associate with AP, get an IP via DHCP, an
 #### Phase W1 — Espressif Radio Firmware Integration
 _The ESP32-C6 WiFi/BLE RF is driven by proprietary Espressif blobs (libphy.a, libcoexist.a, libpp.a, etc.). We must link and initialize them._
 
-- [ ] **Obtain esp-wifi blobs** — extract `libphy.a`, `libnet80211.a`, `libcoexist.a`, `libpp.a`, `libcore.a`, `libwpa_supplicant.a` from ESP-IDF v5.x or esp-wifi-sys crate
-- [ ] **Link blobs into kernel** — add `.a` archives to `build.rs` link search, resolve extern symbols (`esp_wifi_init`, `esp_wifi_start`, `esp_wifi_connect`, etc.)
-- [ ] **Implement blob FFI shim** — provide C-callable functions the blobs expect: `malloc`/`free` (→ VeerOS heap), `printf` (→ klog), `vTaskDelay` (→ sleep syscall), timer/mutex/semaphore OS abstractions
-- [ ] **PHY calibration** — call `esp_phy_init()` with calibration data from NVS or defaults; RF registers init
-- [ ] **WiFi supplicant init** — initialize WPA/WPA2/WPA3 supplicant from blob (handles 4-way handshake)
-- [ ] **Coexistence init** — esp-coex init for WiFi/BLE shared antenna (already stub in modem.rs)
-- [ ] **Alternative: `esp-wifi` crate** — evaluate using `esp-wifi` (Rust) from esp-rs project as a higher-level alternative to raw blobs
+- [x] **Obtain esp-wifi blobs** — using `esp-wifi-sys` v0.8.1 crate; provides `libphy.a`, `libnet80211.a`, `libpp.a`, `libcore.a` prebuilt for ESP32-C6
+- [x] **Link blobs into kernel** — `build.rs` links blob archives via `esp-wifi-sys` link search paths; all extern symbols resolved
+- [x] **Implement blob FFI shim** — `wifi_os_adapter.rs` (~1700 lines): full `wifi_osi_funcs_t` table, recursive mutexes, semaphores, timers, queues, task create/delete, malloc/free, event_post, ISR dispatch, trace markers
+- [-] **PHY calibration** — `register_chipv7_phy()` implemented but **blocks** inside ppTask context during `wifi_hw_start → phy_enable`; next step: call PHY cal early from wifi-drv thread before `esp_wifi_init_internal` (see `docs/wifi-bringup-esp32c6.md`)
+- [x] **WiFi supplicant init** — `esp_supplicant_init()` succeeds (init Step 6); WPA2/WPA3 supplicant ready
+- [x] **Coexistence init** — all coex stubs (`coex_init`, `coex_deinit`, `coex_enable`, etc.) return 0; no-op implementation working
+- [x] **Reference: `esp-wifi` crate** — esp-wifi v0.15.1 used extensively as design reference for OSI adapter, init sequence, and interrupt pipeline
 
 #### Phase W2 — WiFi STA Association
 _Connect to an access point and complete the WPA handshake._
 
-- [ ] **Scan implementation** — call blob `esp_wifi_scan_start()` → populate `scan_results` in `WifiManager`
-- [ ] **Station mode connect** — `esp_wifi_set_mode(WIFI_MODE_STA)` → `esp_wifi_set_config()` with SSID/password → `esp_wifi_connect()`
-- [ ] **Event handling** — register event callback for `WIFI_EVENT_STA_CONNECTED`, `WIFI_EVENT_STA_DISCONNECTED`, `IP_EVENT_STA_GOT_IP`
-- [ ] **State machine updates** — drive `WifiManager` state: Configured → Connecting → Connected / Disconnected based on events
+- [x] **Scan implementation** — `esp_wifi_scan_start()` / `esp_wifi_scan_get_ap_num()` / `esp_wifi_scan_get_ap_records()` wired; scan command triggers blob scan API
+- [-] **Station mode connect** — `esp_wifi_set_mode(STA)` → `esp_wifi_set_config()` → `esp_wifi_connect()` implemented; **blocked by PHY calibration issue** (see W1)
+- [x] **Event handling** — `esp_event_post()` FFI callback implemented; returns 0 on WIFI_EVENT_STA_START and other events; event dispatch → `WifiManager` state transitions
+- [x] **State machine updates** — `WifiManager` state machine complete: Uninitialized → Ready → Scanning → Configured → Connecting → Connected / Disconnected
 - [ ] **Auto-reconnect** — on disconnect event, retry connect with backoff (1s, 2s, 4s, max 30s)
 - [ ] **`wifi status` shows RSSI** — read RSSI from blob and display signal strength in shell
 
@@ -334,7 +336,7 @@ _Connect to an access point and complete the WPA handshake._
 _Acquire an IP address from the network._
 
 - [ ] **DHCP client in smoltcp** — enable smoltcp's `dhcpv4` feature; wire `Dhcpv4Client` into the network stack
-- [ ] **`NetworkDevice` impl for ESP32 WiFi** — bridge between `Esp32Wifi` TX/RX packet buffers and smoltcp's `Device` trait
+- [x] **`NetworkDevice` impl for ESP32 WiFi** — `WifiNetProxy` struct in `main.rs` bridges `Esp32Wifi` TX/RX ring buffers to smoltcp `Device` trait; `RxToken`/`TxToken` wired
 - [ ] **IP assignment callback** — on DHCP lease, store IP in `WifiManager.ip`, update smoltcp interface, print `[wifi] got IP: x.x.x.x`
 - [ ] **DNS resolver** — minimal DNS stub or smoltcp DNS feature for hostname resolution
 - [ ] **Static IP fallback** — `wifi ip set <ip> <mask> <gw>` shell command for manual configuration

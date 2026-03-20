@@ -29,6 +29,8 @@ use arch::Platform;
 
 pub mod ble;
 pub mod ble_hid;
+pub mod c_stubs;
+pub mod heap;
 pub mod ieee802154;
 pub mod intc;
 pub mod mem;
@@ -39,6 +41,7 @@ pub mod uart;
 pub mod usb_serial_jtag;
 pub mod wdt;
 pub mod wifi;
+pub mod wifi_os_adapter;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Platform implementation

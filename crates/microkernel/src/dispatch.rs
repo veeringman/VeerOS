@@ -220,6 +220,11 @@ pub unsafe fn dispatch(
             };
             match sched.create_task("spawned", entry, stack_top, stack_bottom, priority, parent_pid) {
                 Some(child_id) => {
+                    // Inherit caller execution status (M/U mode and interrupt bits).
+                    // Required for kernel-spawned helper threads (e.g., WiFi blob tasks)
+                    // that execute from kernel-managed IROM without per-process mappings.
+                    let parent_status = c.get_status();
+                    sched.tasks[child_id].context.set_status(parent_status);
                     sched.tasks[child_id].parent = parent;
                     // Bump parent process's thread count.
                     if parent_pid < crate::process::MAX_PROCESSES {

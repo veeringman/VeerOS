@@ -46,6 +46,8 @@ DO_MONITOR=true
 PORT=""
 BAUD=921600
 MONITOR_BAUD=115200
+WIFI_SSID=""
+WIFI_PASS=""
 
 # ── Parse arguments ───────────────────────────────────────────────────────
 
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
         --no-monitor) DO_MONITOR=false;   shift ;;
         --port)       PORT="$2";          shift 2 ;;
         --baud)       BAUD="$2";          shift 2 ;;
+        --ssid)       WIFI_SSID="$2";     shift 2 ;;
+        --password)   WIFI_PASS="$2";     shift 2 ;;
         -h|--help)
             sed -n '2,/^set -/p' "$0" | grep '^#' | sed 's/^# \?//'
             exit 0 ;;
@@ -103,6 +107,9 @@ echo "  Profile      : $PROFILE"
 echo "  Target       : $TARGET"
 echo "  Serial port  : $PORT"
 echo "  Flash baud   : $BAUD"
+if [[ -n "$WIFI_SSID" ]]; then
+    echo "  WiFi SSID    : $WIFI_SSID"
+fi
 echo "  Actions      : $(${DO_BUILD} && echo 'build')$(${DO_FLASH} && echo ' flash')$(${DO_MONITOR} && echo ' monitor')"
 echo "──────────────────────────────────────────────────"
 echo ""
@@ -118,6 +125,15 @@ if $DO_BUILD; then
     fi
 
     echo "[build] compiling $PKG ($DIST, $PROFILE)..."
+
+    # Pass WiFi credentials as env vars for compile-time embedding.
+    if [[ -n "$WIFI_SSID" ]]; then
+        export VEEROS_WIFI_SSID="$WIFI_SSID"
+    fi
+    if [[ -n "$WIFI_PASS" ]]; then
+        export VEEROS_WIFI_PASS="$WIFI_PASS"
+    fi
+
     CARGO_ARGS=(
         build
         --manifest-path "$ROOT_DIR/Cargo.toml"
@@ -171,27 +187,33 @@ if $DO_FLASH; then
         --ignore-app-descriptor
     )
 
-    if $DO_MONITOR; then
-        FLASH_ARGS+=( --monitor )
-    fi
+    # Never pass --monitor to espflash — it doesn't handle
+    # USB Serial JTAG (CDC-ACM) properly and produces garbled output.
+    # We start picocom separately below.
 
     espflash "${FLASH_ARGS[@]}" "$ELF_PATH"
 
-    # If --monitor was part of flash, we don't need to run monitor separately.
-    if $DO_MONITOR; then
-        exit 0
-    fi
-
     echo "[flash] done!"
+
+    # Brief pause so the chip finishes reset and boot output starts.
+    sleep 2
 fi
 
 # ── Monitor ───────────────────────────────────────────────────────────────
 
 if $DO_MONITOR; then
     echo ""
-    echo "[monitor] opening serial monitor on $PORT @ ${MONITOR_BAUD} baud..."
-    echo "[monitor] press Ctrl+R to reset, Ctrl+C to exit"
+    echo "[monitor] opening serial monitor on $PORT ..."
+    echo "[monitor] (USB Serial JTAG — baud rate is ignored by CDC-ACM)"
+    echo "[monitor] press Ctrl+A then Ctrl+X to exit"
     echo ""
 
-    espflash monitor --port "$PORT" --baud "$MONITOR_BAUD"
+    # Kill any stale monitor still holding the port.
+    kill $(lsof -t "$PORT") 2>/dev/null || true
+    sleep 0.5
+
+    # Use picocom for USB Serial JTAG.  The baud setting is cosmetic
+    # (CDC-ACM ignores it) but picocom requires one.
+    # --omap lfcrlf: convert \n from the device into \r\n for the terminal.
+    exec picocom -b "$MONITOR_BAUD" --omap lfcrlf "$PORT"
 fi

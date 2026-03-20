@@ -18,13 +18,16 @@ dist-full    = ["dist-app", "dist-rt"]
 
 # ── Optional components ──────────────────────────────────────
 shell      = ["dep:shell"]
-wifi       = []
+wifi       = ["dep:net", "dep:smoltcp"]
 ble        = []
-ieee802154 = []
+ieee802154 = ["dep:smoltcp"]
 
 [dependencies]
 arch = { path = "../../arch" }
 microkernel = { path = "../../microkernel", default-features = false }
 soc-esp32 = { path = "../../soc/esp32", default-features = false, features = ["c6"] }
+userlib = { path = "../../userlib" }
+net = { path = "../../net", optional = true }
 shell = { path = "../../shell", optional = true }
+smoltcp = { workspace = true, optional = true }
 panic-halt = "1.0"

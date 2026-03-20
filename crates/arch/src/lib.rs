@@ -287,6 +287,13 @@ pub fn validate_user_ptr(
 // Network device
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Network medium type (maps to smoltcp Medium).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetMedium {
+    Ethernet,
+    Ieee802154,
+}
+
 /// Architecture-neutral network device interface.
 ///
 /// A BSP implements this for its NIC (VIRTIO-NET, Wi-Fi radio, etc.).
@@ -308,6 +315,13 @@ pub trait NetworkDevice {
 
     /// The device's MAC address.
     fn mac_address(&self) -> [u8; 6];
+
+    /// The network medium. Defaults to Ethernet; 802.15.4 radios override.
+    fn medium(&self) -> NetMedium { NetMedium::Ethernet }
+
+    /// Extended MAC address (EUI-64) for 802.15.4 radios.
+    /// Returns zeros by default (Ethernet devices don't need this).
+    fn mac_address_ext(&self) -> [u8; 8] { [0u8; 8] }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
