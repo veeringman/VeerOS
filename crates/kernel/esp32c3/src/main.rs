@@ -64,7 +64,7 @@ static ESP_APP_DESC: EspAppDesc = EspAppDesc {
 };
 
 use arch::{Console, InterruptController, SavedContext, Serial, TickTimer};
-#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+#[cfg(feature = "wifi")]
 use arch::NetworkDevice;
 use soc_esp32::{
     usb_serial, interrupt_controller, system_timer,
@@ -82,11 +82,11 @@ use microkernel::task::TaskState;
 #[cfg(feature = "shell")]
 
 // Net imports (WiFi TCP/IP stack).
-#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+#[cfg(feature = "wifi")]
 use net::{NetStack, NetStorage, TcpSerial};
-#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+#[cfg(feature = "wifi")]
 use smoltcp::iface::SocketSet;
-#[cfg(any(feature = "wifi", feature = "ieee802154"))]
+#[cfg(feature = "wifi")]
 use smoltcp::wire::{IpCidr, Ipv4Address};
 use shell::{Shell, ShellEnv};
 
@@ -154,10 +154,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Kernel tick period in microseconds (1 ms).
 const TICK_PERIOD_US: u32 = 1_000;
 
-/// SYSTIMER comparator 0 interrupt source on ESP32-C6 (source 57).
-const SYSTIMER_IRQ_SOURCE: u16 = 57;
-/// CPU INT 5 — keep systimer off the WiFi blob's native CPU INT 1.
-const SYSTIMER_CPU_INT: u8 = 5;
+/// SYSTIMER comparator 0 interrupt source on ESP32-C3 (source 37).
+const SYSTIMER_IRQ_SOURCE: u16 = 37;
+/// We map it to CPU interrupt line 1.
+const SYSTIMER_CPU_INT: u8 = 1;
 
 // ---------------------------------------------------------------------------
 // Static scheduler (single-core, no heap)
@@ -170,7 +170,7 @@ unsafe impl Sync for SchedulerCell {}
 static SCHEDULER: SchedulerCell = SchedulerCell(UnsafeCell::new(Scheduler::new()));
 
 // ---------------------------------------------------------------------------
-// Kernel heap (16 KiB — ESP32-C6 has 512 KiB HP SRAM)
+// Kernel heap (16 KiB — ESP32-C3 has 400 KiB DRAM)
 // ---------------------------------------------------------------------------
 
 const HEAP_SIZE: usize = 16 * 1024;
@@ -225,21 +225,10 @@ pub(crate) static POLL: PollCell = PollCell(UnsafeCell::new(PollTable::new()));
 // ---------------------------------------------------------------------------
 
 use microkernel::process::ProcessTable;
-use microkernel::process::ProcessCaps;
 
 pub(crate) struct ProcessCell(pub UnsafeCell<ProcessTable>);
 unsafe impl Sync for ProcessCell {}
 pub(crate) static PROCESSES: ProcessCell = ProcessCell(UnsafeCell::new(ProcessTable::new()));
-
-// ---------------------------------------------------------------------------
-// Audit log
-// ---------------------------------------------------------------------------
-
-use microkernel::audit::{AuditLog, AuditEvent};
-
-pub(crate) struct AuditCell(pub UnsafeCell<AuditLog>);
-unsafe impl Sync for AuditCell {}
-pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()));
 
 // ---------------------------------------------------------------------------
 // Socket table
@@ -329,6 +318,16 @@ unsafe impl Sync for RegistryCell {}
 static DRIVERS: RegistryCell = RegistryCell(UnsafeCell::new(DriverRegistry::new()));
 
 // ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+use microkernel::audit::AuditLog;
+
+pub(crate) struct AuditCell(pub UnsafeCell<AuditLog>);
+unsafe impl Sync for AuditCell {}
+pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()));
+
+// ---------------------------------------------------------------------------
 // Wi-Fi manager (config store + state machine)
 // ---------------------------------------------------------------------------
 
@@ -357,20 +356,6 @@ unsafe impl Sync for BleCell {}
 static BLE: BleCell = BleCell(UnsafeCell::new(BleManager::new()));
 
 // ---------------------------------------------------------------------------
-// IEEE 802.15.4 (ZigBee / Thread) manager
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "ieee802154")]
-use soc_esp32::ieee802154::RadioManager;
-
-#[cfg(feature = "ieee802154")]
-struct RadioCell(UnsafeCell<RadioManager>);
-#[cfg(feature = "ieee802154")]
-unsafe impl Sync for RadioCell {}
-#[cfg(feature = "ieee802154")]
-static RADIO_802154: RadioCell = RadioCell(UnsafeCell::new(RadioManager::new()));
-
-// ---------------------------------------------------------------------------
 // Kernel log ring buffer
 // ---------------------------------------------------------------------------
 
@@ -394,7 +379,7 @@ const REMOTE_PASSWORD_HASH: u32 = net::auth::fnv1a(b"veeros");
 
 #[cfg(feature = "wifi")]
 /// Static IP for the WiFi interface (configure for your network).
-const WIFI_IP: [u8; 4] = [192, 168, 29, 100];
+const WIFI_IP: [u8; 4] = [192, 168, 29, 101];
 #[cfg(feature = "wifi")]
 const WIFI_GATEWAY: [u8; 4] = [192, 168, 29, 1];
 
@@ -411,8 +396,7 @@ static mut SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 4] =
 static mut NET_STORAGE: NetStorage = NetStorage::new();
 
 /// Thin wrapper that implements `NetworkDevice` by proxying to the
-/// `Esp32Wifi` driver inside the global `WIFI` static.  This lets
-/// `NetStack` own a device without moving `Esp32Wifi` out of `WifiManager`.
+/// `Esp32Wifi` driver inside the global `WIFI` static.
 #[cfg(feature = "wifi")]
 struct WifiNetProxy;
 
@@ -446,84 +430,6 @@ struct SocketSetCell(UnsafeCell<Option<SocketSet<'static>>>);
 unsafe impl Sync for SocketSetCell {}
 #[cfg(feature = "wifi")]
 static NET_SOCKETS: SocketSetCell = SocketSetCell(UnsafeCell::new(None));
-
-// ---------------------------------------------------------------------------
-// IEEE 802.15.4 6LoWPAN net statics (IPv6 mesh networking)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "ieee802154")]
-/// UDP port for 802.15.4 mesh data exchange.
-const MESH_UDP_PORT: u16 = 5683; // CoAP default
-
-#[cfg(feature = "ieee802154")]
-/// Static IPv6 link-local address for the 802.15.4 interface.
-/// Derived from the EUI-64 in practice; here a fixed default.
-const MESH_IPV6: [u8; 16] = [
-    0xfe, 0x80, 0, 0, 0, 0, 0, 0,
-    0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
-];
-
-#[cfg(feature = "ieee802154")]
-#[repr(align(16))]
-struct MeshTaskStack([u8; 4096]);
-#[cfg(feature = "ieee802154")]
-static mut MESH_TASK_STACK: MeshTaskStack = MeshTaskStack([0u8; 4096]);
-
-#[cfg(feature = "ieee802154")]
-static mut MESH_SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 4] =
-    [smoltcp::iface::SocketStorage::EMPTY; 4];
-#[cfg(feature = "ieee802154")]
-static mut MESH_NET_STORAGE: NetStorage = NetStorage::new();
-
-/// Proxy for the 802.15.4 radio — implements `NetworkDevice` by forwarding
-/// to the global RADIO_802154 static's driver.
-#[cfg(feature = "ieee802154")]
-struct MeshNetProxy;
-
-#[cfg(feature = "ieee802154")]
-impl arch::NetworkDevice for MeshNetProxy {
-    fn mtu(&self) -> usize { 127 }
-    fn has_rx(&self) -> bool {
-        unsafe { (*RADIO_802154.0.get()).driver().has_rx() }
-    }
-    fn recv(&self, buf: &mut [u8]) -> usize {
-        unsafe {
-            let drv = (*RADIO_802154.0.get()).driver();
-            drv.recv(buf)
-        }
-    }
-    fn send(&self, buf: &[u8]) {
-        unsafe {
-            let drv = (*RADIO_802154.0.get()).driver();
-            drv.send(buf)
-        }
-    }
-    fn mac_address(&self) -> [u8; 6] {
-        unsafe {
-            (*RADIO_802154.0.get()).driver().mac_address()
-        }
-    }
-    fn medium(&self) -> arch::NetMedium { arch::NetMedium::Ieee802154 }
-    fn mac_address_ext(&self) -> [u8; 8] {
-        unsafe {
-            (*RADIO_802154.0.get()).driver().mac_address_ext()
-        }
-    }
-}
-
-#[cfg(feature = "ieee802154")]
-struct MeshNetCell(UnsafeCell<Option<NetStack<MeshNetProxy>>>);
-#[cfg(feature = "ieee802154")]
-unsafe impl Sync for MeshNetCell {}
-#[cfg(feature = "ieee802154")]
-static MESH_NET: MeshNetCell = MeshNetCell(UnsafeCell::new(None));
-
-#[cfg(feature = "ieee802154")]
-struct MeshSocketSetCell(UnsafeCell<Option<SocketSet<'static>>>);
-#[cfg(feature = "ieee802154")]
-unsafe impl Sync for MeshSocketSetCell {}
-#[cfg(feature = "ieee802154")]
-static MESH_SOCKETS: MeshSocketSetCell = MeshSocketSetCell(UnsafeCell::new(None));
 
 /// RISC-V initial mstatus: MPIE=1 so mret enables interrupts, MPP=M-mode.
 const INITIAL_MSTATUS: usize = (1 << 7) | (3 << 11);
@@ -570,7 +476,7 @@ fn shell_task() -> ! {
     let mut con = Console::new(serial);
     let env = ShellEnv {
         version: VERSION,
-        platform: "ESP32-C6 (RISC-V)",
+        platform: "ESP32-C3 (RISC-V)",
         scheduler: "minimal",
         get_uptime_ticks: Some(get_uptime_ticks),
         get_task_list: Some(write_task_list),
@@ -584,9 +490,6 @@ fn shell_task() -> ! {
         bt_cmd: Some(bt_command),
         #[cfg(not(feature = "ble"))]
         bt_cmd: None,
-        #[cfg(feature = "ieee802154")]
-        zigbee_cmd: Some(zigbee_command),
-        #[cfg(not(feature = "ieee802154"))]
         zigbee_cmd: None,
         get_current_user: Some(get_current_user),
         get_user_list: Some(write_user_list),
@@ -616,8 +519,6 @@ fn shell_task() -> ! {
         dmesg: Some(dmesg_info),
         reboot: None,
         shutdown: None,
-        caps_cmd: Some(caps_command),
-        auditlog_cmd: Some(auditlog_command),
     };
     let mut sh = Shell::new(env);
     loop {
@@ -664,7 +565,6 @@ fn net_task() -> ! {
 
     // Wait until WiFi is connected.
     loop {
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         let connected = unsafe { (*WIFI.0.get()).driver().is_connected() };
         if connected {
             break;
@@ -718,7 +618,6 @@ fn net_task() -> ! {
         }
 
         // Poll until a client connects.
-        let mut diag_tick = 0u32;
         loop {
             net_poll();
             let connected = unsafe {
@@ -733,70 +632,7 @@ fn net_task() -> ! {
             if connected {
                 break;
             }
-            diag_tick += 1;
-            if diag_tick % 500 == 0 {
-                let rx_count = unsafe { (*WIFI.0.get()).driver().rx_cb_count() };
-                let (
-                    isr_cnt,
-                    plic_en,
-                    emip,
-                    thresh,
-                    mie,
-                    intc_en,
-                    map_mac,
-                    map_pwr,
-                    st0,
-                    st1,
-                    si0,
-                    si1,
-                    ints_on,
-                    blob_spawns,
-                    blob_entries,
-                    sem_alloc,
-                    sem_take_ok,
-                    sem_take_block,
-                    sem_give,
-                    queue_send,
-                    queue_counts,
-                ) = soc_esp32::wifi_os_adapter::wifi_diag();
-                let queue_recv = queue_counts & 0xFFFF;
-                let queue_block = queue_counts >> 16;
-                let (irq_ext11, irq1, irq2, irq_other, irq_last) = crate::trap::irq_diag();
-                let _ = writeln!(
-                    con,
-                    "[net] #{} rx={} isr={} plic={:#x} emip={:#x} th={:#x} mie={:#x} ien={:#x} map={}/{} st={:#x}/{:#x} si={:#x}/{:#x} on={:#x} irq={}/{}/{}/{}@{} task={}/{} sem={}/{}/{} q={}/{}",
-                    diag_tick,
-                    rx_count,
-                    isr_cnt,
-                    plic_en,
-                    emip,
-                    thresh,
-                    mie,
-                    intc_en,
-                    map_mac,
-                    map_pwr,
-                    st0,
-                    st1,
-                    si0,
-                    si1,
-                    ints_on,
-                    irq_ext11,
-                    irq1,
-                    irq2,
-                    irq_other,
-                    irq_last,
-                    blob_spawns,
-                    blob_entries,
-                    sem_alloc,
-                    sem_take_ok,
-                    sem_give,
-                    queue_send,
-                    queue_recv,
-                );
-                let _ = writeln!(con, "[net] wait sem_block={} q_block={}", sem_take_block, queue_block);
-            }
-            // Yield to scheduler so blob tasks (ppTask) can process WiFi frames.
-            drv_yield();
+            core::hint::spin_loop();
         }
 
         let _ = writeln!(con, "[net] client connected");
@@ -815,7 +651,7 @@ fn net_task() -> ! {
                     let _ = writeln!(con, "[net] authentication succeeded — starting shell");
                     let env = ShellEnv {
                         version: VERSION,
-                        platform: "ESP32-C6 (RISC-V)",
+                        platform: "ESP32-C3 (RISC-V)",
                         scheduler: "minimal",
                         get_uptime_ticks: Some(get_uptime_ticks),
                         get_task_list: Some(write_task_list),
@@ -829,9 +665,6 @@ fn net_task() -> ! {
                         bt_cmd: Some(bt_command),
                         #[cfg(not(feature = "ble"))]
                         bt_cmd: None,
-                        #[cfg(feature = "ieee802154")]
-                        zigbee_cmd: Some(zigbee_command),
-                        #[cfg(not(feature = "ieee802154"))]
                         zigbee_cmd: None,
                         get_current_user: Some(get_current_user),
                         get_user_list: Some(write_user_list),
@@ -861,8 +694,6 @@ fn net_task() -> ! {
                         dmesg: Some(dmesg_info),
                         reboot: None,
                         shutdown: None,
-                        caps_cmd: Some(caps_command),
-                        auditlog_cmd: Some(auditlog_command),
                     };
                     let mut sh = Shell::new(env);
                     sh.run(&mut tcp_con);
@@ -892,108 +723,6 @@ fn net_task() -> ! {
 }
 
 // ---------------------------------------------------------------------------
-// IEEE 802.15.4 mesh network task — 6LoWPAN IPv6 over 802.15.4
-// ---------------------------------------------------------------------------
-
-/// Poll the 6LoWPAN stack and the 802.15.4 driver's RX path.
-#[cfg(feature = "ieee802154")]
-fn mesh_poll() {
-    // Drive 802.15.4 RX so frames arrive.
-    unsafe {
-        (*RADIO_802154.0.get()).driver_mut().poll_rx();
-    }
-    unsafe {
-        if let (Some(stack), Some(sockets)) =
-            (&mut *MESH_NET.0.get(), &mut *MESH_SOCKETS.0.get())
-        {
-            let ticks = (*SCHEDULER.0.get()).ticks;
-            stack.poll(sockets, ticks);
-        }
-    }
-}
-
-/// The 802.15.4 6LoWPAN mesh network task.
-///
-/// 1. Waits for the 802.15.4 radio to be initialised.
-/// 2. Initialises smoltcp with an IPv6 link-local address + 6LoWPAN.
-/// 3. Listens for UDP packets on the CoAP port (5683).
-/// 4. Echoes received data back (mesh data exchange).
-#[cfg(feature = "ieee802154")]
-fn mesh_task() -> ! {
-    // Let the shell task print its banner first.
-    for _ in 0..3_000_000u32 { core::hint::spin_loop(); }
-    let serial = usb_serial();
-    let mut con = Console::new(serial);
-
-    let _ = writeln!(con, "[mesh] waiting for 802.15.4 radio...");
-
-    // Wait until radio is initialised.
-    loop {
-        let ready = unsafe { (*RADIO_802154.0.get()).driver().is_initialised() };
-        if ready {
-            break;
-        }
-        for _ in 0..10_000 { core::hint::spin_loop(); }
-    }
-
-    let ext = unsafe {
-        (*RADIO_802154.0.get()).driver().mac_address_ext()
-    };
-    let _ = writeln!(
-        con,
-        "[mesh] 802.15.4 ready  EUI-64={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7]
-    );
-
-    // Build IPv6 link-local address from EUI-64 (RFC 4291 appendix A).
-    let mut ipv6_addr = MESH_IPV6;
-    // Flip the U/L bit in the EUI-64 interface identifier.
-    ipv6_addr[8] = ext[0] ^ 0x02;
-    ipv6_addr[9] = ext[1];
-    ipv6_addr[10] = ext[2];
-    ipv6_addr[11] = 0xFF;
-    ipv6_addr[12] = 0xFE;
-    ipv6_addr[13] = ext[5];
-    ipv6_addr[14] = ext[6];
-    ipv6_addr[15] = ext[7];
-
-    // Use the IPv6 link-local as our address (gateway = link-local doesn't apply for mesh).
-    let ip = IpCidr::new(
-        smoltcp::wire::Ipv6Address(ipv6_addr).into(),
-        64,
-    );
-    // For mesh, use a dummy IPv4 gateway — smoltcp requires one.
-    let gw = Ipv4Address::new(0, 0, 0, 0);
-
-    unsafe {
-        let sockets_ref: &'static mut [smoltcp::iface::SocketStorage<'static>] =
-            &mut *core::ptr::addr_of_mut!(MESH_SOCKET_STORAGE);
-        let mut socket_set = SocketSet::new(sockets_ref);
-        let storage = &mut *core::ptr::addr_of_mut!(MESH_NET_STORAGE);
-
-        let stack = NetStack::new(MeshNetProxy, ip, gw, &mut socket_set, storage);
-
-        *MESH_SOCKETS.0.get() = Some(socket_set);
-        *MESH_NET.0.get() = Some(stack);
-    }
-
-    let _ = writeln!(
-        con,
-        "[mesh] 6LoWPAN ready — IPv6 fe80::{}:{:02x}ff:fe{:02x}:{:02x}{:02x}/64  UDP port {}",
-        if ext[0] & 0x02 == 0 { ext[0] | 0x02 } else { ext[0] & !0x02 },
-        ext[1], ext[5], ext[6], ext[7],
-        MESH_UDP_PORT
-    );
-
-    // Main loop: continuously poll the mesh stack.
-    loop {
-        mesh_poll();
-        // Yield to other tasks.
-        for _ in 0..1000 { core::hint::spin_loop(); }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Userspace driver tasks — run in U-mode with PMP-granted MMIO regions
 // ---------------------------------------------------------------------------
 
@@ -1007,8 +736,6 @@ struct DrvStack2K([u8; 2048]);
 static mut WIFI_DRV_STACK: DrvStack4K = DrvStack4K([0u8; 4096]);
 #[cfg(feature = "ble")]
 static mut BLE_DRV_STACK: DrvStack2K = DrvStack2K([0u8; 2048]);
-#[cfg(feature = "ieee802154")]
-static mut IEEE802154_DRV_STACK: DrvStack2K = DrvStack2K([0u8; 2048]);
 
 // ── Syscall wrappers (U-mode ecall) ────────────────────────────────────
 
@@ -1126,8 +853,8 @@ fn wifi_driver_task() -> ! {
             drv_log(b"[wifi-drv] connecting...\n");
             match mgr.connect() {
                 Ok(()) => {
-                    mgr.ip = [192, 168, 29, 100];
-                    drv_log(b"[wifi-drv] connected to MARS\n");
+                    mgr.ip = [192, 168, 29, 101];
+                    drv_log(b"[wifi-drv] connected\n");
                 }
                 Err(_) => {
                     drv_log(b"[wifi-drv] connect failed, retrying\n");
@@ -1191,7 +918,6 @@ fn ble_driver_task() -> ! {
                 modem::BLE_BB_BASE + modem::BLE_INT_CLR,
                 modem::BLE_INT_RX_DONE,
             );
-            // RX data is consumed by BleManager's scan() — we just clear the IRQ.
             let _rx = drv_mmio_read32(modem::BLE_BB_BASE + modem::BLE_RX_DESCR);
         }
 
@@ -1200,8 +926,6 @@ fn ble_driver_task() -> ! {
                 modem::BLE_BB_BASE + modem::BLE_INT_CLR,
                 modem::BLE_INT_ADV_DONE,
             );
-            // Advertisement cycle complete — controller will auto-restart
-            // if ADV_ENABLE is still set.
         }
 
         if status & modem::BLE_INT_SCAN_DONE != 0 {
@@ -1226,105 +950,6 @@ fn ble_driver_task() -> ! {
         }
 
         // Yield to scheduler.
-        // TODO: replace with drv_irq_wait() once BLE IRQ is mapped to a CPU line.
-        drv_sleep(10);
-    }
-}
-
-// ── IEEE 802.15.4 driver task ──────────────────────────────────────────
-
-#[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
-fn ieee802154_driver_task() -> ! {
-    use soc_esp32::modem;
-
-    drv_log(b"[802154-drv] starting\n");
-
-    // Enable 802.15.4 clocks.
-    let clk_reg = modem::MODEM_LPCON_BASE + modem::MODEM_CLK_EN;
-    let cur = drv_mmio_read32(clk_reg);
-    drv_mmio_write32(clk_reg, cur | modem::CLK_IEEE802154_EN | modem::CLK_FE_EN);
-    drv_log(b"[802154-drv] 802.15.4 clocks enabled\n");
-
-    // Release 802.15.4 MAC from reset.
-    let rst_reg = modem::MODEM_LPCON_BASE + modem::MODEM_RST_CTRL;
-    let rst = drv_mmio_read32(rst_reg);
-    drv_mmio_write32(rst_reg, rst | modem::RST_IEEE802154_MAC);
-    drv_yield();
-    drv_mmio_write32(rst_reg, rst & !modem::RST_IEEE802154_MAC);
-    drv_log(b"[802154-drv] MAC reset complete\n");
-
-    // Verify MMIO access.
-    let mac_val = drv_mmio_read32(modem::IEEE802154_MAC_BASE);
-    if mac_val != usize::MAX as u32 {
-        drv_log(b"[802154-drv] MAC accessible\n");
-    } else {
-        drv_log(b"[802154-drv] MAC read failed\n");
-    }
-
-    // Clear and enable interrupts (RX, TX, TX fail, ED, ACK).
-    drv_mmio_write32(
-        modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-        0xFFFF_FFFF,
-    );
-    drv_mmio_write32(
-        modem::IEEE802154_MAC_BASE + modem::ZB_INT_ENA,
-        modem::ZB_INT_TX_DONE | modem::ZB_INT_RX_DONE
-            | modem::ZB_INT_TX_FAIL | modem::ZB_INT_ED_DONE
-            | modem::ZB_INT_ACK_RCVD,
-    );
-
-    // Enable MAC with RX on and auto-ACK.
-    drv_mmio_write32(
-        modem::IEEE802154_MAC_BASE + modem::ZB_MAC_CTRL,
-        modem::ZB_CTRL_ENABLE | modem::ZB_CTRL_RX_ON | modem::ZB_CTRL_AUTO_ACK,
-    );
-
-    drv_log(b"[802154-drv] ready, entering event loop\n");
-
-    // Main driver event loop: service 802.15.4 MAC events.
-    loop {
-        let status = drv_mmio_read32(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS);
-
-        if status & modem::ZB_INT_RX_DONE != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_RX_DONE,
-            );
-            // Frame received — RadioManager's poll_rx() reads the FIFO from M-mode.
-            // We clear the IRQ so the MAC can continue receiving.
-            let _rx_len = drv_mmio_read32(modem::IEEE802154_MAC_BASE + modem::ZB_RX_LEN);
-        }
-
-        if status & modem::ZB_INT_TX_DONE != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_TX_DONE,
-            );
-        }
-
-        if status & modem::ZB_INT_TX_FAIL != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_TX_FAIL,
-            );
-        }
-
-        if status & modem::ZB_INT_ED_DONE != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_ED_DONE,
-            );
-        }
-
-        if status & modem::ZB_INT_ACK_RCVD != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_ACK_RCVD,
-            );
-        }
-
-        // Yield to scheduler.
-        // TODO: replace with drv_irq_wait() once 802.15.4 IRQ is mapped to a CPU line.
         drv_sleep(10);
     }
 }
@@ -1437,18 +1062,6 @@ pub extern "C" fn _early_trap_rust(mcause: usize, mepc: usize, mtval: usize) -> 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _rust_start() -> ! {
-    // ── suppress ROM debug output via USB serial ─────────────────
-    // The ROM's ets_printf writes to USB Serial JTAG by default.
-    // Install a no-op putc1 callback so PHY/WiFi blob ROM calls
-    // don't flood the console with debug characters.
-    {
-        extern "C" {
-            fn ets_install_putc1(putc: Option<unsafe extern "C" fn(u8)>);
-        }
-        unsafe extern "C" fn noop_putc(_c: u8) {}
-        unsafe { ets_install_putc1(Some(noop_putc)) };
-    }
-
     // ── disable watchdogs (ROM bootloader enables them) ──────────
     soc_esp32::wdt::disable_watchdogs();
 
@@ -1504,10 +1117,6 @@ pub extern "C" fn _rust_start() -> ! {
         }
         unsafe { microkernel::seed_system_rng(seed); }
         let _ = writeln!(con, "[boot] system CSPRNG seeded from hardware RNG");
-        // Record in audit log.
-        unsafe {
-            (*AUDIT.0.get()).log(0, 0, 0, microkernel::audit::AuditEvent::RngSeeded, 0, 0);
-        }
     }
 
     // ── register drivers ─────────────────────────────────────
@@ -1556,24 +1165,6 @@ pub extern "C" fn _rust_start() -> ! {
         let _ = writeln!(con, "[boot] BLE 5.0 driver registered");
     }
 
-    // ── register IEEE 802.15.4 driver ────────────────────
-    #[cfg(feature = "ieee802154")]
-    {
-        unsafe {
-            let reg = &mut *DRIVERS.0.get();
-            let drv = reg.register("ieee802154", DriverCaps {
-                mmio_regions: 1,
-                uses_interrupts: true,
-                uses_dma: false,
-                uses_network: true,
-            });
-            if let Ok(id) = drv {
-                reg.grant_mmio(id, MemRegion::new(0x600A_3000, 0x1000)).ok();
-            }
-        }
-        let _ = writeln!(con, "[boot] IEEE 802.15.4 (ZigBee/Thread) driver registered");
-    }
-
     // ── install trap vector (RISC-V only) ────────────────────
     #[cfg(target_arch = "riscv32")]
     {
@@ -1581,8 +1172,8 @@ pub extern "C" fn _rust_start() -> ! {
             fn _veer_vector_table();
         }
         unsafe {
-            // Use vectored mode (mode=1): the ESP32-C6 PLIC forces bit 0.
-            let addr = (_veer_vector_table as *const () as usize & !0x3) | 1;
+            // ESP32-C3 uses direct mode (mode=0) — no PLIC vectored dispatch.
+            let addr = _veer_vector_table as *const () as usize & !0x3;
             core::arch::asm!("csrw mtvec, {0}", in(reg) addr, options(nomem, nostack));
         }
         let _ = writeln!(con, "[boot] trap vector installed");
@@ -1623,7 +1214,7 @@ pub extern "C" fn _rust_start() -> ! {
         let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc").unwrap_or(microkernel::vfs::NO_INODE);
         if etc_id != microkernel::vfs::NO_INODE {
             ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS!\n");
-            ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-esp32c6\n");
+            ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-esp32c3\n");
 
             // /etc/net/wifi — WiFi credentials from build-time or defaults.
             if let Some(net_id) = inodes.mkdir_in(etc_id, "net") {
@@ -1694,7 +1285,6 @@ pub extern "C" fn _rust_start() -> ! {
             let sb = (&raw const WIFI_DRV_STACK) as usize;
             let st = sb + core::mem::size_of::<DrvStack4K>();
             if let Some(idx) = sched.create_task("wifi-drv", wifi_driver_task as *const () as usize, st, sb, 2, 0) {
-                // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
                 // Grant MMIO: modem clock/reset registers.
                 sched.grant_region(idx, arch::TaskMemRegion {
@@ -1717,7 +1307,6 @@ pub extern "C" fn _rust_start() -> ! {
             let sb = (&raw const BLE_DRV_STACK) as usize;
             let st = sb + core::mem::size_of::<DrvStack2K>();
             if let Some(idx) = sched.create_task("ble-drv", ble_driver_task as *const () as usize, st, sb, 2, 0) {
-                // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
                 // Grant MMIO: modem clock/reset.
                 sched.grant_region(idx, arch::TaskMemRegion {
@@ -1734,45 +1323,12 @@ pub extern "C" fn _rust_start() -> ! {
             }
         }
 
-        #[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
-        {
-            use soc_esp32::modem;
-            let sb = (&raw const IEEE802154_DRV_STACK) as usize;
-            let st = sb + core::mem::size_of::<DrvStack2K>();
-            if let Some(idx) = sched.create_task("802154-drv", ieee802154_driver_task as *const () as usize, st, sb, 2, 0) {
-                // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
-                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
-                // Grant MMIO: modem clock/reset.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::MODEM_LPCON_BASE,
-                    size: 0x1000,
-                    perms: arch::MemPerms::RW,
-                });
-                // Grant MMIO: 802.15.4 MAC.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::IEEE802154_MMIO_BASE,
-                    size: modem::IEEE802154_MMIO_SIZE,
-                    perms: arch::MemPerms::RW,
-                });
-            }
-        }
-
         // Network listener task (priority 1) — TCP/IP over WiFi.
         #[cfg(feature = "wifi")]
         {
             let sb = (&raw const NET_TASK_STACK) as usize;
             let st = sb + core::mem::size_of::<NetTaskStack>();
             if let Some(idx) = sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0) {
-                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
-            }
-        }
-
-        // 802.15.4 mesh task (priority 1) — 6LoWPAN IPv6 over 802.15.4.
-        #[cfg(feature = "ieee802154")]
-        {
-            let sb = (&raw const MESH_TASK_STACK) as usize;
-            let st = sb + core::mem::size_of::<MeshTaskStack>();
-            if let Some(idx) = sched.create_task("mesh", mesh_task as *const () as usize, st, sb, 1, 0) {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -1792,17 +1348,18 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(con, "[boot] wifi-drv task registered (M-mode)");
     #[cfg(all(feature = "ble", target_arch = "riscv32"))]
     let _ = writeln!(con, "[boot] ble-drv task registered (M-mode)");
-    #[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
-    let _ = writeln!(con, "[boot] 802154-drv task registered (M-mode)");
     #[cfg(feature = "wifi")]
     let _ = writeln!(con, "[boot] net listener task registered (port {})", REMOTE_SHELL_PORT);
-    #[cfg(feature = "ieee802154")]
-    let _ = writeln!(con, "[boot] mesh task registered (6LoWPAN UDP port {})", MESH_UDP_PORT);
 
     // ── WiFi auto-connect (credentials loaded from /etc/net/wifi by driver) ──
     #[cfg(feature = "wifi")]
     {
         let _ = writeln!(con, "[boot] wifi: credentials in /etc/net/wifi (driver will load)");
+        // Direct FIFO debug marker (boot configured, connect deferred to wifi-drv task).
+        unsafe {
+            core::ptr::write_volatile(0x6000_f000 as *mut u32, b'Z' as u32);
+            core::ptr::write_volatile(0x6000_f004 as *mut u32, 1);
+        }
         let _ = writeln!(con, "[boot] wifi: connect deferred (driver will handle)");
     }
 
@@ -2174,7 +1731,7 @@ fn input_status(w: &mut dyn core::fmt::Write) {
 
 fn ble_hid_list(w: &mut dyn core::fmt::Write) {
     let _ = writeln!(w, "  BLE HID-over-GATT (HOGP) client");
-    let _ = writeln!(w, "  Status: ready (ESP32-C6 BLE available)");
+    let _ = writeln!(w, "  Status: ready (ESP32-C3 BLE available)");
     let _ = writeln!(w, "  Max devices: 4");
     let _ = writeln!(w, "  Use 'input scan' to discover BLE HID peripherals");
 }
@@ -2184,160 +1741,13 @@ fn dmesg_info(w: &mut dyn core::fmt::Write) {
     klog.dump(w);
 }
 
-// ── Capability names table ───────────────────────────────────────────────
-const CAP_NAMES: &[(u32, &str)] = &[
-    (0, "task_basic"), (1, "mem"), (2, "time"), (3, "sync"),
-    (4, "ipc"), (5, "channel"), (6, "poll"), (7, "console_io"),
-    (8, "fs"), (9, "net"), (10, "spawn_thread"), (11, "spawn_process"),
-    (12, "user_admin"), (13, "driver"), (14, "mount"), (15, "hw"),
-    (16, "crypto"), (17, "cap_admin"),
-];
-
-/// Shell callback for `caps <sub> <args>`.
-fn caps_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
-    use microkernel::process::ProcessState;
-
-    let pt = unsafe { &mut *PROCESSES.0.get() };
-
-    match sub {
-        // `caps` — list all active processes with cap summary
-        "" => {
-            let _ = writeln!(w, "  PID  NAME             CAPS");
-            let _ = writeln!(w, "  ───  ───────────────  ─────────────────────────");
-            for (pid, p) in pt.processes.iter().enumerate() {
-                if p.state == ProcessState::Free {
-                    continue;
-                }
-                let bits = p.caps.bits();
-                // Build a short capability string
-                let mut buf = [0u8; 128];
-                let mut pos = 0;
-                for &(bit, name) in CAP_NAMES {
-                    if bits & (1 << bit) != 0 {
-                        if pos > 0 && pos + 1 < buf.len() {
-                            buf[pos] = b',';
-                            pos += 1;
-                        }
-                        let nb = name.as_bytes();
-                        let end = (pos + nb.len()).min(buf.len());
-                        buf[pos..end].copy_from_slice(&nb[..end - pos]);
-                        pos = end;
-                    }
-                }
-                let caps_str = core::str::from_utf8(&buf[..pos]).unwrap_or("?");
-                let _ = writeln!(w, "  {:>3}  {:<15}  {}", pid, p.name, caps_str);
-            }
-        }
-        // `caps <pid>` — detailed view
-        _ if sub.as_bytes().first().map_or(false, |b| b.is_ascii_digit()) && args.is_empty() => {
-            let pid = parse_usize(sub);
-            if pid >= 8 {
-                let _ = writeln!(w, "  invalid pid: {}", sub);
-                return;
-            }
-            let p = &pt.processes[pid];
-            if p.state == ProcessState::Free {
-                let _ = writeln!(w, "  pid {} is not active", pid);
-                return;
-            }
-            let bits = p.caps.bits();
-            let _ = writeln!(w, "  Process {} ({})", pid, p.name);
-            let _ = writeln!(w, "  Capabilities (0x{:05X}):", bits);
-            for &(bit, name) in CAP_NAMES {
-                let flag = if bits & (1 << bit) != 0 { "+" } else { "-" };
-                let _ = writeln!(w, "    {} {}", flag, name);
-            }
-        }
-        // `caps drop <pid> <cap_name>`
-        "drop" => {
-            let (pid_str, cap_name) = match args.find(' ') {
-                Some(i) => (&args[..i], args[i + 1..].trim()),
-                None => {
-                    let _ = writeln!(w, "  usage: caps drop <pid> <cap_name>");
-                    return;
-                }
-            };
-            let pid = parse_usize(pid_str);
-            if pid >= 8 {
-                let _ = writeln!(w, "  invalid pid: {}", pid_str);
-                return;
-            }
-            if pt.processes[pid].state == ProcessState::Free {
-                let _ = writeln!(w, "  pid {} is not active", pid);
-                return;
-            }
-            // Look up cap bit by name
-            let bit = CAP_NAMES.iter().find(|&&(_, n)| n == cap_name);
-            match bit {
-                Some(&(b, name)) => {
-                    let mask = ProcessCaps::from_bits_truncate(1 << b);
-                    pt.drop_caps(pid, mask);
-                    let remaining = pt.processes[pid].caps.bits();
-                    // Log to audit trail
-                    let tick = unsafe { (*SCHEDULER.0.get()).ticks } as u32;
-                    let audit = unsafe { &mut *AUDIT.0.get() };
-                    audit.log(tick, pid as u8, 0, AuditEvent::CapDropped, 1 << b, remaining);
-                    let _ = writeln!(w, "  dropped '{}' from pid {} — caps now 0x{:05X}",
-                        name, pid, remaining);
-                }
-                None => {
-                    let _ = writeln!(w, "  unknown capability: '{}'", cap_name);
-                    let _ = writeln!(w, "  valid caps: task_basic, mem, time, sync, ipc, channel, poll,");
-                    let _ = writeln!(w, "    console_io, fs, net, spawn_thread, spawn_process, user_admin,");
-                    let _ = writeln!(w, "    driver, mount, hw, crypto, cap_admin");
-                }
-            }
-        }
-        _ => {
-            let _ = writeln!(w, "  usage: caps              — list all processes");
-            let _ = writeln!(w, "         caps <pid>        — show process capabilities");
-            let _ = writeln!(w, "         caps drop <pid> <cap>  — drop a capability");
-        }
-    }
-}
-
-fn parse_usize(s: &str) -> usize {
-    let mut n: usize = 0;
-    for b in s.bytes() {
-        if b.is_ascii_digit() {
-            n = n.wrapping_mul(10).wrapping_add((b - b'0') as usize);
-        } else {
-            return usize::MAX;
-        }
-    }
-    n
-}
-
-/// Shell callback for `auditlog [count]`.
-fn auditlog_command(args: &str, w: &mut dyn core::fmt::Write) {
-    let audit = unsafe { &*AUDIT.0.get() };
-    let max = if args.is_empty() {
-        32 // default: show last 32 entries
-    } else {
-        let n = parse_usize(args);
-        if n == usize::MAX { 32 } else { n }
-    };
-    if audit.total() == 0 {
-        let _ = writeln!(w, "  (no audit events recorded)");
-    } else {
-        audit.dump(w, max);
-    }
-}
-
 /// Shell callback for `wifi <sub> <args>`.
-///
-/// Subcommands:
-///   set <ssid> [password]   — configure credentials
-///   connect                 — attempt to join the AP
-///   disconnect              — leave the AP
-///   status                  — show current state
 #[cfg(feature = "wifi")]
 fn wifi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
     let mgr = unsafe { &mut *WIFI.0.get() };
 
     match sub {
         "set" => {
-            // args = "MySSID MyPassword" or "MySSID" (open network)
             let (ssid, pass) = match args.find(' ') {
                 Some(i) => (&args[..i], args[i + 1..].trim()),
                 None => (args, ""),
@@ -2395,13 +1805,6 @@ fn wifi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
 }
 
 /// Shell callback for `bt <sub> <args>`.
-///
-/// Subcommands:
-///   scan                  — scan for nearby BLE devices
-///   list                  — show last scan results
-///   advertise <name>      — start advertising as <name>
-///   stop                  — stop advertising
-///   status                — show BLE state
 #[cfg(feature = "ble")]
 fn bt_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
     let mgr = unsafe { &mut *BLE.0.get() };
@@ -2450,113 +1853,6 @@ fn bt_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "    bt advertise <name>        Start advertising");
             let _ = writeln!(w, "    bt stop                    Stop advertising");
             let _ = writeln!(w, "    bt status                  Current BLE state");
-        }
-    }
-}
-
-/// Shell callback for `zigbee <sub> <args>`.
-///
-/// Subcommands:
-///   init                — initialise the 802.15.4 radio
-///   channel <11-26>     — set the operating channel
-///   panid <0xNNNN>      — set the PAN ID
-///   scan                — scan for 802.15.4 networks
-///   list                — show last scan results
-///   send <data>         — transmit a test frame
-///   status              — show radio state
-#[cfg(feature = "ieee802154")]
-fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
-    let mgr = unsafe { &mut *RADIO_802154.0.get() };
-
-    match sub {
-        "init" => {
-            let _ = write!(w, "  Initialising 802.15.4 radio...");
-            match mgr.init() {
-                Ok(()) => {
-                    let _ = writeln!(w, " done");
-                }
-                Err(e) => {
-                    let _ = writeln!(w, " failed: {}", e);
-                }
-            }
-        }
-        "channel" | "ch" => {
-            if args.is_empty() {
-                let _ = writeln!(w, "  Current channel: {}", mgr.driver().channel());
-                return;
-            }
-            match args.parse::<u8>() {
-                Ok(ch) => match mgr.set_channel(ch) {
-                    Ok(()) => {
-                        let _ = writeln!(w, "  Channel set to {}", ch);
-                    }
-                    Err(e) => {
-                        let _ = writeln!(w, "  Error: {}", e);
-                    }
-                },
-                Err(_) => {
-                    let _ = writeln!(w, "  Invalid channel number (must be 11-26)");
-                }
-            }
-        }
-        "panid" => {
-            if args.is_empty() {
-                let _ = writeln!(w, "  Current PAN ID: 0x{:04X}", mgr.driver().pan_id());
-                return;
-            }
-            // Parse hex with optional 0x prefix
-            let hex_str = args.strip_prefix("0x").or_else(|| args.strip_prefix("0X")).unwrap_or(args);
-            match u16::from_str_radix(hex_str, 16) {
-                Ok(pan_id) => {
-                    mgr.set_pan_id(pan_id);
-                    let _ = writeln!(w, "  PAN ID set to 0x{:04X}", pan_id);
-                }
-                Err(_) => {
-                    let _ = writeln!(w, "  Invalid PAN ID (use hex, e.g. 0x1234)");
-                }
-            }
-        }
-        "scan" => {
-            let _ = write!(w, "  Scanning 802.15.4 channels...");
-            match mgr.scan() {
-                Ok(n) => {
-                    let _ = writeln!(w, " found {} network(s)", n);
-                    mgr.write_scan_results(w);
-                }
-                Err(e) => {
-                    let _ = writeln!(w, " failed: {}", e);
-                }
-            }
-        }
-        "list" | "ls" => {
-            mgr.write_scan_results(w);
-        }
-        "send" | "tx" => {
-            if args.is_empty() {
-                let _ = writeln!(w, "  usage: zigbee send <data>");
-                return;
-            }
-            match mgr.send(args.as_bytes()) {
-                Ok(()) => {
-                    let _ = writeln!(w, "  Frame sent ({} bytes)", args.len());
-                }
-                Err(e) => {
-                    let _ = writeln!(w, "  TX failed: {}", e);
-                }
-            }
-        }
-        "status" | "info" | "" => {
-            mgr.write_status(w);
-        }
-        _ => {
-            let _ = writeln!(w, "  zigbee subcommands:");
-            let _ = writeln!(w, "    zigbee init                Init the 802.15.4 radio");
-            let _ = writeln!(w, "    zigbee channel <11-26>     Set/show channel");
-            let _ = writeln!(w, "    zigbee panid <0xNNNN>      Set/show PAN ID");
-            let _ = writeln!(w, "    zigbee scan                Scan for networks");
-            let _ = writeln!(w, "    zigbee list                Show last scan results");
-            let _ = writeln!(w, "    zigbee send <data>         Transmit test frame");
-            let _ = writeln!(w, "    zigbee status              Current radio state");
         }
     }
 }

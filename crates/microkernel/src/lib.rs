@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod alloc;
+pub mod audit;
 pub mod channel;
 pub mod dispatch;
 pub mod driver;
@@ -21,6 +22,46 @@ pub mod vfs;
 
 use arch::Platform;
 use bitflags::bitflags;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// System-wide CSPRNG
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Global system CSPRNG (ChaCha20-DRBG).
+///
+/// **Must** be seeded from hardware entropy at boot via [`seed_system_rng`]
+/// before `/dev/random` is usable.
+static mut SYSTEM_RNG: Option<crypto::rng::ChaChaRng> = None;
+
+/// Seed the system CSPRNG with 32 bytes of hardware entropy.
+///
+/// Called once during kernel init (e.g. from ESP32 RNG peripheral,
+/// BCM2712 TRNG, RDRAND, etc). Safe to call again to reseed.
+///
+/// # Safety
+///
+/// Must be called from single-threaded kernel init context. The microkernel
+/// is single-core / cooperative, so no concurrent access after boot.
+pub unsafe fn seed_system_rng(seed: [u8; 32]) {
+    let rng_ptr = core::ptr::addr_of_mut!(SYSTEM_RNG);
+    rng_ptr.write(Some(crypto::rng::ChaChaRng::from_seed(seed)));
+}
+
+/// Fill `buf` with cryptographically secure random bytes from the system RNG.
+///
+/// Returns the number of bytes written (0 if RNG not yet seeded).
+pub fn system_rng_fill(buf: &mut [u8]) -> usize {
+    unsafe {
+        let rng_ptr = core::ptr::addr_of_mut!(SYSTEM_RNG);
+        if let Some(rng) = (*rng_ptr).as_mut() {
+            use crypto::CryptoRng;
+            rng.fill_bytes(buf);
+            buf.len()
+        } else {
+            0
+        }
+    }
+}
 
 bitflags! {
     pub struct CapabilitySet: u32 {

@@ -193,6 +193,16 @@ unsafe impl Sync for RegistryCell {}
 static DRIVERS: RegistryCell = RegistryCell(UnsafeCell::new(DriverRegistry::new()));
 
 // ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+use microkernel::audit::AuditLog;
+
+pub(crate) struct AuditCell(pub UnsafeCell<AuditLog>);
+unsafe impl Sync for AuditCell {}
+pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()));
+
+// ---------------------------------------------------------------------------
 // Static timer handle (used by the trap dispatcher)
 // ---------------------------------------------------------------------------
 

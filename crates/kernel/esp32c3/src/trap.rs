@@ -1,10 +1,9 @@
-//! Trap dispatcher for the ESP32-C6 RISC-V kernel.
+//! Trap dispatcher for the ESP32-C3 RISC-V kernel.
 //!
 //! The trap entry/exit assembly (`_veer_trap_entry`, `_veer_start_first_task`)
 //! lives in `arch::riscv32` and is shared by all RISC-V 32-bit kernels.
-//! This file provides the board-specific Rust dispatcher — ESP32-C3/C6
-//! uses the SysTimer mapped to CPU interrupt line 1 (not standard CLINT
-//! mcause 7).
+//! This file provides the board-specific Rust dispatcher — ESP32-C3
+//! uses the SysTimer mapped to CPU interrupt line 1.
 
 #[allow(unused_imports)]
 use arch::{TaskContext, TickTimer};
@@ -22,32 +21,13 @@ use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKE
 
 #[allow(dead_code)]
 const MCAUSE_INTERRUPT_BIT: usize = 1 << 31;
-/// ESP32-C6: systimer runs on CPU interrupt line 5.
+/// ESP32-C3: SYSTIMER fires on CPU interrupt line 1.
 #[allow(dead_code)]
-const SYSTIMER_CPU_INT_CODE: usize = 5;
-const MCAUSE_MACHINE_EXTERNAL: usize = 11;
+const SYSTIMER_CPU_INT_CODE: usize = 1;
 #[allow(dead_code)]
 const MCAUSE_ECALL_UMODE: usize = 8;
 #[allow(dead_code)]
 const MCAUSE_ECALL_MMODE: usize = 11;
-
-static mut IRQ_CODE_EXT11_COUNT: u32 = 0;
-static mut IRQ_CODE_1_COUNT: u32 = 0;
-static mut IRQ_CODE_2_COUNT: u32 = 0;
-static mut IRQ_OTHER_COUNT: u32 = 0;
-static mut IRQ_LAST_CODE: u32 = 0;
-
-pub fn irq_diag() -> (u32, u32, u32, u32, u32) {
-    unsafe {
-        (
-            IRQ_CODE_EXT11_COUNT,
-            IRQ_CODE_1_COUNT,
-            IRQ_CODE_2_COUNT,
-            IRQ_OTHER_COUNT,
-            IRQ_LAST_CODE,
-        )
-    }
-}
 
 /// Program PMP entries for the currently selected task.
 #[cfg(target_arch = "riscv32")]
@@ -95,27 +75,11 @@ pub unsafe extern "C" fn _veer_trap_dispatch(ctx: *mut TaskContext) -> *mut Task
 
 #[cfg(target_arch = "riscv32")]
 unsafe fn handle_interrupt(ctx: *mut TaskContext, code: usize) -> *mut TaskContext {
-    unsafe {
-        IRQ_LAST_CODE = code as u32;
-        match code {
-            MCAUSE_MACHINE_EXTERNAL => IRQ_CODE_EXT11_COUNT = IRQ_CODE_EXT11_COUNT.wrapping_add(1),
-            1 => IRQ_CODE_1_COUNT = IRQ_CODE_1_COUNT.wrapping_add(1),
-            2 => IRQ_CODE_2_COUNT = IRQ_CODE_2_COUNT.wrapping_add(1),
-            _ => IRQ_OTHER_COUNT = IRQ_OTHER_COUNT.wrapping_add(1),
-        }
-    }
     match code {
         SYSTIMER_CPU_INT_CODE => handle_timer_tick(ctx),
         _ => {
             // Dispatch WiFi / BLE / other blob-registered ISRs.
-            if !soc_esp32::wifi_os_adapter::wifi_isr_dispatch(code) {
-                // No handler registered — mask this line to prevent
-                // infinite re-entry on level-triggered interrupts.
-                let mask = 1u32 << code;
-                unsafe {
-                    core::arch::asm!("csrc mie, {0}", in(reg) mask, options(nomem, nostack));
-                }
-            }
+            soc_esp32::wifi_os_adapter::wifi_isr_dispatch(code);
             ctx
         }
     }

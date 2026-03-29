@@ -15,7 +15,7 @@ use microkernel::task::Scheduler;
 use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT};
+use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // mcause constants (standard RISC-V privilege spec)
@@ -134,6 +134,8 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
             let fat32 = unsafe { &mut *FAT32.0.get() };
             let mounts = unsafe { &mut *MOUNTS.0.get() };
             let input = unsafe { &mut *INPUT.0.get() };
+            let drivers = unsafe { &mut *DRIVERS.0.get() };
+            let audit = unsafe { &mut *AUDIT.0.get() };
 
             let action = unsafe {
                 dispatch::dispatch(
@@ -152,6 +154,8 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                     fat32,
                     mounts,
                     input,
+                    drivers,
+                    audit,
                     crate::console_write_byte,
                     crate::console_read_byte,
                 )

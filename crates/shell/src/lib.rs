@@ -109,6 +109,12 @@ pub struct ShellEnv {
     pub reboot: Option<fn()>,
     /// Halt / power off the system. Should not return.
     pub shutdown: Option<fn()>,
+
+    // ── Security / capability callbacks ───────────────────────────────
+    /// Handle `caps <subcommand> <args>` — show/drop process capabilities.
+    pub caps_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+    /// Handle `auditlog <subcommand>` — display security audit events.
+    pub auditlog_cmd: Option<fn(&str, &mut dyn core::fmt::Write)>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -276,6 +282,8 @@ impl Shell {
             "hwinfo" | "devinfo" => self.cmd_hwinfo(con),
             "temp" => self.cmd_temp(con),
             "dmesg" => self.cmd_dmesg(con),
+            "caps" => self.cmd_caps(con, args),
+            "auditlog" | "audit" => self.cmd_auditlog(con, args),
             "reboot" => self.cmd_reboot(con),
             "shutdown" | "halt" | "poweroff" => self.cmd_shutdown(con),
             "exit" | "quit" => {
@@ -345,6 +353,10 @@ impl Shell {
         let _ = writeln!(con, "  hwinfo     Hardware info (board/memory/thermal)");
         let _ = writeln!(con, "  temp       SoC temperature readout");
         let _ = writeln!(con, "  dmesg      Kernel log buffer");
+        let _ = writeln!(con, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} security \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+        let _ = writeln!(con, "  caps       Process capabilities (list/show/drop)");
+        let _ = writeln!(con, "  auditlog   Security audit event log");
+        let _ = writeln!(con, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
         let _ = writeln!(con, "  reboot     Reboot the system");
         let _ = writeln!(con, "  shutdown   Halt / power off");
         let _ = writeln!(con, "  exit       Exit the shell");
@@ -1069,6 +1081,26 @@ impl Shell {
         match self.env.dmesg {
             Some(f) => f(con),
             None => { let _ = writeln!(con, "dmesg: no kernel log available"); }
+        }
+    }
+
+    fn cmd_auditlog<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        match self.env.auditlog_cmd {
+            Some(f) => f(args, con as &mut dyn core::fmt::Write),
+            None => { let _ = writeln!(con, "auditlog: not available"); }
+        }
+    }
+
+    fn cmd_caps<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        match self.env.caps_cmd {
+            Some(f) => {
+                let (sub, rest) = match args.find(' ') {
+                    Some(i) => (&args[..i], args[i + 1..].trim()),
+                    None => (args, ""),
+                };
+                f(sub, rest, con as &mut dyn core::fmt::Write);
+            }
+            None => { let _ = writeln!(con, "caps: not available"); }
         }
     }
 
@@ -2053,6 +2085,26 @@ messages, driver init, interrupts, errors, and hardware detection.
 The log is a fixed-size ring buffer (newest entries overwrite oldest).
 
 See also: sysinfo, hwinfo, drivers"),
+
+    ("caps", "\
+CAPS(1) — Process capability management
+
+Show, inspect, or drop per-process capabilities.
+
+Usage:
+  caps             List all processes with capability summary
+  caps <pid>       Show detailed capabilities for process <pid>
+  caps drop <pid> <cap>  Irrevocably drop a capability from a process
+
+Capability names: task_basic, mem, time, sync, ipc, channel, poll,
+  console_io, fs, net, spawn_thread, spawn_process, user_admin,
+  driver, mount, hw, crypto, cap_admin
+
+Capabilities restrict which syscall groups a process may invoke.
+Once dropped, a capability cannot be restored — the process and
+its children are permanently denied access to those syscalls.
+
+See also: tasks, sysinfo"),
 
     ("reboot", "\
 REBOOT(1) — Reboot the system

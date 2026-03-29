@@ -18,3 +18,4 @@ ramfs-small = []
 [dependencies]
 bitflags.workspace = true
 arch = { path = "../arch" }
+crypto = { path = "../crypto" }

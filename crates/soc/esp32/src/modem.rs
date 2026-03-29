@@ -286,6 +286,53 @@ pub const ZB_INT_ED_DONE: u32 = 1 << 3;
 pub const ZB_INT_ACK_RCVD: u32 = 1 << 4;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PMU registers (power management unit — modem clock gating)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PMU_BASE: usize = 0x600B_0000;
+/// PMU HP-active ICG modem code — bits [31:30].
+const PMU_HP_ACTIVE_ICG_MODEM: usize = PMU_BASE + 0x0C;
+/// PMU HP-modem ICG modem code — bits [31:30].
+const PMU_HP_MODEM_ICG_MODEM: usize = PMU_BASE + 0x40;
+/// PMU HP-sleep ICG modem code — bits [31:30].
+const PMU_HP_SLEEP_ICG_MODEM: usize = PMU_BASE + 0x74;
+/// PMU immediate sleep sysclk — bit 28 = update_dig_icg_switch.
+const PMU_IMM_SLEEP_SYSCLK: usize = PMU_BASE + 0xD0;
+/// PMU immediate modem ICG — bit 31 = update_dig_icg_modem_en.
+const PMU_IMM_MODEM_ICG: usize = PMU_BASE + 0xDC;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEM_SYSCON register offsets (from MODEM_SYSCON_BASE = 0x600A_9800)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// State-based clock gating for modem subsystems.
+const MODEM_SYSCON_CLK_CONF_POWER_ST: usize = MODEM_SYSCON_BASE + 0x0C;
+/// WiFi BB/FE/MAC clock enables.
+const MODEM_SYSCON_CLK_CONF1: usize = MODEM_SYSCON_BASE + 0x14;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEM_LPCON register offsets (from MODEM_LPCON_BASE = 0x600A_F000)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// WiFi LP clock source selection + divider.
+const MODEM_LPCON_WIFI_LP_CLK_CONF: usize = MODEM_LPCON_BASE + 0x0C;
+/// I2C master clock config — bit 0 = sel_160m.
+const MODEM_LPCON_I2C_MST_CLK_CONF: usize = MODEM_LPCON_BASE + 0x10;
+/// Main clock enables — bits: 0=wifipwr, 1=coex, 2=i2c_mst, 3=lp_timer.
+const MODEM_LPCON_CLK_CONF: usize = MODEM_LPCON_BASE + 0x18;
+/// State-based clock gating for LP modem subsystems.
+const MODEM_LPCON_CLK_CONF_POWER_ST: usize = MODEM_LPCON_BASE + 0x20;
+/// MODEM_LPCON reset config — bit 0=rst_wifipwr, 1=rst_coex, 2=rst_i2c_mst, 3=rst_lp_timer.
+const MODEM_LPCON_RST_CONF: usize = MODEM_LPCON_BASE + 0x24;
+
+/// MODEM_SYSCON CLK_CONF_FORCE_ON — force clocks on (bypass state gating).
+const MODEM_SYSCON_CLK_CONF_FORCE_ON: usize = MODEM_SYSCON_BASE + 0x08;
+/// MODEM_SYSCON CLK_CONF1_FORCE_ON — force WiFi BB/FE/MAC clocks on.
+const MODEM_SYSCON_CLK_CONF1_FORCE_ON: usize = MODEM_SYSCON_BASE + 0x18;
+/// MODEM_LPCON CLK_CONF_FORCE_ON — force LP clocks on.
+const MODEM_LPCON_CLK_CONF_FORCE_ON: usize = MODEM_LPCON_BASE + 0x1C;
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MMIO helpers for the modem subsystem
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -307,6 +354,81 @@ pub fn enable_all_clocks() {
             MODEM_LPCON_BASE + MODEM_CLK_EN,
             clk | CLK_WIFI_EN | CLK_BLE_EN | CLK_IEEE802154_EN | CLK_FE_EN,
         );
+    }
+}
+
+/// Initialise the radio clock infrastructure.
+///
+/// This mirrors esp-hal's `init_clocks()` — it configures PMU ICG modem
+/// codes, MODEM_SYSCON / MODEM_LPCON power-state clock maps, and the LP
+/// clock sources.  Must be called before `register_chipv7_phy()`.
+pub fn init_radio_clocks() {
+    unsafe {
+        // ── PMU: set ICG modem codes ───────────────────────────────
+        // sleep=0, modem=1, active=2 (bits [31:30])
+        mmio_write(PMU_HP_SLEEP_ICG_MODEM, 0 << 30);
+        mmio_write(PMU_HP_MODEM_ICG_MODEM, 1 << 30);
+        mmio_write(PMU_HP_ACTIVE_ICG_MODEM, 2 << 30);
+
+        // Trigger immediate update of ICG switch + modem enable.
+        mmio_write(PMU_IMM_SLEEP_SYSCLK, 1 << 28);  // update_dig_icg_switch
+        mmio_write(PMU_IMM_MODEM_ICG, 1 << 31);      // update_dig_icg_modem_en
+
+        // ── MODEM_SYSCON: state-based clock gating ─────────────────
+        // clk_zb/fe/bt/wifi_st_map = 6, modem_peri = 4, modem_apb = 6
+        mmio_write(MODEM_SYSCON_CLK_CONF_POWER_ST, 0x6466_6600);
+
+        // ── MODEM_SYSCON: force ALL clocks on (bypass state gating) ─
+        mmio_write(MODEM_SYSCON_CLK_CONF_FORCE_ON, 0xFFFF_FFFF);
+        mmio_write(MODEM_SYSCON_CLK_CONF1_FORCE_ON, 0x00FF_FFFF);
+
+        // ── MODEM_LPCON: state-based clock gating ──────────────────
+        mmio_write(MODEM_LPCON_CLK_CONF_POWER_ST, 0x6666_0000);
+
+        // ── MODEM_LPCON: force clocks on ───────────────────────────
+        mmio_write(MODEM_LPCON_CLK_CONF_FORCE_ON, 0xFFFF_FFFF);
+
+        // ── MODEM_LPCON: WiFi LP clock — enable all sources, div=0 ─
+        mmio_write(MODEM_LPCON_WIFI_LP_CLK_CONF, 0x0F);
+
+        // ── MODEM_LPCON: enable wifipwr clock ──────────────────────
+        let lp_clk = mmio_read(MODEM_LPCON_CLK_CONF);
+        mmio_write(MODEM_LPCON_CLK_CONF, lp_clk | 0x0F); // all 4 enables
+    }
+}
+
+/// Enable the PHY I2C master clock (needed before `register_chipv7_phy`).
+///
+/// Mirrors esp-hal's `enable_phy()` — turns on the I2C master bus clock
+/// at 160 MHz so the PHY calibration blob can program RF registers.
+pub fn enable_phy_clock() {
+    unsafe {
+        // Deassert I2C master reset (bit 2 of rst_conf).
+        let rst = mmio_read(MODEM_LPCON_RST_CONF);
+        mmio_write(MODEM_LPCON_RST_CONF, rst & !(1 << 2));
+
+        // MODEM_LPCON CLK_CONF: set bit 2 = clk_i2c_mst_en
+        let lp_clk = mmio_read(MODEM_LPCON_CLK_CONF);
+        mmio_write(MODEM_LPCON_CLK_CONF, lp_clk | (1 << 2));
+
+        // MODEM_LPCON I2C_MST_CLK_CONF: set bit 0 = sel_160m
+        let i2c = mmio_read(MODEM_LPCON_I2C_MST_CLK_CONF);
+        mmio_write(MODEM_LPCON_I2C_MST_CLK_CONF, i2c | 1);
+    }
+}
+
+/// Enable all WiFi BB / FE / MAC clocks via MODEM_SYSCON.
+///
+/// Mirrors esp-hal's `enable_wifi()`.  Call after PHY init but before
+/// `esp_wifi_init_internal()`.
+pub fn enable_wifi_clocks() {
+    unsafe {
+        // MODEM_SYSCON CLK_CONF1: bits 0-23 = all WiFi BB/FE/MAC/BT clocks
+        mmio_write(MODEM_SYSCON_CLK_CONF1, 0x00FF_FFFF);
+
+        // MODEM_LPCON CLK_CONF: set bits 0 (wifipwr) + 1 (coex)
+        let lp_clk = mmio_read(MODEM_LPCON_CLK_CONF);
+        mmio_write(MODEM_LPCON_CLK_CONF, lp_clk | 0x03);
     }
 }
 

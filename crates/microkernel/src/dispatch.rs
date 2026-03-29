@@ -16,7 +16,7 @@ use crate::futex::FutexTable;
 use crate::input::InputSubsystem;
 use crate::ipc::{Ipc, Message};
 use crate::poll::PollTable;
-use crate::process::ProcessTable;
+use crate::process::{ProcessTable, ProcessCaps};
 use crate::ramfs::RamFs;
 use crate::socket::SocketTable;
 use crate::task::{BlockReason, Scheduler, TaskState};
@@ -25,6 +25,7 @@ use crate::vfs::{InodeTable, InodeKind, FileDescriptor, OpenFlags, DirEntry, Sta
                  MountTable, FsType,
                  MAX_FDS, NO_INODE, ROOT_INODE, SEEK_SET, SEEK_CUR, SEEK_END};
 use crate::alloc::Heap;
+use crate::audit::{AuditLog, AuditEvent};
 use crate::syscall::*;
 
 /// Result of a syscall dispatch — tells the trap handler what to do next.
@@ -113,6 +114,7 @@ pub unsafe fn dispatch(
     mounts: &mut MountTable,
     input: &mut InputSubsystem,
     drivers: &mut DriverRegistry,
+    audit: &mut AuditLog,
     console_write: fn(u8),
     console_read: fn() -> u8,
 ) -> SyscallAction {
@@ -128,6 +130,122 @@ pub unsafe fn dispatch(
     let a2 = c.get_arg(2);
     let a3 = c.get_arg(3);
     let a4 = c.get_arg(4);
+
+    // ── Capability enforcement ──────────────────────────────────
+    // Map syscall number → required ProcessCaps bit. If the calling
+    // process lacks the required cap, the syscall is denied immediately
+    // with a0 = usize::MAX (EPERM equivalent).
+    let required_cap = match nr {
+        // Task basics: yield, exit, task_id, priority, count, tls
+        SYS_YIELD | SYS_EXIT | SYS_TASK_ID | SYS_TASK_PRIORITY
+        | SYS_TASK_COUNT | SYS_TLS_GET | SYS_TLS_SET
+            => ProcessCaps::TASK_BASIC,
+
+        // Thread/process spawning
+        SYS_SPAWN | SYS_JOIN      => ProcessCaps::SPAWN_THREAD,
+        SYS_SPAWN_PROCESS
+        | SYS_PROCESS_ID | SYS_THREAD_COUNT
+            => ProcessCaps::SPAWN_PROCESS,
+
+        // IPC
+        SYS_IPC_SEND | SYS_IPC_RECV | SYS_IPC_POLL
+            => ProcessCaps::IPC,
+
+        // Console I/O
+        SYS_WRITE_BYTE | SYS_WRITE_BUF | SYS_READ_BYTE
+            => ProcessCaps::CONSOLE_IO,
+
+        // Time
+        SYS_TICK | SYS_SLEEP => ProcessCaps::TIME,
+
+        // Memory
+        SYS_ALLOC | SYS_FREE | SYS_MEM_REGION_COUNT | SYS_MEM_REGION_INFO
+            => ProcessCaps::MEM,
+
+        // Synchronization
+        SYS_FUTEX_WAIT | SYS_FUTEX_WAKE => ProcessCaps::SYNC,
+
+        // Channels
+        SYS_CHAN_CREATE | SYS_CHAN_SEND | SYS_CHAN_RECV
+        | SYS_CHAN_CLOSE | SYS_CHAN_POLL
+            => ProcessCaps::CHANNEL,
+
+        // Poll
+        SYS_POLL_SET | SYS_POLL_WAIT => ProcessCaps::POLL,
+
+        // Sockets
+        SYS_SOCKET | SYS_BIND | SYS_LISTEN | SYS_ACCEPT
+        | SYS_CONNECT | SYS_SOCK_SEND | SYS_SOCK_RECV | SYS_SOCK_CLOSE
+            => ProcessCaps::NET,
+
+        // User administration
+        SYS_GETUID | SYS_GETGID  => ProcessCaps::TASK_BASIC, // read-only, always allowed
+        SYS_SETUID | SYS_LOGIN | SYS_LOGOUT
+            => ProcessCaps::USER_ADMIN,
+
+        // Filesystem (read/write/stat)
+        SYS_OPEN | SYS_CLOSE | SYS_READ | SYS_WRITE | SYS_SEEK
+        | SYS_STAT | SYS_FSTAT | SYS_MKDIR | SYS_UNLINK
+        | SYS_READDIR | SYS_TRUNCATE | SYS_RENAME
+        | SYS_GETCWD | SYS_CHDIR
+            => ProcessCaps::FS,
+
+        // Mount / unmount (privileged)
+        SYS_MOUNT | SYS_UMOUNT => ProcessCaps::MOUNT,
+
+        // Driver MMIO / IRQ
+        SYS_DRV_MMIO_READ32 | SYS_DRV_MMIO_WRITE32
+        | SYS_DRV_IRQ_WAIT | SYS_DRV_IRQ_ACK
+        | SYS_DRV_REGISTER | SYS_DRV_LOG
+            => ProcessCaps::DRIVER,
+
+        // Hardware GPIO / I2C / SPI / sensors
+        SYS_GPIO_SET_MODE | SYS_GPIO_READ | SYS_GPIO_WRITE | SYS_GPIO_SET_PULL
+        | SYS_I2C_WRITE | SYS_I2C_READ | SYS_SPI_TRANSFER
+        | SYS_GET_TEMP | SYS_HW_INFO
+            => ProcessCaps::HW,
+
+        // Capability management
+        SYS_CAP_GET => ProcessCaps::TASK_BASIC,  // read-only, always allowed
+        SYS_CAP_DROP | SYS_CAP_SET_CHILD
+            => ProcessCaps::CAP_ADMIN,
+
+        // Audit syscalls — read-only, always allowed
+        SYS_AUDIT_READ | SYS_AUDIT_COUNT => ProcessCaps::TASK_BASIC,
+
+        // Debug / platform info — always allowed
+        SYS_PANIC | SYS_PLATFORM_NAME => ProcessCaps::TASK_BASIC,
+
+        // Unknown syscall — require no cap (will be rejected by match below)
+        _ => ProcessCaps::TASK_BASIC,
+    };
+
+    // Look up current process and check capability.
+    {
+        let cur = sched.current;
+        if cur < sched.tasks.len() {
+            let pid = sched.tasks[cur].process_id;
+            if pid < crate::process::MAX_PROCESSES {
+                let process_caps = processes.processes[pid].caps;
+                if !process_caps.contains(required_cap) {
+                    // Audit: log capability denial.
+                    let uid = processes.processes[pid].uid;
+                    audit.log(
+                        sched.ticks as u32,
+                        pid as u8,
+                        uid as u8,
+                        AuditEvent::CapDenied,
+                        nr as u32,
+                        required_cap.bits(),
+                    );
+                    // Capability denied — return EPERM (usize::MAX).
+                    c.set_ret(0, usize::MAX);
+                    c.set_ret(1, 0);
+                    return SyscallAction::Resume;
+                }
+            }
+        }
+    }
 
     match nr {
         // ── Task control ────────────────────────────────────────
@@ -1745,6 +1863,101 @@ pub unsafe fn dispatch(
             SyscallAction::Resume
         }
 
+        // ── Capability management ───────────────────────────────
+        SYS_CAP_GET => {
+            // Return current process capability bits.
+            let cur = sched.current;
+            let pid = sched.tasks[cur].process_id;
+            if pid < crate::process::MAX_PROCESSES {
+                c.set_ret(0, processes.processes[pid].caps.bits() as usize);
+            } else {
+                c.set_ret(0, ProcessCaps::all().bits() as usize);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_CAP_DROP => {
+            // Irrevocably drop capabilities from own process.
+            let cur = sched.current;
+            let pid = sched.tasks[cur].process_id;
+            let to_drop = ProcessCaps::from_bits_truncate(a0 as u32);
+            if pid < crate::process::MAX_PROCESSES {
+                let uid = processes.processes[pid].uid;
+                processes.drop_caps(pid, to_drop);
+                audit.log(
+                    sched.ticks as u32, pid as u8, uid as u8,
+                    AuditEvent::CapDropped, to_drop.bits(),
+                    processes.processes[pid].caps.bits(),
+                );
+                c.set_ret(0, 0);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_CAP_SET_CHILD => {
+            // Set caps on a child process (must be subset of own caps).
+            let child_pid = a0;
+            let new_caps = ProcessCaps::from_bits_truncate(a1 as u32);
+
+            let cur = sched.current;
+            let parent_pid = sched.tasks[cur].process_id;
+
+            if parent_pid >= crate::process::MAX_PROCESSES
+                || child_pid >= crate::process::MAX_PROCESSES
+            {
+                c.set_ret(0, usize::MAX);
+            } else {
+                let parent_caps = processes.processes[parent_pid].caps;
+                let child = &processes.processes[child_pid];
+                // Verify: child is our child, and requested caps don't exceed our own.
+                if child.parent_pid == parent_pid && new_caps.difference(parent_caps).is_empty() {
+                    processes.processes[child_pid].caps = new_caps;
+                    let uid = processes.processes[parent_pid].uid;
+                    audit.log(
+                        sched.ticks as u32, parent_pid as u8, uid as u8,
+                        AuditEvent::CapSetChild, child_pid as u32, new_caps.bits(),
+                    );
+                    c.set_ret(0, 0);
+                } else {
+                    c.set_ret(0, usize::MAX);
+                }
+            }
+            SyscallAction::Resume
+        }
+
+        // ── Audit log ─────────────────────────────────────────────
+        SYS_AUDIT_COUNT => {
+            c.set_ret(0, audit.total());
+            c.set_ret(1, audit.len());
+            SyscallAction::Resume
+        }
+
+        SYS_AUDIT_READ => {
+            // a0 = start index, a1 = dest ptr, a2 = max count
+            let start = a0;
+            let count = audit.len();
+            let to_read = if a2 < count.saturating_sub(start) {
+                a2
+            } else {
+                count.saturating_sub(start)
+            };
+            // Validate pointer (16 bytes per AuditEntry)
+            if to_read > 0 && check_user_ptr(sched, processes, a1, to_read * 16, MemPerms::WRITE) {
+                let dst = a1 as *mut crate::audit::AuditEntry;
+                for i in 0..to_read {
+                    if let Some(entry) = audit.get(start + i) {
+                        unsafe { dst.add(i).write(*entry); }
+                    }
+                }
+                c.set_ret(0, to_read);
+            } else {
+                c.set_ret(0, 0);
+            }
+            SyscallAction::Resume
+        }
+
         // ── Unknown ─────────────────────────────────────────────
         _ => {
             // Unknown syscall — return -1 (usize::MAX) in ret0.
@@ -1821,19 +2034,9 @@ fn dev_read(major: u8, minor: u8, buf: &mut [u8], console_read: fn() -> u8, inpu
                 0
             }
         }
-        // /dev/random — simple PRNG
+        // /dev/random — cryptographic PRNG (ChaCha20-DRBG)
         (0, 3) => {
-            // Very simple xorshift32 PRNG — not cryptographic.
-            static mut PRNG_STATE: u32 = 0xDEAD_BEEF;
-            for b in buf.iter_mut() {
-                unsafe {
-                    PRNG_STATE ^= PRNG_STATE << 13;
-                    PRNG_STATE ^= PRNG_STATE >> 17;
-                    PRNG_STATE ^= PRNG_STATE << 5;
-                    *b = PRNG_STATE as u8;
-                }
-            }
-            buf.len()
+            crate::system_rng_fill(buf)
         }
         // /dev/keyboard — read ASCII bytes from keyboard queue
         (1, 0) => input.kbd_read(buf),

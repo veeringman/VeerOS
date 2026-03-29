@@ -915,157 +915,422 @@ qemu-system-x86_64 -M q35 -cpu host -enable-kvm -m 1G -smp 4 \
 ```
 
 ## Phase 8 — Security Architecture
-_Design the security model as a core OS primitive, not a bolt-on. Every subsystem respects these boundaries. Feature-gated tiers: `sec-base` (always on), `sec-sandbox`, `sec-crypto`, `sec-verified`._
+_Security-first design — capability-based access, isolation domains, hybrid PQC-ready crypto, secure boot chain, extensible security model. Every subsystem respects these boundaries. Scales from bare-metal MCU (ESP32) to clustered systems, VMs, containers, routers/gateways, firewalls, quantum coprocessors, and AI accelerators/ASICs. Feature-gated tiers: `sec-base` (always on), `sec-sandbox`, `sec-crypto`, `sec-crypto-pqc`, `sec-verified`, `sec-network`, `sec-hw`._
 
 ### 8A — Capability-Based Access Control (Core)
-_The foundation — every resource access requires a capability token. No ambient authority._
+_The foundation — every resource access requires an unforgeable capability token. No ambient authority. Zero-cost on `dist-minimal` (capabilities compile to no-op checks when `sec-base` is the only tier). Scales from 32-slot tables on ESP32 to 4096-slot tables on x86-64 cluster nodes._
 
-- [ ] **`Capability` type** — unforgeable kernel-issued token: `{ id: u32, resource: ResourceKind, rights: Rights, owner: ProcessId }`
-- [ ] **`ResourceKind` enum** — `Memory(region)`, `IpcPort(id)`, `Interrupt(line)`, `MmioRegion(base,size)`, `Device(driver_id)`, `Socket(handle)`, `File(path)`, `ProcessControl(pid)`, `CryptoKey(key_id)`, `Quantum(qpu_id)`, `AiModel(model_id)`, `AiAccelerator(backend_id)`
-- [ ] **`Rights` bitflags** — `READ`, `WRITE`, `EXECUTE`, `GRANT` (can delegate to child), `REVOKE`, `MAP`, `SEND`, `RECV`, `ADMIN`
-- [ ] **Capability table** — per-process fixed array `[Option<Capability>; MAX_CAPS_PER_PROCESS]` (32–64 slots)
-- [ ] **`SYS_CAP_CREATE` syscall** — kernel mints a new capability (root/parent only)
-- [ ] **`SYS_CAP_GRANT` syscall** — delegate a capability (with optional rights restriction) from parent → child process
+#### Capability Primitives
+- [ ] **`Capability` type** — unforgeable kernel-issued token: `{ id: u32, resource: ResourceKind, rights: Rights, owner: ProcessId, issuer: ProcessId, generation: u16, expiry: Option<u64> }`
+- [ ] **`ResourceKind` enum** — comprehensive resource taxonomy:
+  - **Core:** `Memory(region)`, `IpcPort(id)`, `Interrupt(line)`, `MmioRegion(base,size)`, `Device(driver_id)`, `Socket(handle)`, `File(inode_id)`, `ProcessControl(pid)`
+  - **Crypto:** `CryptoKey(key_id)`, `CryptoEngine(hw_id)` (for hardware AES/SHA accelerator access)
+  - **Quantum:** `Quantum(qpu_id)`, `QuantumCircuit(job_id)`
+  - **AI:** `AiModel(model_id)`, `AiAccelerator(backend_id)`, `NpuSlice(npu_id, partition)`
+  - **Network:** `NetworkInterface(nic_id)`, `FirewallRule(rule_id)`, `VpnTunnel(tunnel_id)`, `NetworkNamespace(ns_id)`, `PacketFilter(chain_id)`
+  - **Isolation:** `Container(container_id)`, `MicroVM(vm_id)`, `Domain(domain_id)`
+  - **Hardware:** `GpioPin(pin)`, `SpiBus(bus_id)`, `I2cBus(bus_id)`, `DmaChannel(ch_id)`, `Accelerator(asic_id)`, `PcieFunction(bdf)`
+  - **Cluster:** `ClusterNode(node_id)`, `DistributedLock(lock_id)`, `ServiceEndpoint(svc_id)`
+- [ ] **`Rights` bitflags** — `READ`, `WRITE`, `EXECUTE`, `GRANT` (can delegate to child), `REVOKE`, `MAP`, `SEND`, `RECV`, `ADMIN`, `CONFIGURE`, `MONITOR`, `PASSTHROUGH` (DMA/device passthrough)
+- [ ] **Capability table** — per-process; size selected by target: `[Option<Capability>; 32]` (ESP32), `[Option<Capability>; 64]` (RPi), `[Option<Capability>; 256]` (x86-64), `[Option<Capability>; 4096]` (cluster node)
+- [ ] **Generation counter** — prevents use-after-revoke: capability ID + generation must match; stale caps instantly rejected
+
+#### Capability Syscalls
+- [ ] **`SYS_CAP_CREATE` syscall** — kernel mints a new capability (root/parent only); specify resource, rights, optional expiry
+- [ ] **`SYS_CAP_GRANT` syscall** — delegate capability (with optional rights restriction + time-to-live) from parent → child process
 - [ ] **`SYS_CAP_REVOKE` syscall** — revoke a capability from a process (cascading: revokes all delegated children)
-- [ ] **`SYS_CAP_QUERY` syscall** — list capabilities held by calling process
+- [ ] **`SYS_CAP_QUERY` syscall** — list capabilities held by calling process; filter by `ResourceKind`
+- [ ] **`SYS_CAP_INSPECT` syscall** — introspect a capability: resource, rights, issuer, expiry (requires `MONITOR` right on domain)
+- [ ] **`SYS_CAP_TRANSFER` syscall** — atomically move a capability between processes (one-shot, receiver must accept)
+- [ ] **`SYS_CAP_SEAL` syscall** — seal a capability: remove `GRANT` right permanently (cannot be re-delegated)
+
+#### Enforcement
 - [ ] **Enforcement in syscall dispatcher** — every resource-accessing syscall checks capability table before proceeding; deny = `EPERM`
 - [ ] **Boot capabilities** — init/root process receives full capability set; spawned processes inherit only what parent grants
 - [ ] **Capability-aware IPC** — send capabilities across process boundaries via IPC (cap transfer in message metadata)
+- [ ] **Time-bounded capabilities** — optional expiry tick; kernel auto-revokes expired caps on next access check
+- [ ] **Delegation depth limit** — configurable max delegation chain length (default 8); prevents unbounded cap propagation
+- [ ] **Hardware-backed cap storage (future)** — on targets with TrustZone/SGX/PMP ePMP, store cap table in protected memory
 
 ### 8B — Isolation Domains (Sandboxing / Containers / MicroVMs)
-_Hierarchical isolation levels — from lightweight sandboxes to hardware-enforced virtual machines._
+_Hierarchical isolation levels — from lightweight sandboxes on ESP32 to hardware-enforced MicroVMs on x86-64 KVM. Supports network namespace isolation for router/firewall profiles, accelerator isolation for ASIC/QPU, and multi-tenant workload separation for cluster deployments._
 
 #### Domain Model
-- [ ] **`IsolationDomain` struct** — `{ id, level: IsolationLevel, parent: Option<DomainId>, process_set, resource_caps, memory_budget, cpu_budget }`
-- [ ] **`IsolationLevel` enum** — `Shared` (soft, same address space), `Sandbox` (restricted caps, no raw HW access), `Container` (separate memory region + namespace), `MicroVM` (hardware-enforced: PMP/MPU/hypervisor)
-- [ ] **Domain hierarchy** — domains nest: MicroVM contains Containers, Containers contain Sandboxes
+- [ ] **`IsolationDomain` struct** — `{ id, level: IsolationLevel, parent: Option<DomainId>, process_set, resource_caps, cap_ceiling: Rights, memory_budget, cpu_budget, net_namespace: Option<NetNsId>, fs_root: Option<InodeId> }`
+- [ ] **`IsolationLevel` enum** — `Shared` (soft, same address space), `Sandbox` (restricted caps, no raw HW access), `Container` (separate memory region + namespace), `MicroVM` (hardware-enforced: PMP/MPU/hypervisor), `SecureEnclave` (TrustZone/SGX)
+- [ ] **Domain hierarchy** — domains nest: MicroVM contains Containers, Containers contain Sandboxes; flat on embedded (`Sandbox` only on ESP32)
 - [ ] **`SYS_DOMAIN_CREATE` / `SYS_DOMAIN_DESTROY`** — create/tear down an isolation domain (requires `ADMIN` capability)
 - [ ] **`SYS_DOMAIN_ENTER`** — spawn a process inside a domain (inherits domain restrictions)
-- [ ] **`SYS_DOMAIN_QUERY`** — introspect domain's resource usage and policy
+- [ ] **`SYS_DOMAIN_QUERY`** — introspect domain's resource usage, policy, and contained processes
+- [ ] **`SYS_DOMAIN_MIGRATE`** — live-migrate a container/MicroVM between cluster nodes (requires `ClusterNode` + `Domain` caps)
 
-#### Sandbox (Software Isolation)
+#### Sandbox (Software Isolation — All Targets)
 - [ ] **Syscall filter** — per-domain allowlist of permitted syscall numbers (like seccomp-BPF); deny returns `EPERM`
-- [ ] **Capability ceiling** — domain defines max rights any process within can hold (even if parent granted more)
+- [ ] **Capability ceiling** — domain defines max rights any process within can hold (even if parent granted more); prevents privilege escalation
 - [ ] **Namespace isolation** — sandboxed processes see only IPC ports / resources within their domain
-- [ ] **Resource quotas** — memory ceiling, CPU time budget, max processes, max open handles per domain
-- [ ] **`seccomp`-style profiles** — predefined profiles: `io-only` (read/write/yield), `compute-only` (no IPC/IO), `network-only`, `full`
+- [ ] **Resource quotas** — memory ceiling, CPU time budget, max processes, max open handles per domain; enforced at syscall boundary
+- [ ] **`seccomp`-style profiles** — predefined: `io-only` (read/write/yield), `compute-only` (no IPC/IO), `network-only`, `sensor-only` (GPIO/I2C/SPI read), `full`
+- [ ] **ESP32/MCU sandbox** — PMP-backed: 2 regions (code RX + data RW) per sandboxed task; remaining PMP entries guard kernel; minimal overhead
 
-#### Container (Memory-Isolated Workloads)
+#### Container (Memory-Isolated Workloads — RPi / x86-64 / RISC-V 64)
 - [ ] **Per-container memory region** — dedicated PMP/MPU region or page table ASID; processes inside can't access host memory
-- [ ] **Container namespaces** — PID namespace (PIDs internal to container), IPC namespace, network namespace (virtual NIC)
-- [ ] **Container image** — flat binary or ELF loaded into container's memory region at spawn
-- [ ] **Virtual filesystem stub** — per-container read-only `.rodata` slice for config/data; no global FS namespace leak
+- [ ] **Container namespaces** — PID namespace (PIDs internal to container), IPC namespace, network namespace (virtual NIC), mount namespace (private VFS root)
+- [ ] **Container image** — flat binary or ELF loaded into container's memory region at spawn; signature-verified (8D)
+- [ ] **Virtual filesystem per container** — per-container read-only `.rodata` slice for config/data; no global FS namespace leak; optional writable overlay in RAM
 - [ ] **Container lifecycle** — create → start → pause → resume → stop → destroy; state machine enforced in kernel
 - [ ] **Inter-container IPC** — only via explicit kernel-mediated channels with capabilities; no shared memory by default
+- [ ] **Container networking** — virtual NIC per container (veth-like); kernel bridges to host NIC or firewall chain; per-container IP address + routing table
+- [ ] **Container resource cgroups** — CPU shares, memory limits, I/O bandwidth limits per container (lightweight cgroup-like accounting)
+- [ ] **OCI-compatible image format (future)** — load container images from standard OCI bundles on FAT32/NVMe storage
 
-#### MicroVM (Hardware-Enforced Isolation) — Future / MMU Targets
-- [ ] **RISC-V H-extension support** — hypervisor extension (hgatp, VS/VU modes) for rv64 targets
-- [ ] **ARM VHE / EL2 support** — type-2 hypervisor on ARM64 (stage-2 page tables, VGIC)
-- [ ] **MicroVM descriptor** — virtual CPU count, memory size, device passthrough list, boot image
-- [ ] **Trap-and-emulate** — guest traps forwarded to host handler; minimal device model
-- [ ] **Device passthrough** — grant a MicroVM direct access to a physical MMIO device (e.g., SPI flash, radio)
-- [ ] **Lightweight VMM** — < 10K lines; no BIOS emulation; direct kernel boot into guest
+#### MicroVM (Hardware-Enforced Isolation — MMU Targets)
+- [ ] **RISC-V H-extension support** — hypervisor extension (hgatp, VS/VU modes) for rv64 targets; stage-2 page tables for guest physical → host physical
+- [ ] **ARM VHE / EL2 support** — type-2 hypervisor on ARM64 (stage-2 page tables, VGIC, virtual timer); RPi 4/5 as VM hosts
+- [ ] **x86-64 VMX support** — Intel VT-x: VMCS per guest, VMLAUNCH/VMRESUME, EPT (Extended Page Tables), I/O bitmap, MSR bitmap
+- [ ] **MicroVM descriptor** — virtual CPU count, memory size, device passthrough list, boot image, virtio device list
+- [ ] **Trap-and-emulate** — guest traps forwarded to host handler; minimal device model (serial + virtio-net + virtio-blk)
+- [ ] **Device passthrough** — grant a MicroVM direct access to a physical MMIO / PCIe device (e.g., NVMe, GPU, NIC); IOMMU/SMMU protection
+- [ ] **Lightweight VMM** — < 10K lines; no BIOS emulation; direct kernel boot into guest; VeerOS-on-VeerOS nesting
+- [ ] **Live migration (cluster)** — snapshot MicroVM state → transfer to another cluster node → resume; pre-copy memory migration
 
-### 8C — Cryptographic Framework (PQC-Ready)
-_Pluggable crypto with algorithm agility. Classical algorithms today, post-quantum drop-in tomorrow._
+#### Network Namespace Isolation (Router / Gateway / Firewall Profiles)
+- [ ] **`NetNamespace` struct** — isolated network stack instance: own interfaces, routing table, firewall rules, ARP/NDP cache, socket table
+- [ ] **Virtual interface pairs (veth)** — kernel-internal virtual Ethernet link connecting two namespaces; zero-copy packet forwarding
+- [ ] **Per-namespace routing table** — independent IP routing per namespace; enables VRF (Virtual Routing and Forwarding) for multi-tenant gateways
+- [ ] **Per-namespace firewall** — independent packet filter chain per namespace; `dist-firewall` profile runs each WAN/LAN zone in separate namespace
+- [ ] **Bridge/switch domain** — L2 bridge between virtual interfaces; VLAN tagging; MAC learning table (for switch/router profiles)
+- [ ] **Namespace-aware sockets** — `SYS_SOCKET` respects calling process's network namespace; cross-namespace only via explicit cap
+
+#### Accelerator / ASIC Isolation
+- [ ] **DMA isolation** — ensure accelerator DMA cannot access memory outside its granted region; IOMMU on x86-64/ARM, PMP-guarded on RISC-V, SoC-specific on ESP32
+- [ ] **Per-accelerator domain** — each ASIC/NPU/QPU runs inside an isolation domain; kernel mediates all data transfer
+- [ ] **Accelerator capability** — `Accelerator(asic_id)` with `EXECUTE`, `CONFIGURE`, `PASSTHROUGH` rights; prevents unauthorized firmware update or register access
+- [ ] **Side-channel mitigation** — flush accelerator caches/state between user switches; timing-independent result delivery
+- [ ] **Hot-plug/remove** — USB-attached accelerators (Coral, Hailo) can be securely enumerated, granted to a domain, and revoked on unplug
+
+### 8C — Cryptographic Framework (Hybrid PQC-Ready)
+_Pluggable crypto with algorithm agility. Hybrid approach: classical + post-quantum algorithms in parallel — secure if either holds. Hardware offload on capable SoCs. Scales from software-only SHA-256 on ESP32-C3 to AES-NI + AVX2 accelerated PQC on x86-64._
 
 #### Crypto Trait Layer (`crates/crypto/`)
 - [ ] **`crypto` crate** — `no_std`, `no_alloc` trait definitions; zero runtime cost when unused
-- [ ] **`Hash` trait** — `update(&[u8])`, `finalize() -> Digest`; implementors: SHA-256, SHA-3-256, BLAKE3
-- [ ] **`Kdf` trait** — key derivation: `derive(ikm, salt, info, len) -> [u8]`; HKDF-SHA256, HKDF-SHA3
-- [ ] **`Aead` trait** — authenticated encryption: `seal/open(key, nonce, aad, plaintext) -> ciphertext`; AES-256-GCM, ChaCha20-Poly1305
+- [ ] **`Hash` trait** — `update(&[u8])`, `finalize() -> Digest`; implementors: SHA-256, SHA-3-256, SHA-512, BLAKE3
+- [ ] **`Mac` trait** — message authentication: `update(&[u8])`, `finalize() -> Tag`; HMAC-SHA256, KMAC, Poly1305
+- [ ] **`Kdf` trait** — key derivation: `derive(ikm, salt, info, len) -> [u8]`; HKDF-SHA256, HKDF-SHA3, Argon2id (password-based)
+- [ ] **`Aead` trait** — authenticated encryption: `seal/open(key, nonce, aad, plaintext) -> ciphertext`; AES-256-GCM, ChaCha20-Poly1305, AES-256-SIV (nonce-misuse resistant)
 - [ ] **`Sign` trait** — digital signatures: `sign(key, msg) -> Sig`, `verify(pubkey, msg, sig) -> bool`
 - [ ] **`Kem` trait** — key encapsulation: `encapsulate(pubkey) -> (shared_secret, ciphertext)`, `decapsulate(privkey, ciphertext) -> shared_secret`
-- [ ] **`Rng` trait** — cryptographic RNG: `fill_bytes(&mut [u8])`; backed by hardware TRNG or DRBG
+- [ ] **`HybridKem` trait** — composite KEM: runs classical + PQC KEM in parallel, combines shared secrets via KDF; secure if either scheme holds
+- [ ] **`HybridSign` trait** — composite signature: signs with both classical + PQC schemes, verifies both; document accepts if either valid (configurable: AND or OR policy)
+- [ ] **`Rng` trait** — cryptographic RNG: `fill_bytes(&mut [u8])`; backed by hardware TRNG or DRBG; health-tested on every call
+- [ ] **`Cipher` trait** — raw block/stream cipher for low-level use: `encrypt_block`, `decrypt_block`; AES-256, ChaCha20
 - [ ] **Algorithm registry** — static dispatch via generics (no heap); feature flags select which algorithms are compiled in
+- [ ] **`CryptoProvider` facade** — single entry point: `CryptoProvider::hash()`, `.sign()`, `.kem()`, `.aead()`; auto-selects best algorithm for target (PQC preferred if available → classical fallback)
 
 #### Classical Algorithms (`sec-crypto-classical` feature)
-- [ ] **SHA-256** — `no_std` implementation or thin wrapper over `sha2` crate (hash, HMAC, HKDF)
-- [ ] **AES-256-GCM** — for authenticated encryption (TLS, secure IPC); hardware AES on ESP32-S3/C6 if available
-- [ ] **ChaCha20-Poly1305** — software-friendly AEAD (fallback for cores without AES-NI)
-- [ ] **Ed25519** — signature scheme for authentication, secure boot signature verification
-- [ ] **X25519** — ECDH key agreement (SSH key exchange, TLS handshake)
-- [ ] **Hardware RNG** — ESP32 `RNG_DATA_REG` (0x6002_6000), RISC-V `seed` CSR (Zkr), x86 `RDRAND`/`RDSEED`
+- [ ] **SHA-256 / SHA-512** — `no_std` implementation or thin wrapper over `sha2` crate; HMAC, HKDF derived
+- [ ] **SHA-3-256 / SHAKE128 / SHAKE256** — Keccak-based; used internally by PQC algorithms; important for quantum-resistant hashing
+- [ ] **BLAKE3** — fast parallel hash; tree-hashing mode for large files / measured boot
+- [ ] **AES-256-GCM** — for authenticated encryption (TLS, secure IPC); hardware AES on ESP32-C3/C6/S3, AES-NI on x86-64
+- [ ] **AES-256-SIV** — nonce-misuse-resistant AEAD; preferred for at-rest encryption (flash, NVS, container images)
+- [ ] **ChaCha20-Poly1305** — software-friendly AEAD (fallback for cores without AES hardware; faster than AES in software on riscv32imc)
+- [ ] **Ed25519** — signature scheme for authentication, secure boot signature verification, SSH host keys
+- [ ] **X25519** — ECDH key agreement (SSH key exchange, TLS handshake, secure IPC session keys)
+- [ ] **ECDSA P-256** — for compatibility with existing PKI, TLS certificates, ESP32 Secure Boot V2
+- [ ] **RSA-3072 (verify only)** — signature verification for ESP32 Secure Boot V2 eFuse keys; no private key operations (too expensive on MCU)
+- [ ] **Argon2id** — password hashing for multi-user login (8C KDF); memory-hard, resists GPU/ASIC attacks; configurable memory cost per target
 
-#### Post-Quantum Algorithms (`sec-crypto-pqc` feature)
-- [ ] **ML-KEM (Kyber)** — NIST FIPS 203 key encapsulation; ML-KEM-768 as default (balance of size vs security)
-- [ ] **ML-DSA (Dilithium)** — NIST FIPS 204 digital signatures; ML-DSA-65 for general use
-- [ ] **SLH-DSA (SPHINCS+)** — NIST FIPS 205 stateless hash-based signatures (fallback, larger but conservative)
-- [ ] **Hybrid KEM** — X25519 + ML-KEM composite: classical + PQ in parallel, secure if either holds
-- [ ] **Hybrid signatures** — Ed25519 + ML-DSA composite for transition period
-- [ ] **PQC parameter profiles** — `pqc-128`, `pqc-192`, `pqc-256` security levels; selected via feature flag
-- [ ] **Stack/memory budget** — ML-KEM-768 needs ~3KB stack, ML-DSA-65 ~5KB; validate fits in embedded task stacks
+#### Hardware Crypto Acceleration (`sec-hw` feature)
+- [ ] **ESP32-C3 AES accelerator** — AES engine at `0x6003_A000`; offload AES-128/256 encrypt/decrypt; `Aead` trait impl wraps hardware
+- [ ] **ESP32-C3 SHA accelerator** — SHA engine at `0x6003_B000`; offload SHA-1/224/256; `Hash` trait impl wraps hardware
+- [ ] **ESP32-C3 RSA accelerator** — large-number modular exponentiation; offload RSA-3072 verify; `Sign::verify()` fast path
+- [ ] **ESP32-C6/S3 hardware crypto** — same AES/SHA/RSA accelerators + HMAC peripheral; unified driver shared across ESP32 family
+- [ ] **ESP32 Digital Signature (DS)** — hardware-protected private key: key stored in encrypted eFuse, DS peripheral signs without exposing key to CPU; used for device identity attestation
+- [ ] **x86-64 AES-NI** — `aesenc`/`aesenclast`/`aesdec` instructions for AES-256-GCM; detected via CPUID at boot; `Aead` fast path
+- [ ] **x86-64 SHA-NI** — SHA instruction extensions; `sha256rnds2`/`sha256msg1`/`sha256msg2`; `Hash` fast path
+- [ ] **x86-64 AVX2/512** — SIMD acceleration for PQC (NTT, polynomial multiplication); 4-8x speedup for ML-KEM/ML-DSA
+- [ ] **ARM Crypto Extensions (ARMv8-A)** — `AESE`/`AESD`/`SHA256H`/`PMULL` instructions on Cortex-A53/A72/A76; `Aead`/`Hash` fast paths
+- [ ] **ARM NEON** — 128-bit SIMD for PQC NTT; used on RPi 3/4/5 Cortex-A series
+- [ ] **RISC-V Scalar Crypto (Zkn/Zks)** — AES/SHA instructions on supporting cores (future RISC-V with Zkn extension); `Aead`/`Hash` fast path
+- [ ] **Hardware RNG per platform** — ESP32 `RNG_DATA_REG` (0x6002_6000), RISC-V `seed` CSR (Zkr), x86 `RDRAND`/`RDSEED`, ARM `RNDR`; health test + DRBG reseeding
+
+#### Post-Quantum Algorithms — Hybrid Approach (`sec-crypto-pqc` feature)
+_Hybrid PQC: always combine classical + post-quantum algorithms. Both run in parallel; shared secrets / signatures combined. System remains secure even if one scheme breaks. Compliant with NIST SP 800-227 hybrid key establishment guidance._
+
+- [ ] **ML-KEM (Kyber)** — NIST FIPS 203 key encapsulation; ML-KEM-512 for constrained (ESP32), ML-KEM-768 default, ML-KEM-1024 for high-security (cluster/cloud)
+- [ ] **ML-DSA (Dilithium)** — NIST FIPS 204 digital signatures; ML-DSA-44 for constrained, ML-DSA-65 default, ML-DSA-87 for critical (secure boot, cluster auth)
+- [ ] **SLH-DSA (SPHINCS+)** — NIST FIPS 205 stateless hash-based signatures; conservative fallback (larger but mathematically simplest assumption — hash security only)
+- [ ] **FN-DSA (Falcon)** — NIST selected lattice-based signature; compact signatures (smaller than Dilithium); requires careful floating-point or integer-only sampler
+- [ ] **HQC (code-based KEM)** — NIST round 4 candidate; alternative KEM based on error-correcting codes (not lattice); diversifies assumptions
+- [ ] **Hybrid KEM: X25519 + ML-KEM** — concatenate X25519 and ML-KEM ciphertexts; combine shared secrets via HKDF: `ss = HKDF(X25519_ss || MLKEM_ss)`; secure if either holds
+- [ ] **Hybrid KEM: X25519 + ML-KEM + HQC (triple)** — three-algorithm composite for maximum diversity; optional `pqc-paranoid` feature
+- [ ] **Hybrid Sign: Ed25519 + ML-DSA** — produce both signatures; verifier checks both; transition-safe (classical verifiers ignore PQC part)
+- [ ] **Hybrid Sign: Ed25519 + SLH-DSA** — hash-based fallback hybrid; largest signature but most conservative security assumption
+- [ ] **PQC parameter profiles** — `pqc-128` (ML-KEM-512 + ML-DSA-44), `pqc-192` (ML-KEM-768 + ML-DSA-65), `pqc-256` (ML-KEM-1024 + ML-DSA-87); selected via feature flag
+- [ ] **Stack/memory budget validation** — ML-KEM-768 needs ~3KB stack, ML-DSA-65 ~5KB, SLH-DSA-128s ~2.5KB; validate fits in per-target task stacks (ESP32: 4KB, RPi: 8KB, x86: 16KB)
+- [ ] **Constant-time implementation** — all PQC implementations must be constant-time (no secret-dependent branches/memory access); verified via `dudect` or similar timing tests
+- [ ] **No-FPU PQC** — all PQC algorithms must work on targets without FPU (riscv32imc, Cortex-M33); integer-only NTT, rejection sampling
 
 #### Crypto Services
-- [ ] **Kernel keystore** — `[KeySlot; MAX_KEYS]` in protected kernel memory; keys never exposed to userspace raw
-- [ ] **`SYS_CRYPTO_HASH` / `SYS_CRYPTO_SIGN` / `SYS_CRYPTO_VERIFY` / `SYS_CRYPTO_ENCRYPT` / `SYS_CRYPTO_DECRYPT`** — syscalls that operate on key handles (not raw key material)
-- [ ] **`SYS_CRYPTO_KEM_ENCAP` / `SYS_CRYPTO_KEM_DECAP`** — PQC key exchange from userspace
-- [ ] **`SYS_CRYPTO_RNG`** — fill buffer with cryptographically secure random bytes
-- [ ] **Key capability** — `CryptoKey(key_id)` capability required to use a key; revocable, non-transferable for private keys
-- [ ] **Crypto algorithm negotiation** — trait-based: callers request `AlgorithmClass::Kem` and kernel picks best available (PQC preferred → classical fallback)
+- [ ] **Kernel keystore** — `[KeySlot; MAX_KEYS]` in protected kernel memory; keys never exposed to userspace raw; MAX_KEYS: 8 (ESP32), 32 (RPi), 256 (x86-64)
+- [ ] **Key types** — `Symmetric(aead_key)`, `SigningKeyPair(privkey, pubkey)`, `KemKeyPair(privkey, pubkey)`, `HybridSigningKey(classical, pqc)`, `HybridKemKey(classical, pqc)`, `PreSharedKey(psk)`, `DerivedKey(parent_id, context)`
+- [ ] **Key lifecycle** — generate → store → use → rotate → archive → destroy; state machine per key; `KeyState` enum
+- [ ] **Key rotation** — automatic rotation based on usage count or time; old key kept for decrypt-only (grace period); new key minted atomically
+- [ ] **`SYS_CRYPTO_HASH` / `SYS_CRYPTO_MAC`** — hash / MAC syscalls; operate on user-provided data
+- [ ] **`SYS_CRYPTO_SIGN` / `SYS_CRYPTO_VERIFY`** — sign/verify using key handle; auto-selects hybrid if `sec-crypto-pqc` enabled
+- [ ] **`SYS_CRYPTO_ENCRYPT` / `SYS_CRYPTO_DECRYPT`** — AEAD encrypt/decrypt using key handle; nonce auto-generated by kernel (prevents reuse)
+- [ ] **`SYS_CRYPTO_KEM_ENCAP` / `SYS_CRYPTO_KEM_DECAP`** — hybrid KEM key exchange from userspace; returns combined shared secret
+- [ ] **`SYS_CRYPTO_KEM_KEYGEN`** — generate a new KEM keypair (hybrid: generates both classical + PQC keypairs internally)
+- [ ] **`SYS_CRYPTO_RNG`** — fill buffer with cryptographically secure random bytes; health-checked hardware RNG + DRBG
+- [ ] **`SYS_CRYPTO_NEGOTIATE`** — client/server agree on best mutual algorithm: callers propose algorithm sets, kernel intersects and picks strongest
+- [ ] **Key capability** — `CryptoKey(key_id)` capability required to use a key; revocable, non-transferable for private keys; `SIGN`, `VERIFY`, `ENCRYPT`, `DECRYPT`, `DERIVE` sub-rights
+- [ ] **Crypto algorithm negotiation** — trait-based: callers request `AlgorithmClass::Kem` and kernel picks best available (hybrid PQC preferred → classical fallback → error)
+- [ ] **Zeroization** — all key material zeroed on free/drop; `Zeroize` trait on all key structs; compiler fence to prevent optimization
 
 ### 8D — Secure Boot + Verified Launch
-_Chain of trust from power-on to running user processes._
+_Complete chain of trust from power-on to running user processes. Per-platform boot chains for the full VeerOS target spectrum. Hybrid PQC signatures for future-proofing._
 
-- [ ] **Boot signature verification** — kernel image signed with Ed25519 (+ ML-DSA hybrid for PQC); verified by bootloader before jump
-- [ ] **ESP32 Secure Boot V2** — integrate with Espressif's eFuse-based secure boot (RSA-3072 / ECDSA key burned in eFuse)
-- [ ] **Measured boot** — hash each boot stage into a measurement register (software TPM-like accumulator)
-- [ ] **Process image verification** — verify signature/hash of ELF/binary before loading into a process/container
-- [ ] **Immutable kernel .text** — mark kernel code region read-only + execute after boot; no self-modifying code
-- [ ] **eFuse key provisioning** — tooling to burn signing keys into ESP32 eFuse block (one-time, irreversible)
-- [ ] **Rollback protection** — monotonic version counter in eFuse/flash; reject images older than current version
+#### Boot Chain Architecture
+- [ ] **`BootStage` enum** — `Rom`, `Bootloader`, `Kernel`, `InitProcess`, `UserProcess`, `ContainerImage`, `MicroVMImage`; each stage measured + verified
+- [ ] **`MeasurementRegister`** — software PCR-like accumulator: `extend(hash) → new_hash = SHA-256(old_hash || hash)`; one register per boot stage; stored in kernel-protected memory
+- [ ] **Boot attestation report** — `[MeasurementRegister; 8]` covering each stage; queryable via `SYS_ATTESTATION_REPORT` syscall; can be sent to remote verifier
+- [ ] **Hybrid boot signatures** — kernel and process images signed with Ed25519 + ML-DSA dual signature; bootloader verifies both
+- [ ] **Algorithm agility in bootloader** — boot image header specifies signature algorithm(s); bootloader supports multiple verifiers; forward-compatible with new PQC standards
+
+#### ESP32 Secure Boot (C3 / C6 / S3)
+- [ ] **Secure Boot V2 integration** — Espressif eFuse-based: RSA-3072 or ECDSA-P256 public key hash burned into eFuse block; ROM verifies first-stage bootloader
+- [ ] **Two-stage boot** — ROM → signed first-stage bootloader (verifies partition table + app image) → signed VeerOS kernel; full chain of trust
+- [ ] **Flash encryption** — AES-XTS-256 flash encryption (key in eFuse); protects firmware at rest against physical extraction; `FLASH_ENCRYPTION` eFuse bit
+- [ ] **eFuse key provisioning tooling** — `veer-provision` CLI tool: generate signing keypair, burn public key hash to eFuse, burn flash encryption key; one-time irreversible; confirms via serial prompt
+- [ ] **Rollback protection (ESP32)** — `SECURE_BOOT_DIGEST` eFuse counter; reject images with version lower than burned value; increment on each OTA update
+- [ ] **ESP32 Secure Boot + VeerOS hybrid** — first-stage bootloader verifies VeerOS kernel with Espressif RSA/ECDSA; VeerOS kernel then verifies user processes with Ed25519 + ML-DSA hybrid
+- [ ] **NVS encryption** — encrypt non-volatile storage partition (WiFi credentials, keys) with flash encryption key; prevents plaintext credential extraction
+
+#### ARM64 Secure Boot (Raspberry Pi / QEMU)
+- [ ] **RPi firmware chain** — VideoCore GPU ROM → `bootcode.bin` → `start4.elf` → `config.txt` → `kernel8.img` (VeerOS); RPi firmware is closed-source but verified by Broadcom ROM
+- [ ] **DTB integrity** — hash device tree blob passed at boot (x0); measure into boot attestation register; detect DTB tampering
+- [ ] **`config.txt` lockdown** — document recommended settings: `kernel=kernel8.img`, `arm_64bit=1`, `enable_uart=1`; warn if `uart_2ndstage` enables debug UART in production
+- [ ] **ARM Trusted Firmware (TF-A)** — for QEMU virt / production ARM64: BL1 (ROM) → BL2 (trusted boot firmware) → BL31 (EL3 runtime) → BL33 (VeerOS at EL2/EL1); each stage signed + measured
+- [ ] **UEFI Secure Boot (ARM64)** — for generic ARM64 servers (Ampere, Graviton): UEFI Secure Boot with signed EFI stub; VeerOS EFI binary signed with Microsoft/custom PK chain
+- [ ] **Measured boot on ARM64** — each stage hashes next stage into measurement register; fTPM (firmware TPM) accumulates PCR values; attestation via `SYS_ATTESTATION_REPORT`
+- [ ] **Kernel image signing** — VeerOS `kernel8.img` signed with Ed25519 + ML-DSA; verified by TF-A BL33 loader or custom shim
+
+#### x86-64 Secure Boot (QEMU / Bare Metal)
+- [ ] **UEFI Secure Boot** — Secure Boot variables: PK (Platform Key), KEK (Key Exchange Key), db (allowed signatures), dbx (revoked); VeerOS EFI loader signed with enrolled key
+- [ ] **Multiboot2 measured boot** — when loaded by GRUB2: GRUB measures itself + kernel into TPM PCRs; VeerOS extends PCR with own measurements
+- [ ] **TPM 2.0 integration** — read PCR values from hardware/firmware TPM; seal/unseal kernel keys to TPM PCR state; attestation quotes
+- [ ] **Intel Boot Guard (production)** — ACM (Authenticated Code Module) verifies initial firmware; chain extends to UEFI → VeerOS; hardware root of trust
+- [ ] **Measured launch (Intel TXT / AMD SEV)** — hardware-measured launch for MicroVM isolation; hypervisor measured by CPU before execution
+- [ ] **AMD SEV / SEV-SNP (future)** — encrypted VM memory; attestation report from AMD PSP; MicroVM isolation with confidential computing guarantees
+
+#### RISC-V Secure Boot (QEMU / Boards)
+- [ ] **OpenSBI measured boot** — SBI firmware (M-mode) → VeerOS (S-mode); SBI hashes VeerOS binary before jump; measurement stored in SBI-accessible register
+- [ ] **RISC-V ePMP guarding** — enhanced PMP: lock M-mode entries so S-mode kernel cannot relax its own permissions; bootloader sets locked regions before jump
+- [ ] **Boot ROM verification (MCU)** — on future RISC-V MCU boards with OTP ROM: ROM verifies first-stage loader; similar to ESP32 Secure Boot pattern
+
+#### Common Boot Security
+- [ ] **Immutable kernel .text** — mark kernel code region read-only + execute after boot; PMP/MPU/page-table enforced; no self-modifying code; panic on write attempt
+- [ ] **Kernel .rodata protection** — mark read-only data (man pages, certificates, measurement registers) as RO + no-execute
+- [ ] **Stack guard pages** — guard page (no-access) below every kernel stack; hardware-caught stack overflow → panic (not silent corruption)
+- [ ] **Process image verification** — verify signature/hash of ELF/binary before loading into a process/container; reject unsigned images if `sec-verified` enabled
+- [ ] **Container image verification** — container images must be signed; signature checked at `SYS_DOMAIN_CREATE`; hash measured into attestation register
+- [ ] **Rollback protection (generic)** — monotonic version counter in persistent storage (eFuse / flash / TPM NV); reject images older than current version
+- [ ] **Secure firmware update (OTA)** — download signed image → verify signature (hybrid PQC) → verify version monotonicity → atomic swap → reboot; brick-proof A/B partitioning on supported targets
+- [ ] **Anti-downgrade for crypto** — cannot flash firmware with weaker crypto (e.g., classical-only) once PQC has been deployed; enforced by version counter + algorithm floor
 
 ### 8E — Secure Communication
-_Encrypted channels for IPC, network, and debug interfaces._
+_Encrypted channels for IPC, network, and debug interfaces. PQC-ready from day one. Covers local serial, LAN TCP, WAN VPN, inter-cluster mesh, and inter-domain IPC._
 
-- [ ] **TLS 1.3 (embedded)** — minimal TLS 1.3 client/server for TCP sockets; `no_std` + smoltcp integration
-- [ ] **PQC cipher suites** — TLS 1.3 with ML-KEM hybrid key exchange + ML-DSA certificates (draft-ietf-tls-hybrid)
-- [ ] **Encrypted IPC** — optional: inter-domain IPC messages encrypted with per-channel session key (for MicroVM ↔ host)
-- [ ] **SSH protocol** — lightweight SSH-2 server (integrates with Phase 5); PQC key exchange via `sntrup761x25519-sha512` or ML-KEM hybrid
-- [ ] **Secure serial** — optional encrypted UART channel (for physical debug port protection)
-- [ ] **Certificate store** — small trusted CA certificate table in `.rodata` for TLS peer verification
-- [ ] **ACME / auto-cert** — future: automatic certificate provisioning for network-connected devices
+#### TLS 1.3 (Embedded)
+- [ ] **Minimal TLS 1.3 client/server** — `no_std` + smoltcp integration; handshake + record layer; PSK and certificate-based authentication
+- [ ] **PQC cipher suites** — TLS 1.3 with ML-KEM hybrid key exchange (X25519Kyber768Draft00) + ML-DSA certificates (draft-ietf-tls-hybrid)
+- [ ] **Classical cipher suites** — `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`; selected based on hardware crypto availability
+- [ ] **Certificate store** — small trusted CA certificate table in `.rodata` for TLS peer verification; max 4 CAs on ESP32, 16 on RPi, 64 on x86
+- [ ] **Client certificates** — mTLS for device-to-device and device-to-cloud authentication; device identity from ESP32 DS peripheral or kernel keystore
+- [ ] **Session resumption** — TLS 1.3 PSK tickets; avoid full handshake on reconnect; critical for constrained devices
+- [ ] **ACME / auto-cert** — automatic Let's Encrypt certificate provisioning for network-connected devices with DNS
+
+#### SSH Protocol
+- [ ] **SSH-2 server** — lightweight SSH-2 (RFC 4253/4254); shell channel + exec channel; integrates with Phase 6I user identity
+- [ ] **PQC key exchange** — `sntrup761x25519-sha512` (hybrid) or `mlkem768x25519-sha256` (NIST hybrid); negotiated during KEX
+- [ ] **Host key management** — Ed25519 host key generated on first boot; stored in kernel keystore; `ssh-keygen`-compatible format for known_hosts
+- [ ] **Public key authentication** — `authorized_keys` stored in VFS `/etc/ssh/`; Ed25519 + ML-DSA hybrid keys supported
+- [ ] **SCP/SFTP server (stubs)** — file transfer over SSH; integrates with VFS (Phase 6J)
+
+#### VPN / Tunnel Security (`sec-network` feature)
+- [ ] **WireGuard protocol** — Noise IK handshake (X25519 + ChaCha20-Poly1305); kernel-mode tunnel interface; PQC hybrid extension: X25519 + ML-KEM for handshake
+- [ ] **IPsec / ESP (stubs)** — Encapsulating Security Payload for inter-site VPN; IKEv2 key exchange with PQC hybrid; needed for `dist-firewall` / `dist-gateway`
+- [ ] **DTLS 1.3** — datagram TLS for UDP services (CoAP, Thread commissioning, VoIP); `no_std` implementation
+- [ ] **Tunnel interface** — kernel virtual network interface (`tun0`); packets encrypted/decrypted in kernel; capability-gated `VpnTunnel(tunnel_id)`
+
+#### Inter-Domain / IPC Encryption
+- [ ] **Encrypted IPC** — optional: inter-domain IPC messages encrypted with per-channel session key (for MicroVM ↔ host, container ↔ host)
+- [ ] **IPC session key establishment** — on channel creation, kernel runs hybrid KEM between domains; session key used for AEAD on all messages
+- [ ] **Inter-cluster TLS mesh** — cluster nodes communicate over mTLS; per-node certificate issued by cluster CA; PQC hybrid cipher suites
+- [ ] **Secure multicast** — group key distribution for publish-subscribe IPC across domains; re-keyed on member join/leave
+
+#### Physical Interface Security
+- [ ] **Secure serial** — optional encrypted UART channel (for physical debug port protection); pre-shared key + ChaCha20-Poly1305
+- [ ] **JTAG/SWD lockdown** — document how to disable debug interfaces on production devices: ESP32 JTAG disable eFuse, ARM debug authentication
+- [ ] **USB security** — USB enumeration filtering: only allow known VID/PID combinations; prevent USB-based attacks (BadUSB); capability-gated USB access
 
 ### 8F — Audit, Monitoring + Intrusion Detection
-_Security logging and runtime integrity monitoring._
+_Security logging and runtime integrity monitoring. Scales from a 256-entry ring buffer on ESP32 to a persistent structured audit log on x86-64 with network export._
 
-- [ ] **Security audit log** — ring buffer of security events: login attempts, capability grants/revokes, policy violations, crypto operations
-- [ ] **`SYS_AUDIT_LOG` syscall** — userspace processes can append to audit log (if they hold `AUDIT_WRITE` capability)
-- [ ] **Audit event types** — `AuthSuccess`, `AuthFail`, `CapGranted`, `CapRevoked`, `PolicyDenied`, `SyscallFiltered`, `IntegrityViolation`, `BootMeasurement`
-- [ ] **Shell `auditlog` command** — display recent security events (root only)
+#### Audit Logging
+- [x] **Security audit log** — ring buffer of security events; size: 128 entries (ESP32 dist-minimal), 512 (default), 4096 (dist-full); `AuditLog` struct with 16-byte entries (tick, pid, uid, event, flags, detail, detail2); wired into all 4 kernel targets
+- [x] **`SYS_AUDIT_READ` / `SYS_AUDIT_COUNT` syscalls** (0xE0–0xE1) — userspace can read audit entries and query count; kernel-only write via dispatcher
+- [x] **Audit event types** — `AuditEvent` enum (repr u8): `CapDenied`, `CapDropped`, `CapSetChild`, `AuthSuccess`, `AuthFail`, `Logout`, `UidChange`, `ProcessSpawn`, `ProcessExit`, `Mount`, `Unmount`, `RngSeeded`, `BootMeasurement`, `NetAccept`, `FirewallDrop`, `UserEvent`; auto-logged on cap denial, cap drop, cap set_child, boot RNG seeding
+- [ ] **Audit log export** — forward audit events to remote syslog (UDP/TCP/TLS) or MQTT topic for fleet monitoring; `dist-cloud` auto-enables
+- [x] **Shell `auditlog` command** — displays recent security events with formatted table (tick, pid, uid, event name, detail); accepts optional count argument; verified on ESP32-C6 hardware
+- [ ] **Tamper-evident log** — each entry includes hash of previous entry (hash chain); detect log truncation/modification; rooted in boot measurement
+
+#### Runtime Integrity Monitoring
 - [ ] **Stack canaries** — compiler-based (`-Z stack-protector=strong`) or manual canary words; trap on corruption
-- [ ] **Control flow integrity (CFI)** — RISC-V Zicfilp (landing pad) + Zicfiss (shadow stack) on supporting cores; software CFI fallback
-- [ ] **Heap integrity checks** — allocator metadata validation on every alloc/free; panic on corruption
-- [ ] **Runtime attestation** — device can prove its boot measurements + running software to a remote verifier
+- [ ] **Control flow integrity (CFI)** — RISC-V Zicfilp (landing pad) + Zicfiss (shadow stack) on supporting cores; ARM BTI (Branch Target Identification) on ARMv8.5+; software CFI fallback via shadow return stack
+- [ ] **Heap integrity checks** — allocator metadata validation on every alloc/free; red-zone bytes around allocations; panic on corruption
+- [ ] **Kernel code integrity** — periodic hash of `.text` section compared against boot measurement; detect runtime code modification
+- [ ] **W^X enforcement** — no memory region is both writable and executable simultaneously; enforced by PMP/MPU/page tables on all targets
+- [ ] **ASLR (Address Space Layout Randomization)** — randomize process base address, stack, heap on MMU targets (RPi, x86-64); kernel KASLR on x86-64
 
-### 8G — Security Feature Integration Matrix
-_How security tiers map to distribution profiles._
+#### Intrusion Detection
+- [ ] **Syscall anomaly detector** — per-process syscall sequence model (frequency histogram or Markov chain); flags unusual patterns → audit log
+- [ ] **Brute-force detection** — track failed auth attempts per source (serial, SSH, TCP); auto-lockout after threshold (configurable: 3–10 attempts)
+- [ ] **Network anomaly detection** — port scan detection, SYN flood detection, unusual traffic volume; auto-add firewall deny rule
+- [ ] **Runtime attestation** — device can prove its boot measurements + running software to a remote verifier; challenge-response protocol using kernel keystore
+
+### 8G — Network Security (Firewall / Gateway / Router)
+_Packet filtering, NAT, DPI, and traffic security for `dist-firewall` and `dist-gateway` profiles. Capability-gated: `FirewallRule`, `PacketFilter`, `NetworkNamespace` resources._
+
+#### Packet Filter Engine
+- [ ] **`PacketFilter` struct** — ordered rule chain: `[Rule; MAX_RULES]`; each rule: match conditions → action (ACCEPT / DROP / REJECT / LOG / REDIRECT)
+- [ ] **Match conditions** — src/dst IP, src/dst port, protocol (TCP/UDP/ICMP), interface, direction (IN/OUT/FORWARD), connection state (NEW/ESTABLISHED/RELATED)
+- [ ] **Rule chains** — INPUT, OUTPUT, FORWARD (like iptables); per-interface and per-namespace chains; default policy: DROP (whitelist model)
+- [ ] **Stateful tracking** — connection tracking table: `[ConnTrackEntry; MAX_CONNS]`; track TCP state machine, UDP timeout, ICMP echo matching
+- [ ] **NAT (Network Address Translation)** — SNAT (masquerade outbound), DNAT (port forward inbound), 1:1 NAT; conntrack-integrated translation table
+- [ ] **Rate limiting** — per-rule token-bucket rate limiter; prevent SYN flood, ICMP flood, brute-force
+- [ ] **`SYS_FIREWALL_ADD` / `SYS_FIREWALL_DEL` / `SYS_FIREWALL_LIST`** — syscalls to manage rules (requires `FirewallRule` + `ADMIN` cap)
+- [ ] **Shell `fw` / `iptables`-like commands** — `fw add INPUT -s 10.0.0.0/8 -p tcp --dport 22 -j ACCEPT`, `fw list`, `fw flush`
+
+#### Deep Packet Inspection (DPI) — Optional
+- [ ] **Protocol detection** — identify application layer protocol (HTTP/HTTPS/DNS/MQTT/CoAP/SSH) from packet payload patterns
+- [ ] **DNS filtering** — inspect DNS queries/responses; blocklist domains; return NXDOMAIN for blocked; integrates with ad-blocking / parental control
+- [ ] **TLS SNI inspection** — extract Server Name Indication from TLS ClientHello (unencrypted); filter by hostname without breaking encryption
+- [ ] **IDS/IPS rules** — simple pattern-matching rules (Snort-lite); detect known attack signatures in packet payloads; LOG or DROP action
+
+#### Traffic Shaping + QoS
+- [ ] **Traffic classes** — classify packets into queues (real-time, interactive, bulk, background) based on DSCP, port, or DPI result
+- [ ] **Token-bucket shaper** — per-class bandwidth limiter; ensures fair sharing and latency guarantees for priority traffic
+- [ ] **WAN uplink management** — `dist-gateway`: shape upstream traffic to avoid buffer-bloat; SQM (Smart Queue Management) equivalent
+
+### 8H — Hardware Security Integration (Per-SoC)
+_Leverage hardware security features on each supported SoC. Feature-gated: `sec-hw`._
+
+#### ESP32 Family (C3 / C6 / S3)
+- [ ] **eFuse controller** — read/write eFuse blocks for key storage, secure boot config, flash encryption config; one-time programmable
+- [ ] **Flash encryption (AES-XTS-256)** — transparent encrypt/decrypt of flash contents; key in eFuse; enabled per partition
+- [ ] **Secure Boot V2** — ROM-rooted signature verification; RSA-3072 or ECDSA-P256 key in eFuse
+- [ ] **Digital Signature (DS) peripheral** — hardware-protected ECDSA signing; private key encrypted at rest in eFuse, decrypted only inside DS peripheral; used for device attestation, mTLS client cert
+- [ ] **HMAC peripheral** — hardware-backed HMAC-SHA256 with eFuse-stored key; used for secure token generation, NVS encryption key derivation
+- [ ] **World Controller (ESP32-C6)** — hardware-enforced privilege separation (two "worlds": secure + normal); similar to ARM TrustZone; separate PMP configs per world
+- [ ] **JTAG disable** — burn `JTAG_DISABLE` eFuse in production; prevent debug access to running firmware
+
+#### ARM64 (Raspberry Pi / Generic)
+- [ ] **ARM TrustZone** — EL3 Secure Monitor, Secure world (S-EL1/S-EL0), Normal world (EL1/EL0); VeerOS kernel in Normal world; secure crypto services in Secure world (optional OP-TEE)
+- [ ] **ARM Pointer Authentication (PAC)** — ARMv8.3+ (RPi 5 Cortex-A76): sign return addresses with per-process key; detect ROP/JOP attacks; enable via `SCTLR_EL1.EnIA`
+- [ ] **ARM Memory Tagging (MTE)** — ARMv8.5+ (future RPi): 4-bit tag per 16-byte granule; detect use-after-free, buffer overflow at hardware speed
+- [ ] **ARM Branch Target Identification (BTI)** — ARMv8.5+: indirect branch targets must be BTI instructions; prevents JOP attacks; enable via `SCTLR_EL1.BT1`
+- [ ] **RPi OTP (One-Time Programmable)** — BCM2712 OTP memory for device-specific secrets; read via mailbox; use for device identity seed
+
+#### x86-64
+- [ ] **TPM 2.0** — Trusted Platform Module for measured boot, key sealing, attestation; `tpm2` kernel driver (MMIO or TIS interface)
+- [ ] **Intel SGX (enclaves)** — isolated execution environment for sensitive crypto operations; enclave holds keystore; future: SGX-backed `SecureEnclave` isolation level
+- [ ] **AMD SEV / SEV-SNP** — encrypted VM memory; integrity protection; attestation from AMD PSP; used for confidential MicroVMs
+- [ ] **Intel TDX (future)** — Trust Domain Extensions for confidential VMs; hardware-enforced isolation from hypervisor
+- [ ] **SMEP / SMAP** — Supervisor Mode Execution/Access Prevention; prevent kernel from executing/reading user memory accidentally; enabled at boot
+- [ ] **NX (No-Execute) bit** — all data pages marked NX; all code pages marked read-only; W^X enforcement
+
+#### RISC-V
+- [ ] **PMP (Physical Memory Protection)** — 16 PMP entries (riscv32imc); kernel locks entries 0–3 for kernel code/data; remaining entries per-task
+- [ ] **ePMP (Enhanced PMP)** — machine security configuration: lock M-mode entries, deny S/U-mode access to unlisted regions (whitelist model)
+- [ ] **Zkr (Entropy Source)** — hardware random number generator via `seed` CSR; direct fill for `Rng` trait
+- [ ] **Zkn (Scalar Crypto)** — AES/SHA scalar instructions; constant-time hardware crypto primitives
+- [ ] **Zicfilp + Zicfiss** — landing pad + shadow stack for forward/backward CFI; enable when hardware supports
+
+### 8I — Security Policy Engine (Extensible Security Model)
+_Modular, rule-based security policy framework. Policies are declarative configurations, not hard-coded logic. Enables custom security profiles for different deployment scenarios._
+
+#### Policy Framework
+- [ ] **`SecurityPolicy` struct** — named policy: `{ name, rules: [PolicyRule; MAX_RULES], default_action: Deny }` applied to a domain or system-wide
+- [ ] **`PolicyRule` struct** — `{ subject: SubjectMatch, object: ObjectMatch, action: Action, effect: Allow|Deny|Audit }`
+- [ ] **Subject matching** — by UID, GID, process name, domain ID, capability set; wildcards supported
+- [ ] **Object matching** — by resource kind, specific resource ID, path pattern, syscall number
+- [ ] **Policy evaluation** — first-match-wins ordered rule list; default deny if no rule matches; audit-only mode for testing
+- [ ] **`SYS_POLICY_LOAD` / `SYS_POLICY_QUERY`** — load/query active security policy (requires `ADMIN` cap on system domain)
+- [ ] **Policy profiles** — predefined for common scenarios:
+  - `policy-iot-sensor` — minimal: GPIO read + IPC send + sleep; deny all else
+  - `policy-network-service` — socket + file + IPC; deny raw hardware
+  - `policy-router` — network interfaces + firewall + NAT; deny user processes from raw hardware
+  - `policy-hypervisor` — VM management + capability admin; deny direct device access
+  - `policy-development` — permissive: allow most syscalls; audit-only deny (for dev/test)
+
+#### Mandatory Access Control (MAC) — Future
+- [ ] **Label-based MAC** — every process and object tagged with security label (like SELinux/SMACK); kernel enforces label-to-label rules
+- [ ] **Information flow control** — prevent data from flowing from high-security to low-security domains; enforced at IPC and file write boundaries
+- [ ] **Bell-LaPadula model (stubs)** — no-read-up, no-write-down; for government/military classification scenarios
+- [ ] **Biba integrity model (stubs)** — no-write-up, no-read-down; ensures high-integrity processes can't be corrupted by low-integrity data
+
+### 8J — Security Feature Integration Matrix
+_How security tiers map to distribution profiles and target hardware._
 
 ```
-                    sec-base   sec-sandbox   sec-crypto   sec-verified
-                    (always)   (feature)     (feature)    (feature)
-────────────────────────────────────────────────────────────────────────
-Capabilities          ✓           ✓             ✓            ✓
-Syscall filter        ─           ✓             ─            ✓
-Isolation domains     ─           ✓             ─            ✓
-Containers            ─           ✓             ─            ✓
-MicroVM               ─           ─             ─            ✓
-Crypto traits         ─           ─             ✓            ✓
-Classical crypto      ─           ─             ✓            ✓
-PQC crypto            ─           ─             ✓*           ✓
-Secure boot           ─           ─             ─            ✓
-Measured boot         ─           ─             ─            ✓
-TLS 1.3               ─           ─             ✓            ✓
-Audit log             ─           ✓             ─            ✓
-CFI / canaries        ─           ─             ─            ✓
-────────────────────────────────────────────────────────────────────────
-* PQC requires sec-crypto + sec-crypto-pqc sub-feature
+                    sec-base   sec-sandbox  sec-crypto  sec-crypto-pqc  sec-network  sec-hw    sec-verified
+                    (always)   (feature)    (feature)   (feature)       (feature)    (feature) (feature)
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Capabilities          ✓           ✓             ✓            ✓              ✓           ✓          ✓
+Syscall filter        ─           ✓             ─            ─              ─           ─          ✓
+Isolation domains     ─           ✓             ─            ─              ─           ─          ✓
+Containers            ─           ✓             ─            ─              ─           ─          ✓
+MicroVM               ─           ─             ─            ─              ─           ─          ✓
+Net namespaces        ─           ✓             ─            ─              ✓           ─          ✓
+Crypto traits         ─           ─             ✓            ✓              ─           ─          ✓
+Classical crypto      ─           ─             ✓            ✓              ─           ─          ✓
+Hybrid PQC            ─           ─             ─            ✓              ─           ─          ✓
+HW crypto accel       ─           ─             ─            ─              ─           ✓          ✓
+Secure boot           ─           ─             ─            ─              ─           ✓          ✓
+Measured boot         ─           ─             ─            ─              ─           ─          ✓
+TLS 1.3               ─           ─             ✓            ✓              ✓           ─          ✓
+SSH server            ─           ─             ✓            ✓              ✓           ─          ✓
+VPN / WireGuard       ─           ─             ─            ─              ✓           ─          ✓
+Firewall / NAT        ─           ─             ─            ─              ✓           ─          ✓
+DPI / IDS             ─           ─             ─            ─              ✓           ─          ✓
+Audit log             ─           ✓             ─            ─              ─           ─          ✓
+CFI / canaries        ─           ─             ─            ─              ─           ✓          ✓
+W^X enforcement       ✓           ✓             ✓            ✓              ✓           ✓          ✓
+Policy engine         ─           ✓             ─            ─              ─           ─          ✓
+Runtime attestation   ─           ─             ─            ─              ─           ─          ✓
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 Profile defaults:
-  dist-minimal  → sec-base
-  dist-app      → sec-base + sec-crypto
-  dist-rt       → sec-base
-  dist-full     → sec-base + sec-sandbox + sec-crypto + sec-verified
+  dist-minimal    → sec-base
+  dist-app        → sec-base + sec-crypto
+  dist-rt         → sec-base
+  dist-edge       → sec-base + sec-crypto + sec-hw
+  dist-ai         → sec-base + sec-sandbox + sec-crypto + sec-hw
+  dist-full       → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-hw + sec-verified
+  dist-cluster    → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-verified
+  dist-cloud      → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-network + sec-hw + sec-verified
+  dist-firewall   → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
+  dist-gateway    → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
+
+Target hardware capabilities:
+  ESP32-C3/C6     → sec-hw: AES/SHA/RSA accel, eFuse, flash encrypt, Secure Boot V2, DS peripheral, HMAC
+  ESP32-S3        → sec-hw: same as C6 + World Controller (TrustZone-like)
+  RPi 3/Zero      → sec-hw: (limited) OTP, VideoCore secure boot
+  RPi 4           → sec-hw: GIC, SMMU (limited), OTP
+  RPi 5           → sec-hw: GIC, PAC (Cortex-A76), OTP, SMMU (via RP1)
+  RP2350          → sec-hw: ARM MPU (8 regions), TrustZone-M, OTP
+  RISC-V 64       → sec-hw: PMP/ePMP, Sv39/48 MMU, Zkr/Zkn (if supported)
+  x86-64          → sec-hw: TPM 2.0, AES-NI, SHA-NI, RDRAND, SMEP/SMAP, NX, SGX (optional), SEV (AMD)
 ```
 
 ## Phase 9 — Quantum CoProcessor Support

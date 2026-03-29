@@ -9,11 +9,13 @@ members = [
     "crates/soc/raspi5",
 
     # ── Layer 2: Kernel binaries (one per board) ─────────
+    "crates/kernel/esp32c3",
     "crates/kernel/xiao_esp32c6",
     "crates/kernel/qemu_virt",
     "crates/kernel/raspi5",
 
     # ── Shared OS components ─────────────────────────────
+    "crates/crypto",
     "crates/microkernel",
     "crates/distributions",
     "crates/net",

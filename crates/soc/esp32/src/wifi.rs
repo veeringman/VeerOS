@@ -22,12 +22,13 @@ use core::fmt;
 use core::ptr;
 
 use esp_wifi_sys::include::{
+    esp_interface_t_ESP_IF_WIFI_AP, esp_interface_t_ESP_IF_WIFI_STA,
     esp_wifi_connect_internal, esp_wifi_init_internal, esp_wifi_internal_free_rx_buffer,
     esp_wifi_internal_reg_rxcb, esp_wifi_internal_tx, esp_wifi_scan_get_ap_num,
     esp_wifi_scan_get_ap_records, esp_wifi_scan_start, esp_wifi_set_config,
     esp_wifi_set_mode, esp_wifi_set_tx_done_cb, esp_wifi_start, esp_supplicant_init,
     g_wifi_default_wpa_crypto_funcs, wifi_ap_record_t, wifi_config_t, wifi_init_config_t,
-    wifi_interface_t_WIFI_IF_STA, wifi_mode_t_WIFI_MODE_STA, wifi_sta_config_t,
+    wifi_interface_t_WIFI_IF_STA, wifi_mode_t_WIFI_MODE_NULL, wifi_mode_t_WIFI_MODE_STA, wifi_sta_config_t,
     ESP_OK, WIFI_INIT_CONFIG_MAGIC,
     wifi_auth_mode_t_WIFI_AUTH_OPEN, wifi_auth_mode_t_WIFI_AUTH_WEP,
     wifi_auth_mode_t_WIFI_AUTH_WPA_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA2_PSK,
@@ -52,17 +53,21 @@ static mut RX_READ: usize = 0;
 ///
 /// Called from blob context whenever a WiFi frame is received.
 /// We copy the payload into our ring buffer and release the blob's buffer.
+static mut RX_CB_COUNT: u32 = 0;
+
 unsafe extern "C" fn recv_cb_sta(
     buffer: *mut c_void,
     len: u16,
     eb: *mut c_void,
 ) -> i32 {
+    unsafe { RX_CB_COUNT += 1; }
     let frame_len = len as usize;
     if frame_len > 0 && frame_len <= FRAME_SIZE {
         let wi = RX_WRITE;
         if !RX_READY[wi] {
             ptr::copy_nonoverlapping(buffer as *const u8, RX_RING[wi].as_mut_ptr(), frame_len);
             RX_LEN[wi] = frame_len;
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
             RX_READY[wi] = true;
             RX_WRITE = (wi + 1) % NUM_RX_DESC;
         }
@@ -413,40 +418,19 @@ impl Esp32Wifi {
     pub fn init(&mut self, config: &WifiConfig) -> Result<(), WifiError> {
         use crate::modem;
 
-        fn dbg(b: u8) {
-            unsafe {
-                core::ptr::write_volatile(0x6000_f000 as *mut u32, b as u32);
-                // Flush USB FIFO
-                core::ptr::write_volatile(0x6000_f004 as *mut u32, 1);
-                for _ in 0..10_000u32 {
-                    if core::ptr::read_volatile(0x6000_f004 as *const u32) & 2 != 0 { break; }
-                    core::hint::spin_loop();
-                }
-            }
-        }
-
         if self.initialized {
             // Already initialized — just connect (polled from driver task).
-            dbg(b'B');
             let ret = unsafe { esp_wifi_connect_internal() };
             if ret != ESP_OK as i32 {
-                dbg(b'!');
-                let ret_u = ret as u32;
-                dbg(b"0123456789abcdef"[((ret_u >> 12) & 0xf) as usize]);
-                dbg(b"0123456789abcdef"[((ret_u >> 8) & 0xf) as usize]);
-                dbg(b"0123456789abcdef"[((ret_u >> 4) & 0xf) as usize]);
-                dbg(b"0123456789abcdef"[(ret_u & 0xf) as usize]);
                 return Err(WifiError::ConnectionFailed);
             }
             // esp_wifi_connect_internal() queued the connect command.
             // The WPA handshake happens asynchronously via interrupts + ppTask.
             // Yield to let ppTask process the handshake, then poll timers.
-            dbg(b'C');
             for _ in 0..200u32 {
                 crate::wifi_os_adapter::poll_timers();
                 crate::wifi_os_adapter::yield_to_scheduler();
             }
-            dbg(b'D');
             self.connected = true;
             return Ok(());
         }
@@ -456,16 +440,13 @@ impl Esp32Wifi {
         }
 
         // Step 1: Enable modem clocks and reset.
-        dbg(b'1');
         modem::enable_all_clocks();
         modem::reset_all_modems();
 
         // Step 2: Read factory MAC from eFuse.
-        dbg(b'2');
         self.mac = modem::read_efuse_mac();
 
         // Step 3: Ensure the OS adapter globals are set.
-        dbg(b'3');
         unsafe {
             use crate::wifi_os_adapter::g_wifi_osi_funcs as local_osi;
             // Copy our OSI funcs to the blob's extern symbol.
@@ -474,43 +455,14 @@ impl Esp32Wifi {
             // Also set g_osi_funcs_p (ROM data pointer at fixed SRAM address).
             let g_osi_funcs_p = 0x4087ff6c as *mut *mut esp_wifi_sys::include::wifi_osi_funcs_t;
             core::ptr::write_volatile(g_osi_funcs_p, dst);
-
-            // Verify OSI table: dump address of table, and the fn ptrs at offsets 8 (set_intr) and 16 (set_isr)
-            let base = dst as usize as u32;
-            dbg(b'@');
-            for shift in [28u32,24,20,16,12,8,4,0] {
-                let nib = ((base >> shift) & 0xF) as u8;
-                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
-            }
-            dbg(b',');
-            // Read g_osi_funcs_p to verify it points to our table
-            let readback = core::ptr::read_volatile(g_osi_funcs_p);
-            let rb = readback as usize as u32;
-            dbg(b'P');
-            for shift in [28u32,24,20,16,12,8,4,0] {
-                let nib = ((rb >> shift) & 0xF) as u8;
-                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
-            }
-            dbg(b',');
-            // Read offset 8 (set_intr fn ptr) and offset 16 (set_isr fn ptr)
-            let fn_set_intr = core::ptr::read_volatile((dst as *const u8).add(8) as *const u32);
-            dbg(b'F');
-            for shift in [28u32,24,20,16,12,8,4,0] {
-                let nib = ((fn_set_intr >> shift) & 0xF) as u8;
-                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
-            }
-            dbg(b',');
-            let fn_set_isr = core::ptr::read_volatile((dst as *const u8).add(16) as *const u32);
-            dbg(b'G');
-            for shift in [28u32,24,20,16,12,8,4,0] {
-                let nib = ((fn_set_isr >> shift) & 0xF) as u8;
-                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
-            }
-            dbg(b',');
         }
 
         // Step 3b: Configure WiFi interrupt routing (INTMATRIX + PLIC).
         crate::wifi_os_adapter::setup_wifi_interrupts();
+
+        // Step 3c: Early PHY calibration — run register_chipv7_phy now so
+        // the blob's later phy_enable() from ppTask takes the fast wakeup path.
+        crate::wifi_os_adapter::early_phy_init();
 
         // Step 4: Build wifi_init_config_t.
         let init_cfg = wifi_init_config_t {
@@ -543,38 +495,45 @@ impl Esp32Wifi {
         };
 
         // Step 5: Initialize WiFi internals.
-        dbg(b'5');
         let ret = unsafe { esp_wifi_init_internal(&init_cfg) };
         if ret != ESP_OK as i32 {
-            dbg(b'!'); dbg(b'5');
-            // Output error code as hex: 4 nibbles
-            let code = ret as u32;
-            for shift in [12u32, 8, 4, 0] {
-                let nib = ((code >> shift) & 0xF) as u8;
-                dbg(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
-            }
-            dbg(b'\n');
             return Err(WifiError::InitFailed);
         }
 
-        // Step 6: Initialize supplicant (WPA2 handshake).
-        dbg(b'6');
+        // Step 6: Match esp-wifi init flow: force mode NULL first.
+        let ret = unsafe { esp_wifi_set_mode(wifi_mode_t_WIFI_MODE_NULL) };
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+
+        // Step 7: Initialize supplicant (WPA2 handshake).
         let ret = unsafe { esp_supplicant_init() };
         if ret != ESP_OK as i32 {
-            dbg(b'!'); dbg(b'6');
             return Err(WifiError::InitFailed);
         }
 
-        // Step 7: Set STA mode.
-        dbg(b'7');
+        // Step 8: Register RX callbacks and TX done callback.
+        // Match esp-wifi: register callbacks for both STA and AP interfaces.
+        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta)) };
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_AP, Some(recv_cb_sta)) };
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+        let ret = unsafe { esp_wifi_set_tx_done_cb(None) };
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+
+        // Step 9: Set STA mode.
         let ret = unsafe { esp_wifi_set_mode(wifi_mode_t_WIFI_MODE_STA) };
         if ret != ESP_OK as i32 {
-            dbg(b'!'); dbg(b'7');
             return Err(WifiError::InitFailed);
         }
 
-        // Step 8: Configure STA with SSID and password.
-        dbg(b'8');
+        // Step 10: Configure STA with SSID and password.
         let mut sta_cfg: wifi_sta_config_t = unsafe { core::mem::zeroed() };
         sta_cfg.ssid[..config.ssid_len].copy_from_slice(&config.ssid[..config.ssid_len]);
         sta_cfg.password[..config.pass_len].copy_from_slice(&config.password[..config.pass_len]);
@@ -584,44 +543,12 @@ impl Esp32Wifi {
             esp_wifi_set_config(wifi_interface_t_WIFI_IF_STA, &mut wifi_cfg)
         };
         if ret != ESP_OK as i32 {
-            dbg(b'!'); dbg(b'8');
             return Err(WifiError::InitFailed);
         }
 
-        // Step 9: Register RX callback and TX done callback.
-        dbg(b'9');
-        unsafe {
-            esp_wifi_internal_reg_rxcb(
-                wifi_interface_t_WIFI_IF_STA,
-                Some(recv_cb_sta),
-            );
-            esp_wifi_set_tx_done_cb(None);
-        }
-
-        // Step 10: Start WiFi.
-        dbg(b'A');
-        // Dump the two assertion bytes that wifi_hw_start checks
-        // Address: 0x408573ED (byte1) and 0x408573EE (byte2)
-        // If (byte >> mode) & 1, wifi_hw_start infinite-loops.
-        // mode=3 for STA when called from wifi_start_process with mode==0
-        unsafe {
-            let b1 = core::ptr::read_volatile(0x408573ED as *const u8);
-            let b2 = core::ptr::read_volatile(0x408573EE as *const u8);
-            dbg(b'<');
-            let h1 = (b1 >> 4) & 0xF;
-            let l1 = b1 & 0xF;
-            dbg(if h1 < 10 { b'0' + h1 } else { b'a' + h1 - 10 });
-            dbg(if l1 < 10 { b'0' + l1 } else { b'a' + l1 - 10 });
-            dbg(b',');
-            let h2 = (b2 >> 4) & 0xF;
-            let l2 = b2 & 0xF;
-            dbg(if h2 < 10 { b'0' + h2 } else { b'a' + h2 - 10 });
-            dbg(if l2 < 10 { b'0' + l2 } else { b'a' + l2 - 10 });
-            dbg(b'>');
-        }
+        // Step 11: Start WiFi.
         let ret = unsafe { esp_wifi_start() };
         if ret != ESP_OK as i32 {
-            dbg(b'!'); dbg(b'A');
             return Err(WifiError::InitFailed);
         }
 
@@ -633,6 +560,10 @@ impl Esp32Wifi {
 
     pub fn is_connected(&self) -> bool {
         self.connected
+    }
+
+    pub fn rx_cb_count(&self) -> u32 {
+        unsafe { RX_CB_COUNT }
     }
 
     /// Scan for nearby access points using the blob's scan API.
@@ -689,10 +620,12 @@ impl NetworkDevice for Esp32Wifi {
     }
 
     fn has_rx(&self) -> bool {
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
         unsafe { RX_READY[RX_READ] }
     }
 
     fn recv(&self, buf: &mut [u8]) -> usize {
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
         let ri = unsafe { RX_READ };
         if !unsafe { RX_READY[ri] } || unsafe { RX_LEN[ri] } == 0 {
             return 0;

@@ -9,10 +9,10 @@ description = "ESP32 RISC-V SoC drivers (C3/C6/H2) for VeerOS"
 
 [features]
 default = ["c6"]
-c3 = []
-c6 = []
-h2 = []
+c3 = ["esp-wifi-sys/esp32c3"]
+c6 = ["esp-wifi-sys/esp32c6"]
+h2 = ["esp-wifi-sys/esp32c6"]
 
 [dependencies]
 arch = { path = "../../arch" }
-esp-wifi-sys = { version = "0.8.1", features = ["esp32c6"] }
+esp-wifi-sys = { version = "0.8.1", default-features = false }

@@ -45,6 +45,7 @@ MEMORY
 PROVIDE( ets_delay_us               = 0x40000040 );
 PROVIDE( roundup2                   = 0x40000088 );
 PROVIDE( ets_printf                 = 0x40000028 );
+PROVIDE( ets_install_putc1          = 0x4000002c );
 
 /* ── rom phy functions ──────────────────────────────────────────────── */
 PROVIDE( abs_temp                   = 0x40001130 );

@@ -534,3 +534,39 @@ pub const SYS_DRV_REGISTER: usize = 0xC4;
 ///   a1 = length
 /// Returns: a0 = 0.
 pub const SYS_DRV_LOG: usize = 0xC5;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Capability management (0xD0–0xDF)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Query own capability bits.
+///   (no args)
+/// Returns: a0 = ProcessCaps bits.
+pub const SYS_CAP_GET: usize = 0xD0;
+
+/// Drop capabilities from own process (irrevocable).
+///   a0 = ProcessCaps bits to remove
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_CAP_DROP: usize = 0xD1;
+
+/// Set capability mask for a child process (before it starts execution).
+///   a0 = child pid
+///   a1 = ProcessCaps bits to set (must be subset of own caps)
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_CAP_SET_CHILD: usize = 0xD2;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Audit (0xE0–0xEF)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Read audit log entries.
+///   a0 = start index (0 = oldest)
+///   a1 = pointer to output buffer (caller-provided AuditEntry array)
+///   a2 = max entries to read
+/// Returns: a0 = number of entries written.
+pub const SYS_AUDIT_READ: usize = 0xE0;
+
+/// Get audit log statistics.
+///   (no args)
+/// Returns: a0 = total events recorded, a1 = current entry count in buffer.
+pub const SYS_AUDIT_COUNT: usize = 0xE1;

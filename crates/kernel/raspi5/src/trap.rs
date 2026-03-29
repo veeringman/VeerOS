@@ -13,7 +13,7 @@ use microkernel::task::Scheduler;
 use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, GIC, INODES, RAMFS, FAT32, MOUNTS, INPUT};
+use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, GIC, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AArch64 ESR_EL1 constants
@@ -110,6 +110,8 @@ unsafe fn handle_svc(ctx: *mut TaskContext) -> *mut TaskContext {
     let fat32 = unsafe { &mut *FAT32.0.get() };
     let mounts = unsafe { &mut *MOUNTS.0.get() };
     let input = unsafe { &mut *INPUT.0.get() };
+    let drivers = unsafe { &mut *DRIVERS.0.get() };
+    let audit = unsafe { &mut *AUDIT.0.get() };
 
     let action = unsafe {
         dispatch::dispatch(
@@ -128,6 +130,8 @@ unsafe fn handle_svc(ctx: *mut TaskContext) -> *mut TaskContext {
             fat32,
             mounts,
             input,
+            drivers,
+            audit,
             crate::console_write_byte,
             crate::console_read_byte,
         )

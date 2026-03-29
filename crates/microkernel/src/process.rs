@@ -1,14 +1,25 @@
 //! Process model — groups threads that share an address space.
 //!
-//! A **Process** owns memory regions, capability tokens (future), and
-//! resource quotas.  One or more **Threads** (TCBs in [`crate::task`])
-//! execute within a process, sharing its memory.
+//! A **Process** owns memory regions, capability tokens, and resource
+//! quotas.  One or more **Threads** (TCBs in [`crate::task`]) execute
+//! within a process, sharing its memory.
 //!
 //! On targets without an MMU (riscv32imc), the "address space" is simply
 //! the set of PMP regions granted to the process.  On MMU targets the
 //! process will additionally own a page table root pointer / ASID.
+//!
+//! # Capability Model
+//!
+//! Each process holds a [`ProcessCaps`] bitfield controlling which syscall
+//! groups it may invoke. Capabilities follow these rules:
+//!
+//! - **Root (pid 0)** starts with all capabilities.
+//! - **Child processes** inherit the parent's caps (never gain more).
+//! - **Capabilities can be dropped** (voluntarily, before exec), never added.
+//! - The dispatcher checks `process.caps` before executing privileged syscalls.
 
 use arch::{TaskMemRegion, MemPerms};
+use bitflags::bitflags;
 use crate::user::{UserId, GroupId, ROOT_UID, ROOT_GID};
 use crate::vfs::{FileDescriptor, MAX_FDS, ROOT_INODE};
 
@@ -20,6 +31,105 @@ pub const MAX_PROCESSES: usize = 8;
 /// Threads add their own stack regions on top of these when programming
 /// PMP on context switch.
 pub const MAX_PROCESS_REGIONS: usize = 4;
+
+// ─── Per-process capabilities ───────────────────────────────────────────
+
+bitflags! {
+    /// Per-process capability bits controlling which syscall groups are allowed.
+    ///
+    /// Caps are enforced by the dispatcher before executing any privileged
+    /// syscall. A process may voluntarily drop caps (e.g. a sandbox) but
+    /// can never gain caps it wasn't born with.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ProcessCaps: u32 {
+        // ── Basic (granted to all processes) ──────────────────────
+        /// Task control: yield, exit, task_id, tls_get/set.
+        const TASK_BASIC      = 1 << 0;
+        /// Memory: alloc, free, region info.
+        const MEM             = 1 << 1;
+        /// Time: tick, sleep.
+        const TIME            = 1 << 2;
+        /// Synchronization: futex_wait, futex_wake.
+        const SYNC            = 1 << 3;
+
+        // ── IPC / Channels ────────────────────────────────────────
+        /// IPC: send, recv, poll.
+        const IPC             = 1 << 4;
+        /// Channels: create, send, recv, close, poll.
+        const CHANNEL         = 1 << 5;
+        /// Poll: poll_set, poll_wait.
+        const POLL            = 1 << 6;
+
+        // ── I/O ───────────────────────────────────────────────────
+        /// Console I/O: write_byte, write_buf, read_byte.
+        const CONSOLE_IO      = 1 << 7;
+        /// Filesystem: open, close, read, write, seek, stat, readdir, etc.
+        const FS              = 1 << 8;
+
+        // ── Networking ────────────────────────────────────────────
+        /// Sockets: socket, bind, listen, accept, connect, send, recv, close.
+        const NET             = 1 << 9;
+
+        // ── Process management ────────────────────────────────────
+        /// Spawn new threads within own process.
+        const SPAWN_THREAD    = 1 << 10;
+        /// Spawn new processes (fork-like).
+        const SPAWN_PROCESS   = 1 << 11;
+
+        // ── Privileged / Admin ────────────────────────────────────
+        /// User management: setuid, login, logout.
+        const USER_ADMIN      = 1 << 12;
+        /// Driver MMIO/IRQ access: mmio_read, mmio_write, irq_wait, irq_ack.
+        const DRIVER          = 1 << 13;
+        /// Mount / unmount filesystems.
+        const MOUNT           = 1 << 14;
+        /// Hardware GPIO / I2C / SPI / sensors.
+        const HW              = 1 << 15;
+
+        // ── Future security extensions ────────────────────────────
+        /// Crypto syscalls (future: 0xE0–0xEF).
+        const CRYPTO          = 1 << 16;
+        /// Capability management syscalls (future: 0xD0–0xDF).
+        /// Required to drop caps on child, query own caps, etc.
+        const CAP_ADMIN       = 1 << 17;
+    }
+}
+
+impl ProcessCaps {
+    /// All capabilities — granted to the root/init process.
+    pub const fn all_caps() -> Self {
+        Self::all()
+    }
+
+    /// Default capability set for unprivileged user processes.
+    ///
+    /// Includes: task basics, memory, time, sync, IPC, channels, poll,
+    /// console I/O, filesystem, networking, thread spawning.
+    /// Excludes: spawn_process, user_admin, driver, mount, hw, crypto, cap_admin.
+    pub const fn user_default() -> Self {
+        Self::TASK_BASIC
+            .union(Self::MEM)
+            .union(Self::TIME)
+            .union(Self::SYNC)
+            .union(Self::IPC)
+            .union(Self::CHANNEL)
+            .union(Self::POLL)
+            .union(Self::CONSOLE_IO)
+            .union(Self::FS)
+            .union(Self::NET)
+            .union(Self::SPAWN_THREAD)
+    }
+
+    /// Minimal sandbox: only compute + basic IPC, no I/O at all.
+    pub const fn sandbox() -> Self {
+        Self::TASK_BASIC
+            .union(Self::MEM)
+            .union(Self::TIME)
+            .union(Self::SYNC)
+            .union(Self::IPC)
+            .union(Self::CHANNEL)
+    }
+}
 
 // ─── Process state ──────────────────────────────────────────────────────
 
@@ -59,6 +169,8 @@ pub struct Process {
     pub uid: UserId,
     /// Owner group ID.
     pub gid: GroupId,
+    /// Per-process capability bits (controls which syscall groups are allowed).
+    pub caps: ProcessCaps,
     /// Per-process file descriptor table.
     pub fds: [Option<FileDescriptor>; MAX_FDS],
     /// Current working directory (inode ID).
@@ -79,6 +191,7 @@ impl Process {
             region_count: 0,
             uid: ROOT_UID,
             gid: ROOT_GID,
+            caps: ProcessCaps::all(),
             fds: [None; MAX_FDS],
             cwd: ROOT_INODE,
         }
@@ -108,6 +221,14 @@ impl ProcessTable {
         uid: UserId,
         gid: GroupId,
     ) -> Option<usize> {
+        // Child inherits parent's caps (can never exceed them).
+        let inherited_caps = if parent_pid < MAX_PROCESSES {
+            self.processes[parent_pid].caps
+        } else {
+            // Root / init process — full capabilities.
+            ProcessCaps::all()
+        };
+
         for (i, slot) in self.processes.iter_mut().enumerate() {
             if slot.state == ProcessState::Free {
                 *slot = Process {
@@ -122,6 +243,7 @@ impl ProcessTable {
                     region_count: 0,
                     uid,
                     gid,
+                    caps: inherited_caps,
                     fds: [None; MAX_FDS],
                     cwd: ROOT_INODE,
                 };
@@ -129,6 +251,20 @@ impl ProcessTable {
             }
         }
         None
+    }
+
+    /// Drop capabilities from a process. Caps can only be removed, never added.
+    /// Returns `true` if successful.
+    pub fn drop_caps(&mut self, pid: usize, to_drop: ProcessCaps) -> bool {
+        if pid >= MAX_PROCESSES {
+            return false;
+        }
+        let p = &mut self.processes[pid];
+        if p.state == ProcessState::Free {
+            return false;
+        }
+        p.caps.remove(to_drop);
+        true
     }
 
     /// Grant a memory region to a process.

@@ -152,6 +152,12 @@ struct RegistryCell(UnsafeCell<DriverRegistry>);
 unsafe impl Sync for RegistryCell {}
 static DRIVERS: RegistryCell = RegistryCell(UnsafeCell::new(DriverRegistry::new()));
 
+// Audit log
+use microkernel::audit::AuditLog;
+pub(crate) struct AuditCell(pub UnsafeCell<AuditLog>);
+unsafe impl Sync for AuditCell {}
+pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()));
+
 // Timer (stored for trap handler access)
 struct TimerCell(UnsafeCell<soc_raspi5::timer::ArmGenericTimer>);
 unsafe impl Sync for TimerCell {}

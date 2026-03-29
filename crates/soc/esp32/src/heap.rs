@@ -210,17 +210,6 @@ pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
     let ptr = unsafe { heap_alloc(total) };
     if !ptr.is_null() {
         unsafe { ptr::write_bytes(ptr, 0, total) };
-    } else if total > 0 {
-        // Debug: failed calloc
-        unsafe {
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, b'C' as u32);
-            let s = total as u32;
-            for shift in [12u32, 8, 4, 0] {
-                let nib = ((s >> shift) & 0xF) as u8;
-                let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-                core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-            }
-        }
     }
     ptr as *mut c_void
 }

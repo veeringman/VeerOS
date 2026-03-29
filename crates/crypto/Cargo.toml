@@ -1,0 +1,30 @@
+[package]
+name = "crypto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["sha256", "chacha20"]
+
+# Symmetric primitives (post-quantum safe by design)
+sha256   = []            # SHA-256 hash (FIPS 180-4)
+chacha20 = []            # ChaCha20-Poly1305 AEAD (RFC 8439) + ChaCha20-DRBG RNG
+blake3   = []            # BLAKE3 hash (future)
+
+# Classical asymmetric (Phase 1)
+x25519  = []             # X25519 ECDH key exchange (future)
+ed25519 = []             # Ed25519 signatures (future)
+
+# Post-quantum asymmetric — NIST FIPS 203/204 (Phase 2+)
+ml-kem  = []             # ML-KEM-768 (Kyber) key encapsulation (future)
+ml-dsa  = []             # ML-DSA-65 (Dilithium) digital signatures (future)
+
+# Hybrid mode: classical + PQC in parallel (Phase 2)
+# Security holds if EITHER algorithm family is unbroken.
+hybrid  = ["sha256"]     # Requires SHA-256 for KDF combiner
+
+# PQC-only mode: classical algorithms dropped (Phase 3 — future)
+pqc-only = []

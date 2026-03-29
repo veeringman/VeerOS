@@ -247,6 +247,15 @@ static mut SEMS: [SimpleSem; MAX_SEMS] = [const {
     }
 }; MAX_SEMS];
 
+static mut BLOB_TASK_ENTRIES: u32 = 0;
+static mut SEM_ALLOC_COUNT: u32 = 0;
+static mut SEM_TAKE_OK_COUNT: u32 = 0;
+static mut SEM_TAKE_BLOCK_COUNT: u32 = 0;
+static mut SEM_GIVE_COUNT: u32 = 0;
+static mut QUEUE_SEND_COUNT: u32 = 0;
+static mut QUEUE_RECV_OK_COUNT: u32 = 0;
+static mut QUEUE_RECV_BLOCK_COUNT: u32 = 0;
+
 fn alloc_sem(max: u32, init: u32) -> *mut c_void {
     for i in 0..MAX_SEMS {
         let s = unsafe { &mut SEMS[i] };
@@ -257,6 +266,7 @@ fn alloc_sem(max: u32, init: u32) -> *mut c_void {
             s.recursive = false;
             s.owner = 0;
             s.recursion = 0;
+            unsafe { SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1); }
             return s as *mut SimpleSem as *mut c_void;
         }
     }
@@ -273,6 +283,7 @@ fn alloc_recursive_mutex() -> *mut c_void {
             s.recursive = true;
             s.owner = 0;
             s.recursion = 0;
+            unsafe { SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1); }
             return s as *mut SimpleSem as *mut c_void;
         }
     }
@@ -388,12 +399,19 @@ static mut SOC_PHY_DIG_REGS_MEM: [u8; SOC_PHY_DIG_REGS_MEM_SIZE] =
 
 // INTMATRIX base on ESP32-C6.
 const INTMATRIX_BASE: usize = 0x6001_0000;
+const INTPRI_BASE: usize = 0x600C_5000;
+const INTC_CORE0_INTR_STATUS0: usize = 0x44;
+const INTC_CORE0_INTR_STATUS1: usize = 0x48;
+const INTC_CPU_INT_ENABLE: usize = 0x104;
 // PLIC base on ESP32-C6.
 const PLIC_BASE: usize = 0x2000_1000;
 const PLIC_MXINT_ENABLE: usize = 0x00;
 const PLIC_MXINT_TYPE: usize = 0x04;
 const PLIC_MXINT_CLEAR: usize = 0x08;
+const PLIC_EMIP_STATUS: usize = 0x0C;
 const PLIC_MXINT_PRI_BASE: usize = 0x10;
+const PLIC_MXINT_THRESH: usize = 0x90;
+const MIE_MEIE_BIT: u32 = 1 << 11;
 
 // WiFi interrupt source numbers (ESP32-C6 peripheral sources).
 const WIFI_MAC_INTR_SOURCE: usize = 0;
@@ -401,29 +419,83 @@ const WIFI_PWR_INTR_SOURCE: usize = 2;
 const WIFI_BB_INTR_SOURCE: usize = 3;
 const MODEM_PERI_TIMEOUT_INTR_SOURCE: usize = 34;
 
-// CPU interrupt lines for WiFi (line 1 = SYSTIMER, avoid it).
-const WIFI_MAC_CPU_INT: usize = 2;
-const WIFI_PWR_CPU_INT: usize = 3;
-const WIFI_INACTIVE_CPU_INT: usize = 31; // masked — sink for unwanted sources
+// Keep WiFi routed to CPU INT 1; keep line 2 enabled as a nearby fallback.
+const WIFI_CPU_INT: usize = 1;
+const WIFI_CPU_INT_ALT: usize = 2;
+const WIFI_INACTIVE_CPU_INT: usize = 31; // sink for unwanted sources
 
 /// Single stored WiFi ISR handler — both WIFI_MAC and WIFI_PWR call it.
 /// Matches esp-wifi's ISR_INTERRUPT_1 approach.
 static mut WIFI_ISR_FN: *mut c_void = core::ptr::null_mut();
 static mut WIFI_ISR_ARG: *mut c_void = core::ptr::null_mut();
 
+/// Diagnostic counters.
+static mut WIFI_ISR_COUNT: u32 = 0;
+static mut BLOB_TASKS_SPAWNED: u32 = 0;
+static mut ISR_REGISTERED: bool = false;
+
+/// Track what the blob passes to set_intr.
+static mut BLOB_SET_INTR_SOURCE: [u32; 4] = [0xFFFF; 4];
+static mut BLOB_SET_INTR_NUM: [u32; 4] = [0xFFFF; 4];
+static mut BLOB_SET_INTR_COUNT: usize = 0;
+static mut BLOB_INTS_ON_MASK: u32 = 0;
+
+/// Return diagnostic counters.
+pub fn wifi_diag(
+) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    unsafe {
+        let plic_en = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *const u32);
+        let emip = core::ptr::read_volatile((PLIC_BASE + PLIC_EMIP_STATUS) as *const u32);
+        let thresh = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_THRESH) as *const u32);
+        let mie: u32;
+        core::arch::asm!("csrr {0}, mie", out(reg) mie, options(nomem, nostack));
+        let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
+        let map_mac = core::ptr::read_volatile((INTMATRIX_BASE + WIFI_MAC_INTR_SOURCE * 4) as *const u32);
+        let map_pwr = core::ptr::read_volatile((INTMATRIX_BASE + WIFI_PWR_INTR_SOURCE * 4) as *const u32);
+        let st0 = core::ptr::read_volatile((INTPRI_BASE + INTC_CORE0_INTR_STATUS0) as *const u32);
+        let st1 = core::ptr::read_volatile((INTPRI_BASE + INTC_CORE0_INTR_STATUS1) as *const u32);
+        // Compact blob set_intr calls: pack first 2 as (src0 << 16 | num0) and (src1 << 16 | num1)
+        let si0 = if BLOB_SET_INTR_COUNT > 0 { (BLOB_SET_INTR_SOURCE[0] << 16) | BLOB_SET_INTR_NUM[0] } else { 0xDEAD };
+        let si1 = if BLOB_SET_INTR_COUNT > 1 { (BLOB_SET_INTR_SOURCE[1] << 16) | BLOB_SET_INTR_NUM[1] } else { 0xDEAD };
+        (
+            WIFI_ISR_COUNT,
+            plic_en,
+            emip,
+            thresh,
+            mie,
+            intc_en,
+            map_mac,
+            map_pwr,
+            st0,
+            st1,
+            si0,
+            si1,
+            BLOB_INTS_ON_MASK,
+            BLOB_TASKS_SPAWNED,
+            BLOB_TASK_ENTRIES,
+            SEM_ALLOC_COUNT,
+            SEM_TAKE_OK_COUNT,
+            SEM_TAKE_BLOCK_COUNT,
+            SEM_GIVE_COUNT,
+            QUEUE_SEND_COUNT,
+            QUEUE_RECV_OK_COUNT | (QUEUE_RECV_BLOCK_COUNT << 16),
+        )
+    }
+}
+
 /// Set up WiFi interrupt routing in INTMATRIX and PLIC.
 /// Call once during WiFi init, before the blob registers its ISR.
 pub fn setup_wifi_interrupts() {
     unsafe {
-        // Route WIFI_MAC(0) → CPU INT 2
+        // Route WIFI_MAC(0) → WIFI_CPU_INT (2)
         core::ptr::write_volatile(
             (INTMATRIX_BASE + WIFI_MAC_INTR_SOURCE * 4) as *mut u32,
-            WIFI_MAC_CPU_INT as u32,
+            WIFI_CPU_INT as u32,
         );
-        // Route WIFI_PWR(2) → CPU INT 3
+        // Route WIFI_PWR(2) → same WIFI_CPU_INT (2) — blob uses single ISR line
         core::ptr::write_volatile(
             (INTMATRIX_BASE + WIFI_PWR_INTR_SOURCE * 4) as *mut u32,
-            WIFI_PWR_CPU_INT as u32,
+            WIFI_CPU_INT as u32,
         );
         // Route WIFI_BB(3) and MODEM_PERI_TIMEOUT(34) → CPU INT 31 (inactive)
         core::ptr::write_volatile(
@@ -435,39 +507,38 @@ pub fn setup_wifi_interrupts() {
             WIFI_INACTIVE_CPU_INT as u32,
         );
 
-        // Set priority 1 for CPU INT 2 and 3.
+        // Set priority 1 for WIFI_CPU_INT.
         core::ptr::write_volatile(
-            (PLIC_BASE + PLIC_MXINT_PRI_BASE + WIFI_MAC_CPU_INT * 4) as *mut u32, 1,
+            (PLIC_BASE + PLIC_MXINT_PRI_BASE + WIFI_CPU_INT * 4) as *mut u32, 1,
         );
         core::ptr::write_volatile(
-            (PLIC_BASE + PLIC_MXINT_PRI_BASE + WIFI_PWR_CPU_INT * 4) as *mut u32, 1,
+            (PLIC_BASE + PLIC_MXINT_PRI_BASE + WIFI_CPU_INT_ALT * 4) as *mut u32,
+            1,
         );
 
-        // Set level-triggered for both lines.
+        // Set level-triggered for WiFi lines (clear type bits).
         let typ = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_TYPE) as *const u32);
         core::ptr::write_volatile(
             (PLIC_BASE + PLIC_MXINT_TYPE) as *mut u32,
-            typ & !((1 << WIFI_MAC_CPU_INT) | (1 << WIFI_PWR_CPU_INT)),
+            typ & !((1 << WIFI_CPU_INT) | (1 << WIFI_CPU_INT_ALT)),
         );
 
         // Clear any stale pending state.
         core::ptr::write_volatile(
             (PLIC_BASE + PLIC_MXINT_CLEAR) as *mut u32,
-            (1 << WIFI_MAC_CPU_INT) | (1 << WIFI_PWR_CPU_INT),
+            (1 << WIFI_CPU_INT) | (1 << WIFI_CPU_INT_ALT),
         );
 
-        // Enable CPU INT 2 and 3 in PLIC.
-        let en = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *const u32);
+        // NOTE: Do NOT enable CPU INT 2/3 in PLIC or mie here.
+        // They will be enabled in set_isr() once the blob registers its handler.
+        // Enabling level-triggered interrupts before an ISR is registered
+        // causes an infinite re-entry loop.
+
+        // Keep INTPRI CPU-int gate closed until ISR is registered.
+        let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
         core::ptr::write_volatile(
-            (PLIC_BASE + PLIC_MXINT_ENABLE) as *mut u32,
-            en | (1 << WIFI_MAC_CPU_INT) | (1 << WIFI_PWR_CPU_INT),
-        );
-
-        // Enable in mie CSR.
-        core::arch::asm!(
-            "csrs mie, {0}",
-            in(reg) (1u32 << WIFI_MAC_CPU_INT) | (1u32 << WIFI_PWR_CPU_INT),
-            options(nomem, nostack),
+            (INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32,
+            intc_en & !((1 << WIFI_CPU_INT) | (1 << WIFI_CPU_INT_ALT)),
         );
     }
 }
@@ -476,22 +547,16 @@ pub fn setup_wifi_interrupts() {
 /// Returns `true` if it was a WiFi interrupt and was handled.
 #[inline(never)]
 pub fn wifi_isr_dispatch(cpu_int: usize) -> bool {
-    if cpu_int != WIFI_MAC_CPU_INT && cpu_int != WIFI_PWR_CPU_INT {
+    if cpu_int != WIFI_CPU_INT && cpu_int != WIFI_CPU_INT_ALT && cpu_int != 11 {
         return false;
     }
+    unsafe { WIFI_ISR_COUNT += 1; }
     let fnc = unsafe { WIFI_ISR_FN };
     if fnc.is_null() {
         return false;
     }
     let handler: unsafe extern "C" fn(*mut c_void) = unsafe { core::mem::transmute(fnc) };
     let arg = unsafe { WIFI_ISR_ARG };
-    // Trace: 'i' + cpu_int hex digit
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'i' as u32);
-        let nib = (cpu_int & 0xF) as u8;
-        let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-    }
     unsafe { handler(arg) };
     true
 }
@@ -507,28 +572,27 @@ unsafe extern "C" fn env_is_chip() -> bool {
 unsafe extern "C" fn set_intr(
     _cpu_no: i32,
     intr_source: u32,
-    intr_num: u32,
+    _intr_num: u32,
     _intr_prio: i32,
 ) {
-    // Trace: 'I' + source hex digit + ':' + cpu_int hex digit
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'I' as u32);
-        let s = (intr_source & 0xF) as u8;
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, (if s < 10 { b'0' + s } else { b'a' + s - 10 }) as u32);
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b':' as u32);
-        let n = (intr_num & 0xF) as u8;
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, (if n < 10 { b'0' + n } else { b'a' + n - 10 }) as u32);
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b',' as u32);
+    // Record what the blob requests.
+    let idx = unsafe { BLOB_SET_INTR_COUNT };
+    if idx < 4 {
+        unsafe {
+            BLOB_SET_INTR_SOURCE[idx] = intr_source;
+            BLOB_SET_INTR_NUM[idx] = _intr_num;
+            BLOB_SET_INTR_COUNT = idx + 1;
+        }
     }
-    // Do NOT honor the blob's routing — it wants CPU INT 1 which is SYSTIMER.
-    // We pre-configure WIFI_MAC→CPU INT 2, WIFI_PWR→CPU INT 3 in setup_wifi_interrupts().
+    // Match upstream esp-wifi C6 behavior: this callback is informational.
+    // Routing is configured explicitly in `setup_wifi_interrupts()`.
 }
 
 unsafe extern "C" fn clear_intr(_intr_source: u32, _intr_num: u32) {
-    // Clear pending for WiFi CPU int lines.
+    // Clear pending for our WiFi CPU interrupt lines.
     core::ptr::write_volatile(
         (PLIC_BASE + PLIC_MXINT_CLEAR) as *mut u32,
-        (1 << WIFI_MAC_CPU_INT) | (1 << WIFI_PWR_CPU_INT),
+        (1 << WIFI_CPU_INT) | (1 << WIFI_CPU_INT_ALT),
     );
 }
 
@@ -538,34 +602,52 @@ unsafe extern "C" fn set_isr(
     arg: *mut c_void,
 ) {
     // Store the WiFi ISR handler. Both WIFI_MAC and WIFI_PWR use the same one.
-    // Trace: 'J' = ISR registered
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'J' as u32);
-    }
     WIFI_ISR_FN = f;
     WIFI_ISR_ARG = arg;
+    ISR_REGISTERED = !f.is_null();
+
+    // Now that an ISR is registered, enable WiFi interrupt.
+    unsafe {
+        // Clear stale pending first.
+        core::ptr::write_volatile(
+            (PLIC_BASE + PLIC_MXINT_CLEAR) as *mut u32,
+            (1 << WIFI_CPU_INT) | (1 << WIFI_CPU_INT_ALT),
+        );
+        // Enable WiFi CPU interrupt lines in PLIC.
+        let en = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *const u32);
+        core::ptr::write_volatile(
+            (PLIC_BASE + PLIC_MXINT_ENABLE) as *mut u32,
+            en | (1 << WIFI_CPU_INT) | (1 << WIFI_CPU_INT_ALT),
+        );
+        // Enable WiFi CPU interrupt lines in INTPRI gate.
+        let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
+        core::ptr::write_volatile(
+            (INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32,
+            intc_en | (1 << WIFI_CPU_INT) | (1 << WIFI_CPU_INT_ALT),
+        );
+        // Enable in mie CSR.
+        core::arch::asm!(
+            "csrs mie, {0}",
+            in(reg) (1u32 << WIFI_CPU_INT) | (1u32 << WIFI_CPU_INT_ALT) | MIE_MEIE_BIT,
+            options(nomem, nostack),
+        );
+    }
 }
 
 unsafe extern "C" fn ints_on(mask: u32) {
-    // Trace: 'E' + 2 hex nibbles of mask
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'E' as u32);
-        for shift in [4u32, 0] {
-            let nib = ((mask >> shift) & 0xF) as u8;
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, (if nib < 10 { b'0' + nib } else { b'a' + nib - 10 }) as u32);
-        }
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b',' as u32);
-    }
-    // The blob calls this to enable specific CPU int line bits.
-    // We already enabled the WiFi lines in setup_wifi_interrupts(),
-    // but honor the request in case the blob toggles them.
+    unsafe { BLOB_INTS_ON_MASK |= mask; }
     let en = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *const u32);
     core::ptr::write_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *mut u32, en | mask);
-    core::arch::asm!("csrs mie, {0}", in(reg) mask, options(nomem, nostack));
+    let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
+    core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32, intc_en | mask);
+    core::arch::asm!("csrs mie, {0}", in(reg) (mask | MIE_MEIE_BIT), options(nomem, nostack));
 }
 unsafe extern "C" fn ints_off(mask: u32) {
+    let mask = mask;
     let en = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *const u32);
     core::ptr::write_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *mut u32, en & !mask);
+    let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
+    core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32, intc_en & !mask);
     core::arch::asm!("csrc mie, {0}", in(reg) mask, options(nomem, nostack));
 }
 
@@ -592,16 +674,6 @@ unsafe extern "C" fn task_yield_from_isr() {}
 
 unsafe extern "C" fn semphr_create(max: u32, init: u32) -> *mut c_void {
     let h = alloc_sem(max, init);
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'S' as u32);
-        let addr = h as usize as u32;
-        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
-            let nib = ((addr >> shift) & 0xF) as u8;
-            let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-        }
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b',' as u32);
-    }
     h
 }
 
@@ -615,22 +687,13 @@ unsafe extern "C" fn semphr_take(semphr: *mut c_void, block_time_tick: u32) -> i
     if let Some(s) = get_sem(semphr) {
         if s.count > 0 {
             s.count -= 1;
+            SEM_TAKE_OK_COUNT = SEM_TAKE_OK_COUNT.wrapping_add(1);
             return 1;
         }
         // Blocking path: yield and retry.
         // portMAX_DELAY (0xFFFFFFFF) → block indefinitely.
         if block_time_tick > 0 {
-            // Trace: 't' + handle address when entering blocking wait
-            unsafe {
-                core::ptr::write_volatile(0x6000_f000 as *mut u32, b't' as u32);
-                let addr = semphr as usize as u32;
-                for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
-                    let nib = ((addr >> shift) & 0xF) as u8;
-                    let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-                    core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-                }
-                core::ptr::write_volatile(0x6000_f000 as *mut u32, b',' as u32);
-            }
+            SEM_TAKE_BLOCK_COUNT = SEM_TAKE_BLOCK_COUNT.wrapping_add(1);
             let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 { u32::MAX } else { block_time_tick.max(500) };
             let mut i: u32 = 0;
             loop {
@@ -638,6 +701,7 @@ unsafe extern "C" fn semphr_take(semphr: *mut c_void, block_time_tick: u32) -> i
                 if let Some(s) = get_sem(semphr) {
                     if s.count > 0 {
                         s.count -= 1;
+                        SEM_TAKE_OK_COUNT = SEM_TAKE_OK_COUNT.wrapping_add(1);
                         return 1;
                     }
                 }
@@ -657,8 +721,7 @@ unsafe extern "C" fn semphr_give(semphr: *mut c_void) -> i32 {
         if s.count < s.max {
             s.count += 1;
         }
-        // Trace: 'g' = semaphore given
-        unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'g' as u32) };
+        SEM_GIVE_COUNT = SEM_GIVE_COUNT.wrapping_add(1);
         return 1;
     }
     0
@@ -730,20 +793,6 @@ unsafe extern "C" fn mutex_unlock(mutex: *mut c_void) -> i32 {
 
 unsafe extern "C" fn queue_create(queue_len: u32, item_size: u32) -> *mut c_void {
     let h = alloc_queue(queue_len as usize, item_size as usize);
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'Q' as u32);
-        // Print returned handle address
-        let addr = h as usize as u32;
-        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
-            let nib = ((addr >> shift) & 0xF) as u8;
-            let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-        }
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b',' as u32);
-        if h.is_null() {
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, b'!' as u32);
-        }
-    }
     h
 }
 
@@ -761,22 +810,9 @@ unsafe extern "C" fn queue_send(
     if let Some(q) = get_queue(queue) {
         let ok = queue_send_impl(q, item as *const c_void);
         if ok {
-            // Trace: 'p' = item put into queue
-            unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'p' as u32); }
-        } else {
-            unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'F' as u32); }
+            QUEUE_SEND_COUNT = QUEUE_SEND_COUNT.wrapping_add(1);
         }
         return ok as i32;
-    }
-    // get_queue failed — print the handle address for debugging
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'X' as u32);
-        let addr = queue as usize as u32;
-        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
-            let nib = ((addr >> shift) & 0xF) as u8;
-            let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-        }
     }
     0
 }
@@ -816,22 +852,21 @@ unsafe extern "C" fn queue_recv(
 ) -> i32 {
     if let Some(q) = get_queue(queue) {
         if queue_recv_impl(q, item) {
+            QUEUE_RECV_OK_COUNT = QUEUE_RECV_OK_COUNT.wrapping_add(1);
             return 1;
         }
     }
     // Queue empty — if blocking requested, sleep/yield and retry.
     // portMAX_DELAY (0xFFFFFFFF) → block indefinitely.
     if block_time_tick > 0 {
-        // Trace: 'w' = waiting on queue
-        unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'w' as u32); }
+        QUEUE_RECV_BLOCK_COUNT = QUEUE_RECV_BLOCK_COUNT.wrapping_add(1);
         let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 { u32::MAX } else { block_time_tick.max(500) };
         let mut i: u32 = 0;
         loop {
             poll_timers();
             if let Some(q) = get_queue(queue) {
                 if queue_recv_impl(q, item) {
-                    // Trace: 'r' = received from queue
-                    unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'r' as u32); }
+                    QUEUE_RECV_OK_COUNT = QUEUE_RECV_OK_COUNT.wrapping_add(1);
                     return 1;
                 }
             }
@@ -890,16 +925,6 @@ unsafe extern "C" fn event_group_delete(event: *mut c_void) {
 unsafe extern "C" fn event_group_set_bits(event: *mut c_void, bits: u32) -> u32 {
     if let Some(eg) = get_event_group(event) {
         eg.bits |= bits;
-        // Trace: 'b' + hex nibble of bits set
-        unsafe {
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, b'b' as u32);
-            let v = bits;
-            for shift in [12u32, 8, 4, 0] {
-                let nib = ((v >> shift) & 0xF) as u8;
-                let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-                core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-            }
-        }
         return eg.bits;
     }
     0
@@ -921,16 +946,6 @@ unsafe extern "C" fn event_group_wait_bits(
     wait_for_all_bits: c_int,
     block_time_tick: u32,
 ) -> u32 {
-    // Trace: 'W' + bits being waited for
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'W' as u32);
-        let v = bits_to_wait_for;
-        for shift in [12u32, 8, 4, 0] {
-            let nib = ((v >> shift) & 0xF) as u8;
-            let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-        }
-    }
     if let Some(eg) = get_event_group(event) {
         let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 { u32::MAX } else { block_time_tick.max(500) };
         let mut i: u32 = 0;
@@ -1069,20 +1084,13 @@ fn sys_task_id() -> usize {
 }
 
 unsafe fn run_blob_task(idx: usize) -> ! {
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'R' as u32);
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'0' as u32 + (idx as u32 & 0xF));
-    }
     unsafe { CURRENT_BLOB_TASK = idx };
+    unsafe { BLOB_TASK_ENTRIES = BLOB_TASK_ENTRIES.wrapping_add(1); }
     let (func, param) = unsafe {
         let t = &BLOB_TASKS[idx];
         (t.func, t.param)
     };
     unsafe { func(param) };
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'X' as u32);
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'0' as u32 + (idx as u32 & 0xF));
-    }
     unsafe { BLOB_TASKS[idx].active = false };
     loop {
         sys_sleep(1000);
@@ -1138,15 +1146,6 @@ unsafe extern "C" fn task_create_pinned_to_core(
             let st = sb + BLOB_TASK_STACK_SIZE;
             let child = sys_spawn(blob_task_entry_for(i), st, sb, _prio as usize);
             t.task_id = child;
-            unsafe {
-                core::ptr::write_volatile(0x6000_f000 as *mut u32, b'T' as u32);
-                let v = child as u32;
-                for shift in [12u32, 8, 4, 0] {
-                    let nib = ((v >> shift) & 0xF) as u8;
-                    let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-                    core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-                }
-            }
             if !task_handle.is_null() {
                 unsafe { *(task_handle as *mut usize) = child };
             }
@@ -1155,6 +1154,7 @@ unsafe extern "C" fn task_create_pinned_to_core(
                 t.task_id = usize::MAX;
                 return 0;
             }
+            unsafe { BLOB_TASKS_SPAWNED += 1; }
             return 1;
         }
     }
@@ -1201,18 +1201,6 @@ unsafe extern "C" fn task_get_max_priority() -> i32 {
 
 unsafe extern "C" fn osi_malloc(size: usize) -> *mut c_void {
     let p = unsafe { super::heap::malloc(size) };
-    if p.is_null() {
-        // Debug: allocation failed — write 'M' + size nibbles to USB FIFO
-        unsafe {
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, b'M' as u32);
-            let s = size as u32;
-            for shift in [12u32, 8, 4, 0] {
-                let nib = ((s >> shift) & 0xF) as u8;
-                let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-                core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-            }
-        }
-    }
     p
 }
 
@@ -1227,16 +1215,6 @@ unsafe extern "C" fn event_post(
     _event_data_size: usize,
     _ticks_to_wait: u32,
 ) -> i32 {
-    // Debug: print 'E' + event_id
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'E' as u32);
-        let id = event_id as u32;
-        for shift in [4u32, 0] {
-            let nib = ((id >> shift) & 0xF) as u8;
-            let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-        }
-    }
     0
 }
 
@@ -1253,18 +1231,53 @@ unsafe extern "C" fn dport_access_stall_other_cpu_end_wrap() {}
 unsafe extern "C" fn wifi_apb80m_request() {}
 unsafe extern "C" fn wifi_apb80m_release() {}
 
+/// Run PHY calibration early (before `esp_wifi_init_internal`), matching
+/// esp-wifi's init order.  When the blob later calls `phy_enable()` from
+/// ppTask it will find `PHY_CALIBRATED == true` and take the fast
+/// `phy_wakeup_init()` path instead of blocking in `register_chipv7_phy`.
+pub fn early_phy_init() {
+    unsafe {
+        if PHY_CALIBRATED {
+            return;
+        }
+
+        // Step 0: Populate g_phyFuns — the PHY blob's ROM function table.
+        extern "C" {
+            fn phy_get_romfuncs() -> *const u32;
+            static mut g_phyFuns: *const u32;
+        }
+        g_phyFuns = phy_get_romfuncs();
+
+        // Step 1: Full radio clock infrastructure (PMU, state maps, LP clocks)
+        modem::init_radio_clocks();
+        // Step 2: Legacy modem clock gate enables
+        modem::enable_all_clocks();
+        // Step 3: I2C master clock at 160 MHz (needed for RF register writes)
+        modem::enable_phy_clock();
+        // Step 4: Enable WiFi BB/FE/MAC clocks *before* PHY cal
+        modem::enable_wifi_clocks();
+        // Step 5: Run PHY calibration blob (partial cal, matching esp-wifi)
+        esp_wifi_sys::include::register_chipv7_phy(
+            &PHY_INIT_DATA as *const esp_wifi_sys::include::esp_phy_init_data_t,
+            &raw mut PHY_CAL_DATA,
+            esp_wifi_sys::include::esp_phy_calibration_mode_t_PHY_RF_CAL_NONE,
+        );
+        PHY_CALIBRATED = true;
+        PHY_ENABLED = true;
+    }
+}
+
 unsafe extern "C" fn phy_disable() {
     unsafe { PHY_ENABLED = false };
 }
 
 unsafe extern "C" fn phy_enable() {
-    unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'Y' as u32); }
     if !unsafe { PHY_ENABLED } {
-        unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'1' as u32); }
+        modem::init_radio_clocks();
         modem::enable_all_clocks();
+        modem::enable_phy_clock();
 
         if !unsafe { PHY_CALIBRATED } {
-            unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'2' as u32); }
             // First-time PHY init: run full calibration via blob.
             unsafe {
                 esp_wifi_sys::include::register_chipv7_phy(
@@ -1274,17 +1287,13 @@ unsafe extern "C" fn phy_enable() {
                 );
                 PHY_CALIBRATED = true;
             }
-            unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'3' as u32); }
         } else {
-            unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'4' as u32); }
             // Already calibrated: quick wake-up.
             unsafe { esp_wifi_sys::include::phy_wakeup_init() };
-            unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'5' as u32); }
         }
 
         unsafe { PHY_ENABLED = true };
     }
-    unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'Z' as u32); }
 }
 
 unsafe extern "C" fn phy_update_country_info(_country: *const c_char) -> c_int {
@@ -1338,12 +1347,10 @@ unsafe extern "C" fn ets_timer_arm_us(ptimer: *mut c_void, us: u32, repeat: bool
 }
 
 unsafe extern "C" fn wifi_reset_mac() {
-    unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'M' as u32); }
     modem::reset_all_modems();
 }
 
 unsafe extern "C" fn wifi_clock_enable() {
-    unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'C' as u32); }
     modem::enable_all_clocks();
 }
 
@@ -1454,16 +1461,6 @@ unsafe extern "C" fn wifi_create_queue(
     item_size: c_int,
 ) -> *mut c_void {
     let h = alloc_queue(queue_len as usize, item_size as usize);
-    unsafe {
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b'W' as u32);
-        let addr = h as usize as u32;
-        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
-            let nib = ((addr >> shift) & 0xF) as u8;
-            let ch = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-            core::ptr::write_volatile(0x6000_f000 as *mut u32, ch as u32);
-        }
-        core::ptr::write_volatile(0x6000_f000 as *mut u32, b',' as u32);
-    }
     h
 }
 
@@ -1477,7 +1474,6 @@ unsafe extern "C" fn wifi_delete_queue(queue: *mut c_void) {
 unsafe extern "C" fn coex_init() -> c_int { 0 }
 unsafe extern "C" fn coex_deinit() {}
 unsafe extern "C" fn coex_enable() -> c_int {
-    unsafe { core::ptr::write_volatile(0x6000_f000 as *mut u32, b'X' as u32); }
     0
 }
 unsafe extern "C" fn coex_disable() {}
@@ -1639,7 +1635,9 @@ const OSI_FUNCS: wifi_osi_funcs_t = wifi_osi_funcs_t {
     _coex_schm_process_restart: Some(coex_schm_process_restart),
     _coex_schm_register_cb: Some(coex_schm_register_cb),
     _coex_register_start_cb: Some(coex_register_start_cb),
+    #[cfg(feature = "c6")]
     _regdma_link_set_write_wait_content: Some(regdma_link_set_write_wait_content_dummy),
+    #[cfg(feature = "c6")]
     _sleep_retention_find_link_by_id: Some(sleep_retention_find_link_by_id_dummy),
     _coex_schm_flexible_period_set: Some(coex_schm_flexible_period_set),
     _coex_schm_flexible_period_get: Some(coex_schm_flexible_period_get),
