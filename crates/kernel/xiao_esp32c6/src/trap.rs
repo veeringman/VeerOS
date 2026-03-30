@@ -107,6 +107,16 @@ unsafe fn handle_interrupt(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
     match code {
         SYSTIMER_CPU_INT_CODE => handle_timer_tick(ctx),
         _ => {
+            // Clear INTPRI pending latch BEFORE dispatching ISR (matches upstream).
+            // Without this, level-triggered WiFi interrupts won't re-fire.
+            unsafe {
+                const INTPRI_BASE: usize = 0x600C_5000;
+                const INTC_CPU_INT_CLEAR: usize = 0xA8;
+                core::ptr::write_volatile(
+                    (INTPRI_BASE + INTC_CPU_INT_CLEAR) as *mut u32,
+                    1u32 << code,
+                );
+            }
             // Dispatch WiFi / BLE / other blob-registered ISRs.
             if !soc_esp32::wifi_os_adapter::wifi_isr_dispatch(code) {
                 // No handler registered — mask this line to prevent

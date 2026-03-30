@@ -736,20 +736,33 @@ fn net_task() -> ! {
             diag_tick += 1;
             if diag_tick % 500 == 0 {
                 let rx_count = unsafe { (*WIFI.0.get()).driver().rx_cb_count() };
+                let (rx_cb_total, rx_cb_ok, rx_cb_drop, rx_cb_bad, rx_cb_free) =
+                    unsafe { (*WIFI.0.get()).driver().rx_diag() };
+                let (rx_reg_count, rx_reg_sta_ret, rx_reg_ap_ret) =
+                    unsafe { (*WIFI.0.get()).driver().rx_reg_diag() };
                 let (
                     isr_cnt,
                     plic_en,
                     emip,
                     thresh,
                     mie,
+                    mip,
                     intc_en,
+                    intc_type,
+                    intc_pri_wifi,
+                    intc_pri_wifi_alt,
+                    intc_thresh,
                     map_mac,
+                    map_mac_nmi,
                     map_pwr,
                     st0,
                     st1,
                     si0,
                     si1,
                     ints_on,
+                    ints_on_count,
+                    ints_off_count,
+                    ints_shadow,
                     blob_spawns,
                     blob_entries,
                     sem_alloc,
@@ -758,28 +771,55 @@ fn net_task() -> ! {
                     sem_give,
                     queue_send,
                     queue_counts,
+                    queue_send_tag,
+                    queue_recv_tag,
+                    queue_max_depth,
+                    event_post_count,
+                    event_post_last,
                 ) = soc_esp32::wifi_os_adapter::wifi_diag();
                 let queue_recv = queue_counts & 0xFFFF;
                 let queue_block = queue_counts >> 16;
                 let (irq_ext11, irq1, irq2, irq_other, irq_last) = crate::trap::irq_diag();
                 let _ = writeln!(
                     con,
-                    "[net] #{} rx={} isr={} plic={:#x} emip={:#x} th={:#x} mie={:#x} ien={:#x} map={}/{} st={:#x}/{:#x} si={:#x}/{:#x} on={:#x} irq={}/{}/{}/{}@{} task={}/{} sem={}/{}/{} q={}/{}",
+                    "[net] #{} rx={} rcb={}/{}/{}/{}/{} rr={}/{}/{} isr={} plic={:#x} emip={:#x} th={:#x} mie={:#x} mip={:#x} ien={:#x} it={:#x} ip={:#x}/{:#x} ith={:#x} map={}/{}/{} st={:#x}/{:#x} si={:#x}/{:#x} on={:#x} io={}/{} sh={:#x} qtag={:#x}/{:#x} qmax={} ev={}/{} irq={}/{}/{}/{}@{} task={}/{} sem={}/{}/{} q={}/{}",
                     diag_tick,
                     rx_count,
+                    rx_cb_total,
+                    rx_cb_ok,
+                    rx_cb_drop,
+                    rx_cb_bad,
+                    rx_cb_free,
+                    rx_reg_count,
+                    rx_reg_sta_ret,
+                    rx_reg_ap_ret,
                     isr_cnt,
                     plic_en,
                     emip,
                     thresh,
                     mie,
+                    mip,
                     intc_en,
+                    intc_type,
+                    intc_pri_wifi,
+                    intc_pri_wifi_alt,
+                    intc_thresh,
                     map_mac,
+                    map_mac_nmi,
                     map_pwr,
                     st0,
                     st1,
                     si0,
                     si1,
                     ints_on,
+                    ints_on_count,
+                    ints_off_count,
+                    ints_shadow,
+                    queue_send_tag,
+                    queue_recv_tag,
+                    queue_max_depth,
+                    event_post_count,
+                    event_post_last,
                     irq_ext11,
                     irq1,
                     irq2,
@@ -1127,7 +1167,7 @@ fn wifi_driver_task() -> ! {
             match mgr.connect() {
                 Ok(()) => {
                     mgr.ip = [192, 168, 29, 100];
-                    drv_log(b"[wifi-drv] connected to MARS\n");
+                    drv_log(b"[wifi-drv] connected!\n");
                 }
                 Err(_) => {
                     drv_log(b"[wifi-drv] connect failed, retrying\n");
@@ -1629,11 +1669,11 @@ pub extern "C" fn _rust_start() -> ! {
             if let Some(net_id) = inodes.mkdir_in(etc_id, "net") {
                 const WIFI_SSID: &str = match option_env!("VEEROS_WIFI_SSID") {
                     Some(s) => s,
-                    None => "MARS",
+                    None => "Vijay's iPhone",
                 };
                 const WIFI_PASS: &str = match option_env!("VEEROS_WIFI_PASS") {
                     Some(s) => s,
-                    None => "Naitla123",
+                    None => "vijay123",
                 };
                 // Build config content into a stack buffer.
                 let mut buf = [0u8; 256];

@@ -54,6 +54,13 @@ static mut RX_READ: usize = 0;
 /// Called from blob context whenever a WiFi frame is received.
 /// We copy the payload into our ring buffer and release the blob's buffer.
 static mut RX_CB_COUNT: u32 = 0;
+static mut RX_CB_ACCEPT_COUNT: u32 = 0;
+static mut RX_CB_DROP_RING_FULL_COUNT: u32 = 0;
+static mut RX_CB_BAD_LEN_COUNT: u32 = 0;
+static mut RX_CB_FREE_COUNT: u32 = 0;
+static mut RX_CB_REG_COUNT: u32 = 0;
+static mut RX_CB_REG_LAST_STA_RET: i32 = 0;
+static mut RX_CB_REG_LAST_AP_RET: i32 = 0;
 
 unsafe extern "C" fn recv_cb_sta(
     buffer: *mut c_void,
@@ -62,7 +69,7 @@ unsafe extern "C" fn recv_cb_sta(
 ) -> i32 {
     unsafe { RX_CB_COUNT += 1; }
     let frame_len = len as usize;
-    if frame_len > 0 && frame_len <= FRAME_SIZE {
+    if frame_len > 0 && frame_len <= FRAME_SIZE && !buffer.is_null() {
         let wi = RX_WRITE;
         if !RX_READY[wi] {
             ptr::copy_nonoverlapping(buffer as *const u8, RX_RING[wi].as_mut_ptr(), frame_len);
@@ -70,10 +77,15 @@ unsafe extern "C" fn recv_cb_sta(
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
             RX_READY[wi] = true;
             RX_WRITE = (wi + 1) % NUM_RX_DESC;
+            RX_CB_ACCEPT_COUNT += 1;
+        } else {
+            RX_CB_DROP_RING_FULL_COUNT += 1;
         }
-        // else: ring full, drop frame
+    } else {
+        RX_CB_BAD_LEN_COUNT += 1;
     }
     esp_wifi_internal_free_rx_buffer(eb);
+    RX_CB_FREE_COUNT += 1;
     0 // ESP_OK
 }
 
@@ -515,10 +527,18 @@ impl Esp32Wifi {
         // Step 8: Register RX callbacks and TX done callback.
         // Match esp-wifi: register callbacks for both STA and AP interfaces.
         let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta)) };
+        unsafe {
+            RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
+            RX_CB_REG_LAST_STA_RET = ret;
+        }
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
         let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_AP, Some(recv_cb_sta)) };
+        unsafe {
+            RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
+            RX_CB_REG_LAST_AP_RET = ret;
+        }
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
@@ -552,6 +572,24 @@ impl Esp32Wifi {
             return Err(WifiError::InitFailed);
         }
 
+        // Some firmware paths can reset callback hooks during start/mode transitions.
+        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta)) };
+        unsafe {
+            RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
+            RX_CB_REG_LAST_STA_RET = ret;
+        }
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_AP, Some(recv_cb_sta)) };
+        unsafe {
+            RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
+            RX_CB_REG_LAST_AP_RET = ret;
+        }
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+
         self.initialized = true;
 
         // Defer connect until a subsequent call so start can settle asynchronously.
@@ -564,6 +602,22 @@ impl Esp32Wifi {
 
     pub fn rx_cb_count(&self) -> u32 {
         unsafe { RX_CB_COUNT }
+    }
+
+    pub fn rx_diag(&self) -> (u32, u32, u32, u32, u32) {
+        unsafe {
+            (
+                RX_CB_COUNT,
+                RX_CB_ACCEPT_COUNT,
+                RX_CB_DROP_RING_FULL_COUNT,
+                RX_CB_BAD_LEN_COUNT,
+                RX_CB_FREE_COUNT,
+            )
+        }
+    }
+
+    pub fn rx_reg_diag(&self) -> (u32, i32, i32) {
+        unsafe { (RX_CB_REG_COUNT, RX_CB_REG_LAST_STA_RET, RX_CB_REG_LAST_AP_RET) }
     }
 
     /// Scan for nearby access points using the blob's scan API.
