@@ -22,13 +22,19 @@ default = ["dist-minimal"]
 #
 #   dist-rt       — minimal + priority scheduler + real-time caps.
 #                   Hard-real-time workloads, motor control, etc.
+#                   Applied even to IoT targets — stays lightweight.
 #
-#   dist-full     — app + rt — everything bundled.
+#   dist-xrt      — rt + accelerators / GPU / FPGA / quantum.
+#                   Desktop, server, and edge AI targets only.
+#                   Not suitable for constrained MCUs.
+#
+#   dist-full     — app + xrt — everything bundled.
 #
 dist-minimal = []
 dist-app     = []
 dist-rt      = []
-dist-full    = ["dist-app", "dist-rt"]
+dist-xrt     = ["dist-rt"]
+dist-full    = ["dist-app", "dist-xrt"]
 
 # ── Optional component flags ─────────────────────────────────
 # These map 1-to-1 to optional `dep:` dependencies in kernel binaries.
@@ -49,5 +55,6 @@ samples    = ["userlib"]
 wifi       = []
 ble        = []
 ieee802154 = []
+accel      = []
 
 [dependencies]

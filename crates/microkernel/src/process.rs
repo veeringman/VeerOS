@@ -94,6 +94,8 @@ bitflags! {
         const CAP_ADMIN       = 1 << 17;
 
         /// Unified accelerator interface: coprocessor / FPGA / quantum jobs.
+        /// Only available when the `accel` feature is enabled (desktop/server).
+        #[cfg(feature = "accel")]
         const ACCEL           = 1 << 18;
     }
 }
@@ -120,8 +122,7 @@ impl ProcessCaps {
             .union(Self::CONSOLE_IO)
             .union(Self::FS)
             .union(Self::NET)
-                .union(Self::SPAWN_THREAD)
-                .union(Self::ACCEL)
+            .union(Self::SPAWN_THREAD)
     }
 
     /// Minimal sandbox: only compute + basic IPC, no I/O at all.

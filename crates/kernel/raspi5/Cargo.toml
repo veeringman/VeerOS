@@ -14,9 +14,11 @@ default = ["dist-app"]
 dist-minimal = ["microkernel/dist-minimal"]
 dist-app     = ["microkernel/dist-app", "shell", "userlib", "samples"]
 dist-rt      = ["microkernel/dist-rt"]
-dist-full    = ["dist-app", "dist-rt"]
+dist-xrt     = ["microkernel/dist-xrt", "accel"]
+dist-full    = ["dist-app", "dist-xrt"]
 
 # Optional components
+accel   = ["microkernel/accel"]
 shell   = ["dep:shell"]
 userlib = ["dep:userlib"]
 samples = ["userlib"]

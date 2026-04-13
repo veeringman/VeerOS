@@ -210,7 +210,8 @@ pub unsafe fn dispatch(
         SYS_CAP_DROP | SYS_CAP_SET_CHILD
             => ProcessCaps::CAP_ADMIN,
 
-        // Unified accelerator interface
+        // Unified accelerator interface (desktop/server only)
+        #[cfg(feature = "accel")]
         SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
         | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
         | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT
@@ -1964,7 +1965,8 @@ pub unsafe fn dispatch(
             SyscallAction::Resume
         }
 
-        // ── Accelerators / FPGA / Quantum ─────────────────────
+        // ── Accelerators / FPGA / Quantum (desktop/server only) ──
+        #[cfg(feature = "accel")]
         SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
         | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
         | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => {

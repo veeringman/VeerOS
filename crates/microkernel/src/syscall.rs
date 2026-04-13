@@ -320,24 +320,29 @@ pub const SYS_SETUID: usize = 0x92;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Accelerators / Co-processors / FPGA / Quantum (0xB0–0xBF)
+// Only compiled for desktop/server distributions (feature = "accel").
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "accel")]
 /// Get accelerator device count.
 /// Returns: a0 = number of registered accelerator endpoints.
 pub const SYS_ACCEL_COUNT: usize = 0xB0;
 
+#[cfg(feature = "accel")]
 /// Query an accelerator descriptor by index.
 ///   a0 = index
 ///   a1 = pointer to destination descriptor buffer
 /// Returns: a0 = 0 on success, `usize::MAX` on failure.
 pub const SYS_ACCEL_INFO: usize = 0xB1;
 
+#[cfg(feature = "accel")]
 /// Submit an accelerator workload.
 ///   a0 = device id
 ///   a1 = pointer to work descriptor
 /// Returns: a0 = token low bits, a1 = token high bits (or `usize::MAX` on error).
 pub const SYS_ACCEL_SUBMIT: usize = 0xB2;
 
+#[cfg(feature = "accel")]
 /// Poll completion for a submission token.
 ///   a0 = device id
 ///   a1 = token low bits
@@ -346,6 +351,7 @@ pub const SYS_ACCEL_SUBMIT: usize = 0xB2;
 /// Returns: a0 = 0 on success, `usize::MAX` on failure.
 pub const SYS_ACCEL_POLL: usize = 0xB3;
 
+#[cfg(feature = "accel")]
 /// Cancel a queued/running workload (best effort).
 ///   a0 = device id
 ///   a1 = token low bits
@@ -353,6 +359,7 @@ pub const SYS_ACCEL_POLL: usize = 0xB3;
 /// Returns: a0 = 0 on success, `usize::MAX` on failure.
 pub const SYS_ACCEL_CANCEL: usize = 0xB4;
 
+#[cfg(feature = "accel")]
 /// Program or reconfigure an FPGA bitstream.
 ///   a0 = device id
 ///   a1 = bitstream pointer
@@ -360,6 +367,7 @@ pub const SYS_ACCEL_CANCEL: usize = 0xB4;
 /// Returns: a0 = 0 on success, `usize::MAX` on failure.
 pub const SYS_FPGA_PROGRAM: usize = 0xB5;
 
+#[cfg(feature = "accel")]
 /// Submit a quantum circuit payload.
 ///   a0 = device id
 ///   a1 = circuit payload pointer

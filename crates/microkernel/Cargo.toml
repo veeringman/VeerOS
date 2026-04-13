@@ -11,9 +11,11 @@ default = ["dist-minimal"]
 dist-minimal = []
 dist-app = []
 dist-rt = []
-dist-full = ["dist-app", "dist-rt"]
+dist-xrt = ["dist-rt", "accel"]
+dist-full = ["dist-app", "dist-xrt"]
 multi-user = []
 ramfs-small = []
+accel = []
 
 [dependencies]
 bitflags.workspace = true
