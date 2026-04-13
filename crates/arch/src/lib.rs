@@ -12,6 +12,9 @@ pub mod riscv32;
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 
+#[cfg(target_arch = "x86_64")]
+pub mod x86_64;
+
 // Future: pub mod riscv64;
 // Future: pub mod x86_64;
 // Future: pub mod xtensa;
@@ -29,8 +32,9 @@ pub type TaskContext = riscv32::Riscv32Context;
 
 #[cfg(target_arch = "aarch64")]
 pub type TaskContext = aarch64::Aarch64Context;
-// #[cfg(target_arch = "x86_64")]
-// pub type TaskContext = x86_64::X86_64Context;
+
+#[cfg(target_arch = "x86_64")]
+pub type TaskContext = x86_64::X86_64Context;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Platform

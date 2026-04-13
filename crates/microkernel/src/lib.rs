@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod alloc;
+pub mod accelerator;
 pub mod audit;
 pub mod channel;
 pub mod dispatch;

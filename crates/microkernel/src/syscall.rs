@@ -318,6 +318,56 @@ pub const SYS_GETGID: usize = 0x91;
 /// Returns: a0 = 0 on success, `usize::MAX` on permission denied.
 pub const SYS_SETUID: usize = 0x92;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Accelerators / Co-processors / FPGA / Quantum (0xB0–0xBF)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Get accelerator device count.
+/// Returns: a0 = number of registered accelerator endpoints.
+pub const SYS_ACCEL_COUNT: usize = 0xB0;
+
+/// Query an accelerator descriptor by index.
+///   a0 = index
+///   a1 = pointer to destination descriptor buffer
+/// Returns: a0 = 0 on success, `usize::MAX` on failure.
+pub const SYS_ACCEL_INFO: usize = 0xB1;
+
+/// Submit an accelerator workload.
+///   a0 = device id
+///   a1 = pointer to work descriptor
+/// Returns: a0 = token low bits, a1 = token high bits (or `usize::MAX` on error).
+pub const SYS_ACCEL_SUBMIT: usize = 0xB2;
+
+/// Poll completion for a submission token.
+///   a0 = device id
+///   a1 = token low bits
+///   a2 = token high bits
+///   a3 = pointer to completion record
+/// Returns: a0 = 0 on success, `usize::MAX` on failure.
+pub const SYS_ACCEL_POLL: usize = 0xB3;
+
+/// Cancel a queued/running workload (best effort).
+///   a0 = device id
+///   a1 = token low bits
+///   a2 = token high bits
+/// Returns: a0 = 0 on success, `usize::MAX` on failure.
+pub const SYS_ACCEL_CANCEL: usize = 0xB4;
+
+/// Program or reconfigure an FPGA bitstream.
+///   a0 = device id
+///   a1 = bitstream pointer
+///   a2 = bitstream length
+/// Returns: a0 = 0 on success, `usize::MAX` on failure.
+pub const SYS_FPGA_PROGRAM: usize = 0xB5;
+
+/// Submit a quantum circuit payload.
+///   a0 = device id
+///   a1 = circuit payload pointer
+///   a2 = payload length
+///   a3 = requested qubits
+/// Returns: a0 = token low bits, a1 = token high bits (or `usize::MAX` on error).
+pub const SYS_QPU_SUBMIT: usize = 0xB6;
+
 /// Login: validate credentials and create a session.
 ///   a0 = pointer to username string
 ///   a1 = username length

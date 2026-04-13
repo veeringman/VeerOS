@@ -77,7 +77,7 @@ _Make `arch` crate truly architecture-neutral so ARM64, RISC-V 64, and x86-64 ca
 - [x] **Conditional `TaskContext` in `arch`** — `#[cfg(target_arch)]` type alias dispatch in `arch/src/lib.rs`; microkernel uses `SavedContext` trait methods
 - [ ] **ARM64 stub** — `arch_arm64` crate: `SavedContext` with 31 GPRs + SP + PC + PSTATE, trap frame for EL1→EL0
 - [ ] **RISC-V 64 stub** — `arch_riscv64` crate: same 32 GPRs but `usize = u64`, S-mode mcause→scause
-- [ ] **x86-64 stub** — `arch_x86_64` crate: `SavedContext` with 16 GPRs + RIP + RFLAGS + segment regs
+- [x] **x86-64 stub** — `arch_x86_64` crate: `SavedContext` with 16 GPRs + RIP + RFLAGS + kernel_word; x86-64 SysV calling convention (RDI/RSI/RDX/RCX/R8/R9 args, RAX syscall nr/return); wired into `arch::TaskContext` via `#[cfg(target_arch = "x86_64")]`
 
 ### 6B — Process + Thread Model
 _Introduce proper process/thread separation. Processes own address spaces; threads run within them._
@@ -837,7 +837,7 @@ _Microcontroller class. Dual-core Cortex-M33 or RISC-V Hazard3 (selectable), 520
 _Full x86-64 bring-up on QEMU `q35`/`pc` machine and Linux KVM. The path to running VeerOS on standard PCs, servers, and cloud VMs. KVM gives near-native performance for development, testing, and production edge deployments._
 
 #### x86-64 Architecture Crate
-- [ ] **`arch_x86_64` crate** — `SavedContext` for x86-64: 16 GPRs (RAX–R15) + RIP + RFLAGS + RSP + CS + SS + FS_BASE (TLS); `SavedContext` trait impl; `get_syscall_nr` from RAX, args from RDI/RSI/RDX/R10/R8/R9 (Linux ABI)
+- [x] **`arch_x86_64` crate** — `SavedContext` for x86-64: 16 GPRs (RAX–R15) + RIP + RFLAGS + kernel_word; `SavedContext` trait impl; `get_syscall_nr` from RAX, args from RDI/RSI/RDX/RCX/R8/R9 (SysV ABI); wired into `arch::TaskContext` via `#[cfg(target_arch = "x86_64")]`
 - [ ] **GDT (Global Descriptor Table)** — kernel CS/DS (Ring 0), user CS/DS (Ring 3), TSS descriptor; loaded via `lgdt` at boot
 - [ ] **TSS (Task State Segment)** — per-CPU TSS with `RSP0` (kernel stack on privilege transition), IST (Interrupt Stack Table) entries for NMI/DF/MCE
 - [ ] **IDT (Interrupt Descriptor Table)** — 256-entry IDT; ISR stubs (0–31 exceptions, 32–47 IRQs, 48+ software); each stub saves all GPRs → calls Rust handler → `iretq`
@@ -1332,6 +1332,58 @@ Target hardware capabilities:
   RISC-V 64       → sec-hw: PMP/ePMP, Sv39/48 MMU, Zkr/Zkn (if supported)
   x86-64          → sec-hw: TPM 2.0, AES-NI, SHA-NI, RDRAND, SMEP/SMAP, NX, SGX (optional), SEV (AMD)
 ```
+
+## Phase 8K — Unified Accelerator Interface (UAI)
+_Single kernel-facing contract for co-processors, hardware accelerators, FPGAs, and quantum processors. Hardware-agnostic control-plane that abstracts vendor protocols behind one async submit/poll/cancel model. Targets x86-64 and ARM64 hosts; stubbed on RISC-V. Feature-gated: `accel` (core traits + registry), `accel-fpga` (bitstream programming), `accel-quantum` (QPU-specific extensions)._
+
+### 8K-Core — Abstraction Layer (Complete)
+_Kernel module, capability bit, syscall ABI, and dispatcher stubs landed._
+
+- [x] **`AcceleratorClass` enum** — `Coprocessor`, `Accelerator`, `Fpga`, `Quantum`; covers every heterogeneous compute endpoint class
+- [x] **`AcceleratorBus` enum** — `Mmio`, `Pcie`, `Cxl`, `Virtio`, `Spi`, `I2c`, `SharedMemory`, `Vendor`; interconnect abstraction
+- [x] **`AcceleratorTransport` enum** — `DoorbellQueue`, `Mailbox`, `RingBuffer`, `RegisterCommand`; execution transport model
+- [x] **`AcceleratorCapabilities` struct** — `max_queues`, `max_transfer_bytes`, `dma_coherency`, `supports_preemption`, `supports_sriov`, `supports_bitstream_reconfig`, `supports_quantum`, `max_physical_qubits`, `max_logical_qubits`
+- [x] **`QuantumInfo` struct** — `model` (Gate/Annealing/Analog/Simulator), `t1_ns`, `t2_ns`, `gate_error_ppm`, `readout_error_ppm`; per-QPU fidelity metadata
+- [x] **`AcceleratorDevice` descriptor** — id, class, bus, transport, irq_line, control/queue MMIO regions, capabilities, optional quantum info
+- [x] **`WorkDescriptor` struct** — generic job: queue, `WorkloadClass` (Vector/Matrix/Signal/Crypto/BitstreamProgram/QuantumCircuit/QuantumSampling/Vendor), opcode, flags, in/out buffers, requested_qubits, deadline_tick
+- [x] **`CompletionRecord` struct** — token, `CompletionState` (Pending/Running/Done/Failed/Cancelled/Timeout), status_code, bytes_written
+- [x] **`AcceleratorRuntime` trait** — `device()`, `submit()`, `poll()`, `cancel()`, `fence()`; implemented by concrete drivers
+- [x] **`AcceleratorRegistry`** — fixed-size `[Option<AcceleratorDevice>; 16]`; register, lookup by id, count by class
+- [x] **`ACCEL` process capability** — new `ProcessCaps::ACCEL` bit (1 << 18); included in `user_default()` set; checked by dispatcher
+- [x] **Syscall ABI (0xB0–0xB6)** — `SYS_ACCEL_COUNT`, `SYS_ACCEL_INFO`, `SYS_ACCEL_SUBMIT`, `SYS_ACCEL_POLL`, `SYS_ACCEL_CANCEL`, `SYS_FPGA_PROGRAM`, `SYS_QPU_SUBMIT`; all capability-gated; placeholder handlers return `usize::MAX` until drivers wired
+- [x] **Design document** — `docs/accelerator-interface.md` with architecture, security model, and integration roadmap
+
+### 8K-Runtime — Kernel Integration (Planned)
+_Wire the registry into BSPs, implement first concrete backends, add userlib wrappers._
+
+- [ ] **Instantiate `AcceleratorRegistry` in kernel BSPs** — static cell in qemu_virt, raspi5, and future x86-64 kernel; passed to dispatcher
+- [ ] **Wire syscall handlers to registry** — `SYS_ACCEL_COUNT` returns `registry.count()`; `SYS_ACCEL_INFO` copies device descriptor to userland buffer; submit/poll/cancel route to matched `AcceleratorRuntime`
+- [ ] **Scheduler integration** — new `BlockReason::AccelWait(token)` variant; task blocks on `SYS_ACCEL_POLL` and wakes on completion IRQ or polling tick
+- [ ] **DMA buffer management** — contiguous physical buffer allocation for device I/O; coherency fence calls before/after ownership transfer
+- [ ] **Userlib `accelerator` module** — safe wrappers: `accel_count()`, `accel_info(idx)`, `accel_submit(dev, work)`, `accel_poll(dev, token)`, `accel_cancel(dev, token)`, `fpga_program(dev, bitstream)`, `qpu_submit(dev, circuit, qubits)`
+- [ ] **Shell `accel` command** — `accel list` (enumerate devices), `accel info <id>` (show capabilities), `accel status` (queue depths)
+
+### 8K-Backends — Concrete Drivers (Planned)
+_Vendor-specific drivers mapping to the generic `AcceleratorRuntime` trait._
+
+- [ ] **VIRTIO-ACCEL backend** — QEMU virtio accelerator device; doorbell/queue transport; used for CI / development testing
+- [ ] **FPGA bitstream loader (generic)** — `SYS_FPGA_PROGRAM`: validate bitstream header, write to FPGA config port (MMIO or SPI); support iCE40 / ECP5 / Xilinx partial reconfig
+- [ ] **PCIe accelerator enumeration** — on x86-64 / ARM64 PCIe hosts, scan for accelerator BARs by PCI class code; auto-register discovered devices
+- [ ] **Google Coral Edge TPU driver** — USB-attached INT8 inference accelerator; register as `AcceleratorClass::Accelerator`; submit TFLite delegate jobs
+- [ ] **Hailo-8 M.2 driver** — 13 TOPS NPU on RPi 5 M.2 HAT+; PCIe BAR-mapped control; INT8 inference delegation
+- [ ] **Quantum simulator bridge** — register Phase 9 simulator as `AcceleratorClass::Quantum` + `QuantumModel::Simulator`; route `SYS_QPU_SUBMIT` to state-vector engine
+- [ ] **Remote QPU proxy** — network-attached QPU exposed as local device via kernel channel; TLS-secured command/result relay
+- [ ] **CXL accelerator stubs** — CXL Type 2 device enumeration; shared host memory for coherent accelerator access (future x86-64 servers)
+
+### 8K-Security — Isolation & Accounting (Planned)
+_Ensure accelerator access is safe, auditable, and isolated._
+
+- [ ] **Per-device capability tokens** — `ResourceKind::Accelerator(id)` with `EXECUTE`, `CONFIGURE`, `PASSTHROUGH` rights; revocable per process
+- [ ] **DMA isolation enforcement** — IOMMU / SMMU / PMP guard accelerator DMA regions; prevent device-initiated memory corruption
+- [ ] **Accelerator audit events** — `AuditEvent::AccelSubmit`, `AccelComplete`, `AccelDenied` logged to security audit ring (Phase 8F)
+- [ ] **Side-channel mitigation** — flush accelerator caches/state between user switches; timing-independent result delivery
+- [ ] **Hot-plug / hot-remove** — USB/PCIe accelerator enumeration on plug; secure revocation of capabilities on unplug; in-flight jobs cancelled
+- [ ] **Resource accounting** — per-process accelerator time budget; kernel tracks cumulative device-seconds; quota enforcement at submit
 
 ## Phase 9 — Quantum CoProcessor Support
 _Hardware quantum coprocessor interface + extensible simulator/emulator. Designed for the NISQ era and beyond — supports noisy intermediate-scale circuits today, fault-tolerant quantum computing tomorrow. Feature-gated: `quantum` (simulator always included), `quantum-hw` (real QPU drivers), `quantum-cloud` (remote QPU access)._

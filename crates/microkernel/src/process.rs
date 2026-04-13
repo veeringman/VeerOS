@@ -92,6 +92,9 @@ bitflags! {
         /// Capability management syscalls (future: 0xD0–0xDF).
         /// Required to drop caps on child, query own caps, etc.
         const CAP_ADMIN       = 1 << 17;
+
+        /// Unified accelerator interface: coprocessor / FPGA / quantum jobs.
+        const ACCEL           = 1 << 18;
     }
 }
 
@@ -117,7 +120,8 @@ impl ProcessCaps {
             .union(Self::CONSOLE_IO)
             .union(Self::FS)
             .union(Self::NET)
-            .union(Self::SPAWN_THREAD)
+                .union(Self::SPAWN_THREAD)
+                .union(Self::ACCEL)
     }
 
     /// Minimal sandbox: only compute + basic IPC, no I/O at all.

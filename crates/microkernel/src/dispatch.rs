@@ -210,6 +210,12 @@ pub unsafe fn dispatch(
         SYS_CAP_DROP | SYS_CAP_SET_CHILD
             => ProcessCaps::CAP_ADMIN,
 
+        // Unified accelerator interface
+        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
+        | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
+        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT
+            => ProcessCaps::ACCEL,
+
         // Audit syscalls — read-only, always allowed
         SYS_AUDIT_READ | SYS_AUDIT_COUNT => ProcessCaps::TASK_BASIC,
 
@@ -1955,6 +1961,17 @@ pub unsafe fn dispatch(
             } else {
                 c.set_ret(0, 0);
             }
+            SyscallAction::Resume
+        }
+
+        // ── Accelerators / FPGA / Quantum ─────────────────────
+        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
+        | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
+        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => {
+            // ABI surface is reserved and capability-gated. Platform-specific
+            // runtime integration is provided by accelerator drivers.
+            c.set_ret(0, usize::MAX);
+            c.set_ret(1, 0);
             SyscallAction::Resume
         }
 
