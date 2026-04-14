@@ -107,3 +107,71 @@ portable kernel logic from hardware- and CPU-specific code.
 
 ➡️ **Detailed design & diagram:** [Architecture Documentation](docs/architecture.md)
 
+---
+
+## Distribution Profiles
+
+VeerOS uses Rust feature flags to compose purpose-built kernel images.
+Two orthogonal axes — **profile** (scheduler + capabilities) and **components**
+(shell, net, AI, cluster, firewall, …) — combine at compile time. Any mix of
+flags is valid.
+
+### Profile Hierarchy
+
+```
+dist-minimal                    bare scheduler, IPC, memory isolation
+├── dist-app                    + shell, networking, userlib, samples
+│   ├── dist-ai                 + inference engine, NL shell, NPU backends
+│   ├── dist-cluster            + cluster membership, distributed sched/IPC/VFS
+│   │   └── dist-cloud          + orchestration, service mesh, observability
+│   └── dist-full               all Tier 1 components + priority scheduler
+├── dist-rt                     + priority real-time scheduler
+│   └── dist-xrt                + accelerator / GPU / FPGA / QPU (UAI)
+├── dist-edge                   + edge AI inference, WiFi/BLE, sensor pipeline
+│   └── dist-gateway            + Thread border router, Zigbee, MQTT broker
+└── dist-firewall               + packet filter, NAT, VPN, DPI, traffic shaping
+```
+
+### Quick Reference
+
+| Profile | Base | Purpose | Target Hardware |
+|---------|------|---------|-----------------|
+| `dist-minimal` | — | Bare MCU, boot-to-idle | ESP32-C3, RP2350 |
+| `dist-app` | minimal | Interactive workstation | QEMU virt, RPi 3+ |
+| `dist-rt` | minimal | Hard real-time control | ESP32-C6, industrial |
+| `dist-xrt` | rt | RT + hardware accelerators | x86-64/ARM64 + GPU/FPGA |
+| `dist-full` | app | Everything included | RPi 5, x86-64 |
+| `dist-edge` | minimal | IoT / edge AI node | ESP32-S3, RPi Zero |
+| `dist-ai` | app | AI-native inference platform | RPi 4/5, x86-64 ≥ 2 GB |
+| `dist-cluster` | app | Distributed OS node | RPi 3+, x86-64, ARM64 |
+| `dist-cloud` | cluster | Cloud orchestration host | x86-64 KVM, ARM64 KVM |
+| `dist-firewall` | minimal | Router / firewall / VPN gateway | x86-64, ARM64, RPi 4/5 |
+| `dist-gateway` | edge | IoT protocol bridge | RPi 3+, ESP32-S3 |
+
+### Build Examples
+
+```sh
+# Bare scheduler — nothing but an idle loop
+cargo build -p kernel-qemu-virt --no-default-features --features dist-minimal
+
+# Interactive shell + networking (default for QEMU RISC-V)
+cargo build -p kernel-qemu-virt --features dist-app
+
+# Full ESP32 with all radios
+cargo build -p kernel-xiao-esp32c6 --features dist-full,wifi,ble,ieee802154
+
+# x86-64 network appliance
+cargo build -p kernel-qemu-pc --features dist-firewall
+
+# AI workstation with NPU offload
+cargo build -p kernel-qemu-pc --features dist-ai
+
+# Cloud cluster node
+cargo build -p kernel-qemu-pc --features dist-cloud
+
+# Mix-and-match — any combination is valid
+cargo build -p kernel-qemu-pc --features dist-firewall,ai
+```
+
+➡️ **Full distribution details:** see Phase 4 in [TODO.md](TODO.md)
+

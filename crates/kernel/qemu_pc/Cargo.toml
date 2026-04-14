@@ -1,0 +1,26 @@
+[package]
+name = "kernel-qemu-pc"
+version = "0.1.0"
+edition.workspace = true
+
+[features]
+default = ["dist-app"]
+
+dist-minimal = ["microkernel/dist-minimal"]
+dist-app     = ["microkernel/dist-app", "shell", "userlib", "samples"]
+dist-rt      = ["microkernel/dist-rt"]
+dist-xrt     = ["microkernel/dist-xrt", "accel"]
+dist-full    = ["dist-app", "dist-xrt"]
+
+accel   = ["microkernel/accel"]
+shell   = ["dep:shell"]
+userlib = ["dep:userlib"]
+samples = ["userlib"]
+
+[dependencies]
+arch = { path = "../../arch" }
+microkernel = { path = "../../microkernel", default-features = false }
+soc-qemu-pc = { path = "../../soc/qemu_pc" }
+shell = { path = "../../shell", optional = true }
+userlib = { path = "../../userlib", optional = true }
+panic-halt = "1.0"

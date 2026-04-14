@@ -5,7 +5,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 ## V1 Scope
 - [ ] Bootable microkernel on ESP32 RISC-V (C3/C6/H2) and Xtensa (S3)
 - [ ] Multi-architecture support — ARM64 (RPi family, QEMU/KVM), x86-64 (QEMU/KVM), RISC-V 32/64
-- [ ] Distribution variants via Rust feature flags — from `dist-minimal` (bare MCU) to `dist-cloud` (full cluster)
+- [ ] Distribution variants via Rust feature flags — from `dist-minimal` (bare MCU) to `dist-cloud` (full cluster); see Phase 4 for complete catalog
 - [ ] Configurable single-user / multi-user system (feature-gated)
 - [ ] Security-first architecture — capability-based access, isolation domains, PQC-ready crypto, extensible security model
 - [ ] AI-native OS — inference engine, NL shell, autonomous agents, on-device and cloud AI as first-class primitives
@@ -209,6 +209,8 @@ _Configurable single-user vs multi-user system. Feature-gated: `single-user` (de
 - [ ] **Shell prompt** — include username: `user@veeros $` (multi-user) vs `veeros $` (single-user)
 
 #### Distribution Integration
+_See Phase 4D (User Model Defaults) for the complete profile → user model mapping._
+
 - [ ] **`dist-minimal` / `dist-rt`** — default `single-user` (no auth overhead, bare-metal feel)
 - [ ] **`dist-app` / `dist-full`** — default `multi-user` on QEMU/network targets; `single-user` on ESP32 unless explicitly enabled
 - [ ] **`kernel-qemu-virt`** — `multi-user` auto-enabled when `net` feature active (remote access requires auth)
@@ -514,7 +516,12 @@ _Matter application layer on top of Thread (or WiFi) for smart home interoperabi
 - [ ] **RF coexistence** — 802.15.4 shares 2.4 GHz with WiFi and BLE; coordinate via esp-coex or time-division scheduling
 - [ ] **Channel selection** — auto-select least-interfered 802.15.4 channel based on WiFi channel and ED scan
 
-## Phase 4 — Distribution Profiles (Complete + Expansion Planned)
+## Phase 4 — Distribution Profiles (Unified Reference)
+_All VeerOS distribution profiles — from bare-metal MCU to cloud platform. Profiles are Rust feature flags in `distributions/src/lib.rs`. Two orthogonal axes: **profile** (scheduler + capabilities) × **components** (shell, net, AI, cluster, firewall, etc.). Profiles are additive — any combination of feature flags is valid._
+
+### 4A — Foundation Profiles (Complete)
+_Implemented and shipping. Feature flags live in `distributions/src/lib.rs`._
+
 - [x] Distribution matrix design — two axes: profile (minimal/app/rt/full) × components (shell/net/userlib/samples/wifi/ble/ieee802154)
 - [x] `distributions` crate restructured — aligned feature names (`dist-minimal`/`dist-app`/`dist-rt`/`dist-full`), component flags, documentation
 - [x] `kernel-qemu-virt` — optional deps: shell, net, userlib, smoltcp; profiles auto-bundle components; default = `dist-app`
@@ -525,18 +532,237 @@ _Matter application layer on top of Thread (or WiFi) for smart home interoperabi
 - [x] `real-time` distribution build recipe — `--features dist-rt` (priority scheduler, combine with component flags)
 - [x] `full` distribution build recipe — `--features dist-full` (all components + priority scheduler)
 
-### Extended Distribution Profiles (Planned)
-_New profiles to cover edge AI, cluster/distributed, cloud platform, and network appliance deployments._
+### 4B — Complete Distribution Catalog
 
-- [ ] **`dist-edge`** — IoT edge node: `dist-minimal` + AI inference (keyword/anomaly) + WiFi/BLE + sensor pipeline; targets ESP32 family, RPi Zero
-- [ ] **`dist-ai`** — AI-native: `dist-app` + full AI stack (inference engine, NL shell, model zoo, NPU backends); targets RPi 4/5, x86-64 with ≥ 2 GB RAM
-- [ ] **`dist-cluster`** — Distributed OS node: `dist-app` + cluster membership + distributed scheduler + distributed IPC + shared VFS; targets RPi 3+, x86-64, ARM64
-- [ ] **`dist-cloud`** — Cloud platform: `dist-cluster` + orchestration + service mesh + API gateway + ingress + observability + auto-scaling; targets x86-64 KVM, ARM64 KVM
-- [ ] **`dist-firewall`** — Network appliance: `dist-minimal` + packet filter + NAT + VPN + traffic shaping + DPI + firewall rules engine; targets x86-64, ARM64, RPi 4/5
-- [ ] **`dist-gateway`** — IoT gateway: `dist-edge` + Thread border router + Zigbee coordinator + MQTT broker + protocol translation; targets RPi 3+, ESP32-S3
-- [ ] **Feature composition** — profiles are additive: `dist-cloud` = `dist-cluster` + `cloud-orchestrate` + `cloud-mesh` + `cloud-observe`; any combination valid
-- [ ] **Build flag matrix** — `distributions/src/lib.rs` updated with new feature gates; cross-feature dependency validation at compile time
-- [ ] **Per-target defaults** — ESP32-C3/C6: `dist-edge`; RPi Zero: `dist-edge`; RPi 4/5: `dist-ai` or `dist-cluster`; x86-64 KVM: `dist-cloud`; x86-64 bare: `dist-firewall`
+#### Profile Hierarchy
+```
+dist-minimal                    (bare scheduler, IPC, VM, driver isolation)
+├── dist-app                    (+ shell, net, userlib, samples)
+│   ├── dist-ai                 (+ full AI stack, NL shell, NPU backends)
+│   ├── dist-cluster            (+ cluster membership, distributed sched/IPC/VFS)
+│   │   └── dist-cloud          (+ orchestration, service mesh, API gateway, observability)
+│   └── dist-full               (all Tier 1 components + priority scheduler)
+├── dist-rt                     (+ priority real-time scheduler)
+│   └── dist-xrt                (+ accelerator/GPU/FPGA/QPU via UAI)
+├── dist-edge                   (+ edge AI inference, WiFi/BLE, sensor pipeline)
+│   └── dist-gateway            (+ Thread border router, Zigbee, MQTT broker)
+└── dist-firewall               (+ packet filter, NAT, VPN, DPI, traffic shaping)
+```
+
+#### Tier 1 — Foundation (Implemented)
+
+| Profile | Base | Scheduler | Capabilities |
+|---------|------|-----------|--------------|
+| `dist-minimal` | — | round-robin | IPC, VIRTUAL_MEMORY, DRIVER_ISOLATION |
+| `dist-app` | dist-minimal | application | + NETWORK_STACK, APPLICATION_RUNTIME, shell, net, userlib, samples |
+| `dist-rt` | dist-minimal | priority | + REAL_TIME_SCHEDULER |
+| `dist-xrt` | dist-rt | priority | + ACCEL (GPU/FPGA/QPU via UAI); feature-gated `accel` |
+| `dist-full` | dist-app | priority | all Tier 1 components |
+
+#### Tier 2 — Specialized (Planned)
+
+| Profile | Base | Key Additions | Target Hardware |
+|---------|------|---------------|-----------------|
+| `dist-edge` | dist-minimal | AI inference (keyword/anomaly), WiFi/BLE, sensor pipeline | ESP32 family, RPi Zero |
+| `dist-ai` | dist-app | full AI stack (inference engine, NL shell, model zoo, NPU backends) | RPi 4/5, x86-64 ≥ 2 GB RAM |
+| `dist-cluster` | dist-app | cluster membership, distributed scheduler, distributed IPC, shared VFS | RPi 3+, x86-64, ARM64 |
+| `dist-cloud` | dist-cluster | orchestration, service mesh, API gateway, ingress, observability, auto-scaling | x86-64 KVM, ARM64 KVM |
+| `dist-firewall` | dist-minimal | packet filter, NAT, VPN, DPI, traffic shaping, firewall rules engine | x86-64, ARM64, RPi 4/5 |
+| `dist-gateway` | dist-edge | Thread border router, Zigbee coordinator, MQTT broker, protocol translation | RPi 3+, ESP32-S3 |
+
+### 4C — Component Composition Matrix
+_Which components ship with each profile. ✓ = included, opt = available on capable hardware, — = not included._
+
+```
+                 dist-   dist-  dist-  dist-  dist-  dist-  dist-    dist-     dist-    dist-      dist-
+                 minimal app    rt     xrt    full   edge   ai       cluster   cloud    firewall   gateway
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Shell              —      ✓      —      —      ✓      —      ✓        ✓         ✓        ✓          —
+Net (TCP/IP)       —      ✓      —      —      ✓      opt    ✓        ✓         ✓        ✓          ✓
+Userlib            —      ✓      —      —      ✓      —      ✓        ✓         ✓        —          —
+Samples            —      ✓      —      —      ✓      —      ✓        —         —        —          —
+WiFi               —      opt    —      —      opt    ✓      opt      opt       —        —          ✓
+BLE                —      opt    —      —      opt    ✓      opt      —         —        —          ✓
+IEEE 802.15.4      —      opt    —      —      opt    opt    —        —         —        —          ✓
+RT scheduler       —      —      ✓      ✓      ✓      —      —        —         —        —          —
+Accelerator/UAI    —      —      —      ✓      —      —      opt      —         —        —          —
+AI inference       —      —      —      —      —      ✓      ✓        —         opt      —          —
+NL shell           —      —      —      —      —      —      ✓        —         opt      —          —
+NPU/GPU offload    —      —      —      —      —      —      ✓        —         opt      —          —
+Cluster membership —      —      —      —      —      —      —        ✓         ✓        —          —
+Distributed sched  —      —      —      —      —      —      —        ✓         ✓        —          —
+Distributed IPC    —      —      —      —      —      —      —        ✓         ✓        —          —
+Shared VFS         —      —      —      —      —      —      —        ✓         ✓        —          —
+Orchestration      —      —      —      —      —      —      —        —         ✓        —          —
+Service mesh       —      —      —      —      —      —      —        —         ✓        —          —
+Packet filter      —      —      —      —      —      —      —        —         ✓        ✓          ✓
+NAT                —      —      —      —      —      —      —        —         —        ✓          ✓
+VPN (WireGuard)    —      —      —      —      —      —      —        —         —        ✓          —
+DPI / IDS          —      —      —      —      —      —      —        —         —        ✓          —
+Traffic shaping    —      —      —      —      —      —      —        —         —        ✓          —
+Thread / Zigbee    —      —      —      —      —      —      —        —         —        —          ✓
+MQTT broker        —      —      —      —      —      —      —        —         —        —          ✓
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+### 4D — Cross-Domain Mappings
+_How distribution profiles map to security tiers, AI features, network features, and user model defaults._
+
+#### Security Tier Defaults
+```
+  dist-minimal    → sec-base
+  dist-app        → sec-base + sec-crypto
+  dist-rt         → sec-base
+  dist-xrt        → sec-base + sec-hw
+  dist-full       → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-hw + sec-verified
+  dist-edge       → sec-base + sec-crypto + sec-hw
+  dist-ai         → sec-base + sec-sandbox + sec-crypto + sec-hw
+  dist-cluster    → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-verified
+  dist-cloud      → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-network + sec-hw + sec-verified
+  dist-firewall   → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
+  dist-gateway    → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
+```
+
+#### AI Tier Defaults
+```
+  dist-minimal    → (none)
+  dist-app        → (none, opt-in via ai feature)
+  dist-rt         → (none)
+  dist-xrt        → (none, opt-in via ai feature)
+  dist-full       → (none, opt-in via ai feature)
+  dist-edge       → ai (core: keyword spotter, anomaly detector)
+  dist-ai         → ai + ai-npu + ai-cloud + ai-os (full AI stack)
+  dist-cluster    → (none, opt-in via ai feature)
+  dist-cloud      → ai-cloud (optional: cloud inference gateway)
+  dist-firewall   → (none, opt-in: ai-assisted DPI)
+  dist-gateway    → ai (core: edge anomaly detection)
+```
+
+#### Network Feature Defaults
+```
+  dist-minimal    → (none)
+  dist-app        → net (TCP/IP via smoltcp)
+  dist-rt         → (none)
+  dist-xrt        → (none)
+  dist-full       → net
+  dist-edge       → net (optional)
+  dist-ai         → net
+  dist-cluster    → net + cluster-ipc
+  dist-cloud      → net + net-firewall + cluster-ipc
+  dist-firewall   → net + net-firewall + net-nat + net-vpn + net-dpi + net-shape
+  dist-gateway    → net + net-firewall + net-nat
+```
+
+#### User Model Defaults
+```
+  dist-minimal    → single-user (no auth overhead, bare-metal feel)
+  dist-app        → multi-user on QEMU/network targets; single-user on ESP32
+  dist-rt         → single-user
+  dist-xrt        → single-user
+  dist-full       → multi-user
+  dist-edge       → single-user
+  dist-ai         → multi-user
+  dist-cluster    → multi-user (remote access requires auth)
+  dist-cloud      → multi-user + RBAC + tenant isolation
+  dist-firewall   → single-user (serial admin) or multi-user (SSH admin)
+  dist-gateway    → single-user
+```
+
+### 4E — Per-Target Platform Defaults
+_Recommended default distribution for each hardware target._
+
+```
+  ESP32-C3 (400 KB)     → dist-minimal (serial-only MCU)
+  ESP32-C6 (512 KB)     → dist-minimal + shell + radios  (current default)
+  ESP32-S3 (512 KB)     → dist-edge (WiFi + BLE + edge AI)
+  RPi Zero 2 W (512 MB) → dist-edge (IoT hub, sensor gateway)
+  RP2350 (520 KB SRAM)  → dist-minimal (microcontroller class)
+  RPi 3 (1 GB)          → dist-app or dist-cluster
+  RPi 4 (4/8 GB)        → dist-ai or dist-cluster (Coral TPU: dist-ai)
+  RPi 5 (8 GB)          → dist-ai (Hailo-8, full AI-OS) or dist-full
+  QEMU virt (RISC-V)    → dist-app (development/testing)
+  QEMU PC (x86-64)      → dist-full or dist-firewall
+  x86-64 KVM            → dist-cloud (production cluster/VM)
+  x86-64 bare-metal     → dist-firewall (network appliance)
+  ARM64 KVM             → dist-cloud (production cluster/VM)
+  ARM64 bare-metal      → dist-cluster or dist-ai
+```
+
+### 4F — Hardware Security Capabilities (Per-SoC)
+_Available `sec-hw` features on each target platform._
+
+```
+  ESP32-C3/C6     → AES/SHA/RSA accel, eFuse, flash encrypt, Secure Boot V2, DS peripheral, HMAC
+  ESP32-S3        → same as C6 + World Controller (TrustZone-like)
+  RPi 3/Zero      → (limited) OTP, VideoCore secure boot
+  RPi 4           → GIC, SMMU (limited), OTP
+  RPi 5           → GIC, PAC (Cortex-A76), OTP, SMMU (via RP1)
+  RP2350          → ARM MPU (8 regions), TrustZone-M, OTP
+  RISC-V 64       → PMP/ePMP, Sv39/48 MMU, Zkr/Zkn (if supported)
+  x86-64          → TPM 2.0, AES-NI, SHA-NI, RDRAND, SMEP/SMAP, NX, SGX (optional), SEV (AMD)
+```
+
+### 4G — AI Hardware Capabilities (Per-Target)
+_Available AI inference features on each target platform._
+
+```
+  ESP32-C6 (320 KB)      → ai: keyword spotter, anomaly detector (INT8, < 50 KB models)
+  RPi Zero 2 W (512 MB)  → ai: image classification, small models
+  RPi 3 (1 GB)           → ai + ai-cloud: local small models + cloud LLM
+  RPi 4 (4/8 GB)         → ai + ai-npu + ai-cloud: TinyLlama local, Coral TPU
+  RPi 5 (8 GB)           → ai + ai-npu + ai-cloud + ai-os: Phi-3-mini local, Hailo-8, full AI-OS
+  QEMU virt              → ai + ai-cloud: development/testing
+  x86-64 (≥ 2 GB)       → ai + ai-npu + ai-cloud + ai-os: full stack, CUDA/ROCm/oneAPI backends
+```
+
+### 4H — Build Recipes
+_Cargo commands for building each distribution profile._
+
+```sh
+# Tier 1 — Foundation (implemented)
+cargo build -p kernel-qemu-virt --no-default-features --features dist-minimal   # bare scheduler
+cargo build -p kernel-qemu-virt --features dist-app                             # shell + net + userlib
+cargo build -p kernel-qemu-virt --features dist-rt                              # priority scheduler
+cargo build -p kernel-qemu-virt --features dist-rt,accel                        # RT + accelerators (dist-xrt)
+cargo build -p kernel-qemu-virt --features dist-full                            # everything
+cargo build -p kernel-xiao-esp32c6 --features dist-full,wifi,ble,ieee802154     # full ESP32 with radios
+
+# Tier 2 — Specialized (planned)
+cargo build -p kernel-qemu-virt --features dist-edge                            # IoT edge node
+cargo build -p kernel-qemu-pc   --features dist-ai                              # AI-native workstation
+cargo build -p kernel-qemu-pc   --features dist-cluster                         # distributed OS node
+cargo build -p kernel-qemu-pc   --features dist-cloud                           # cloud platform
+cargo build -p kernel-qemu-pc   --features dist-firewall                        # network appliance
+cargo build -p kernel-xiao-esp32c6 --features dist-gateway,wifi,ieee802154      # IoT gateway
+
+# Mix-and-match (any combination valid)
+cargo build -p kernel-qemu-pc   --features dist-minimal,shell                   # minimal + shell only
+cargo build -p kernel-qemu-pc   --features dist-firewall,ai                     # firewall + AI-assisted DPI
+cargo build -p kernel-qemu-pc   --features dist-cluster,accel                   # cluster + accelerator
+```
+
+### 4I — Distribution Implementation Tasks (Planned)
+
+#### Crate + Feature Gate Updates
+- [ ] **`distributions/src/lib.rs` expansion** — add `Distribution::Edge`, `Ai`, `Cluster`, `Cloud`, `Firewall`, `Gateway`, `ExtendedRealTime` variants; update `active_distribution()` priority chain
+- [ ] **Feature composition rules** — profiles are additive: `dist-cloud` = `dist-cluster` + `cloud-orchestrate` + `cloud-mesh` + `cloud-observe`; validate at compile time
+- [ ] **Cross-feature dependency validation** — `dist-cloud` requires `dist-cluster`; `dist-gateway` requires `dist-edge`; `dist-xrt` requires `dist-rt` + `accel`; compile-time errors on invalid combos
+- [ ] **Build flag matrix** — `distributions/src/lib.rs` updated with new feature gates; CI matrix covers at least dist-minimal, dist-app, dist-full, dist-firewall, dist-cloud per target
+
+#### Per-Kernel Wiring
+- [ ] **kernel-qemu-virt** — wire new profiles: `dist-edge` (AI + sensor tasks), `dist-cluster` (cluster membership task)
+- [ ] **kernel-qemu-pc** — wire all profiles: primary target for dist-ai, dist-cloud, dist-firewall, dist-cluster
+- [ ] **kernel-xiao-esp32c6** — wire `dist-edge` (default for ESP32 AI nodes), `dist-gateway` (Thread/Zigbee + MQTT)
+- [ ] **kernel-raspi5** — wire `dist-ai` (NPU + Hailo), `dist-cluster` (distributed node), `dist-full`
+
+#### Profile-Specific Components (cross-references)
+- [ ] **dist-edge components** — see Phase 10 (AI inference), Phase Z5–Z6 (802.15.4 + Thread + Matter)
+- [ ] **dist-ai components** — see Phase 10 (full AI stack: inference, NL shell, agents, RAG, voice)
+- [ ] **dist-cluster components** — see Phase 11 (cluster membership, distributed scheduler, distributed IPC, shared VFS)
+- [ ] **dist-cloud components** — see Phase 12 (orchestration, service mesh, API gateway, ingress, observability, auto-scaling, multi-tenancy)
+- [ ] **dist-firewall components** — see Phase 13 (packet filter, NAT, routing, VPN, DPI, traffic shaping)
+- [ ] **dist-gateway components** — see Phase Z5–Z6 (Thread border router, Zigbee coordinator) + MQTT broker
+- [ ] **dist-xrt components** — see Phase 8K (UAI: accelerator registry, submit/poll/cancel, FPGA bitstream, QPU circuits)
 
 ## Phase 7 — Multi-Architecture Targets
 
@@ -838,39 +1064,40 @@ _Full x86-64 bring-up on QEMU `q35`/`pc` machine and Linux KVM. The path to runn
 
 #### x86-64 Architecture Crate
 - [x] **`arch_x86_64` crate** — `SavedContext` for x86-64: 16 GPRs (RAX–R15) + RIP + RFLAGS + kernel_word; `SavedContext` trait impl; `get_syscall_nr` from RAX, args from RDI/RSI/RDX/RCX/R8/R9 (SysV ABI); wired into `arch::TaskContext` via `#[cfg(target_arch = "x86_64")]`
-- [ ] **GDT (Global Descriptor Table)** — kernel CS/DS (Ring 0), user CS/DS (Ring 3), TSS descriptor; loaded via `lgdt` at boot
-- [ ] **TSS (Task State Segment)** — per-CPU TSS with `RSP0` (kernel stack on privilege transition), IST (Interrupt Stack Table) entries for NMI/DF/MCE
-- [ ] **IDT (Interrupt Descriptor Table)** — 256-entry IDT; ISR stubs (0–31 exceptions, 32–47 IRQs, 48+ software); each stub saves all GPRs → calls Rust handler → `iretq`
-- [ ] **`syscall`/`sysret` fast path** — MSR setup (`IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`); `syscall` entry saves RCX/R11, loads kernel RSP from per-CPU, dispatches, `sysret` back to Ring 3
-- [ ] **Context switch** — save callee-saved (RBX, RBP, R12–R15, RSP), swap task pointers, restore; FPU/SSE state via `xsave`/`xrstor` (lazy or eager)
-- [ ] **`#[cfg(target_arch = "x86_64")]`** — wire `TaskContext = X86_64Context` type alias in `arch/src/lib.rs`
+- [x] **GDT (Global Descriptor Table)** — 7-entry GDT: null, kernel CS (0x08), kernel DS (0x10), user DS (0x18), user CS (0x20), TSS (0x28-0x30); boot GDT in assembly + full Rust GDT with TSS and Ring 3 segments
+- [x] **TSS (Task State Segment)** — 104-byte TSS with RSP0 (updated on context switch), IST1 for NMI/double-fault (4 KiB dedicated stack), IOPB; loaded via `ltr`
+- [x] **IDT (Interrupt Descriptor Table)** — 256-entry IDT; ISR stubs (0–31 exceptions with/without error code, 32–47 IRQs, 48–255 software); each stub saves all 15 GPRs → calls `_veer_trap_dispatch_x86` → restores from (possibly different) TrapFrame → `iretq`; IDT loaded via `lidt`
+- [x] **`syscall`/`sysret` fast path** — IA32_STAR (kernel CS=0x08, user base=0x10), IA32_LSTAR→`_veer_syscall_entry`, IA32_FMASK clears IF/DF/TF/AC; entry swaps to kernel RSP, builds TrapFrame, calls `_veer_trap_dispatch_x86`, restores via `sysretq`; SCE enabled in IA32_EFER
+- [x] **Context switch** — TrapFrame ↔ X86_64Context save/restore on timer tick and syscall; `restore_context_to_frame` / `save_frame_to_context` + `iretq`-based first-task start; FPU/SSE lazy save deferred
+- [x] **`#[cfg(target_arch = "x86_64")]`** — `TaskContext = X86_64Context` type alias in `arch/src/lib.rs` (already done in Phase 6A)
 
-#### x86-64 Boot (Multiboot2 / UEFI)
-- [ ] **Multiboot2 header** — `.multiboot2` section in kernel ELF; tags: framebuffer request, module align, EFI services; loaded by GRUB2 or QEMU `-kernel`
-- [ ] **Boot assembly** — `_start` in long mode (Multiboot2 hands off in 32-bit protected mode → set up 64-bit page tables → jump to long mode → call `kernel_main`)
-- [ ] **Identity-map bootstrap page tables** — 2 MB huge pages, first 4 GB identity-mapped; kernel maps itself into high half (0xFFFF_8000_0000_0000+) before enabling full paging
+#### x86-64 Boot (Multiboot / UEFI)
+- [x] **Multiboot v1 header** — `.multiboot` section in kernel ELF; ALIGN + MEMINFO flags; checksum; loaded by QEMU `-kernel`; Multiboot2 upgrade deferred
+- [x] **Boot assembly** — `_start` in `.code32`: save Multiboot info (ESI/EDI), zero page tables, fill PML4→PDPT→PD identity map (512 × 2MB huge pages = 1 GiB), enable PAE (CR4.PAE), load CR3, set IA32_EFER.LME, enable paging (CR0.PG), load boot GDT, far-jump to `.code64`, reload segment regs, set RSP, zero BSS, call `_rust_start`
+- [x] **Identity-map bootstrap page tables** — 3 × 4 KiB pages (PML4, PDPT, PD) in linker `.page_tables` section; 2 MB huge pages identity-map first 1 GiB; higher-half mapping deferred
 - [ ] **UEFI boot path (future)** — `x86_64-unknown-uefi` stub that exits boot services, sets up page tables, jumps to kernel; for real hardware without Multiboot
-- [ ] **Boot info parsing** — Multiboot2 info struct: memory map (E820), framebuffer, ACPI RSDP pointer, boot command line
+- [ ] **Boot info parsing** — Multiboot info struct: memory map (E820), framebuffer, ACPI RSDP pointer, boot command line
 
 #### x86-64 SoC + Kernel (QEMU q35)
-- [ ] **`soc-qemu-pc` crate** — COM1 UART (I/O ports 0x3F8), APIC (Local APIC + I/O APIC), HPET/PIT timer, ACPI tables, VGA/framebuffer, VIRTIO-PCI, PS/2 keyboard
-- [ ] **`kernel-qemu-pc` crate** — `x86_64-unknown-none` target, Multiboot2 boot, custom linker script (kernel at 1 MB physical, higher-half virtual at 0xFFFF_8000_0010_0000)
-- [ ] **Serial console (COM1)** — I/O port 0x3F8; divisor latch for baud rate; polled TX/RX + IRQ4 interrupt-driven RX; implements `Serial` trait
-- [ ] **Local APIC** — MMIO at 0xFEE0_0000 (or MSR-based x2APIC); timer in periodic mode (IRQ vector 32); ICR for IPI; spurious vector; EOI
-- [ ] **I/O APIC** — MMIO at 0xFEC0_0000; redirection table entries for ISA IRQs (COM1→IRQ4, keyboard→IRQ1, HPET→IRQ0/2); route to LAPIC
+- [x] **`soc-qemu-pc` crate** — COM1 UART (I/O ports 0x3F8), 8259 PIC remap, 8254 PIT timer; `Platform` trait impl; `inb`/`outb`/`io_wait` I/O port helpers
+- [x] **`kernel-qemu-pc` crate** — `x86_64-unknown-none` target, Multiboot v1 boot, linker script (kernel at 1 MB physical); full kernel init: heap, VFS, scheduler, shell, sample tasks; `x86_64-unknown-none` added to `rust-toolchain.toml`
+- [x] **Serial console (COM1)** — I/O port 0x3F8; 115200 8N1; FIFO enabled; polled TX/RX; `has_data()` via LSR; implements `Serial` trait
+- [x] **Local APIC** — MMIO driver at 0xFEE0_0000; SIVR enable, LVT timer periodic mode, timer calibration via PIT channel 2 (1 ms reference), EOI, IPI/INIT-SIPI for SMP bring-up
+- [x] **I/O APIC** — MMIO driver at 0xFEC0_0000; 24-entry redirection table; `route_irq()` for edge/physical ISA defaults; `init()` routes timer→32, kbd→33, COM1→36; mask/unmask per-pin
 - [ ] **ACPI table parsing** — RSDP → RSDT/XSDT → MADT (APIC topology), FADT (PM timer, shutdown), HPET table; minimal AML interpreter deferred
-- [ ] **HPET timer** — High Precision Event Timer; 64-bit monotonic counter; periodic comparator for tick interrupt; fallback to PIT 8254 if no HPET
-- [ ] **PIC 8259 (legacy)** — remap to vectors 32–47, then mask all (use APIC); needed for initial boot before APIC init
-- [ ] **PS/2 keyboard** — IRQ1 scancode processing; scan set 1 → ASCII; implements `InputDevice` trait; primary input for early boot
-- [ ] **VGA text mode (early boot)** — 80×25 @ 0xB8000; boot messages before framebuffer init; implements `Serial` trait
+- [x] **HPET timer** — driver at 0xFED0_0000; 64-bit counter, timer 0 periodic mode with legacy replacement routing; `init(period_us)` with auto-tick counting; fallback to PIT 8254
+- [x] **PIC 8259 (legacy)** — remap IRQs 0–15 to vectors 32–47; unmask IRQ0 (timer) + IRQ2 (cascade); `send_eoi()` + `unmask()` helpers; used for initial bring-up before APIC
+- [x] **PIT 8254 timer** — channel 0, mode 2 (rate generator), ~1 ms period (divisor from 1.193182 MHz); `TickTimer` trait impl; software tick counter via `AtomicU64`
+- [x] **PS/2 keyboard** — IRQ1 handler reads scan codes from port 0x60; scan-code set 1 → ASCII with Shift/Ctrl/CapsLock; feeds into kernel ring buffer; `console_read_byte` reads from buffer
+- [x] **VGA text mode (early boot)** — 80×25 @ 0xB8000; scroll, cursor tracking, hardware cursor via CRTC ports; implements `Serial` trait with PS/2 keyboard polling for `read_byte`; boot banner mirrored to VGA
 - [ ] **VIRTIO-PCI** — PCI config space enumeration; VIRTIO devices as PCI functions; reuse VIRTIO-NET/BLK backends with PCI transport
-- [ ] **PCI bus enumeration** — walk bus 0–255, device 0–31, function 0–7; read config space (BAR, class code, vendor/device ID); build device table
+- [x] **PCI bus enumeration** — mechanism 1 via ports 0xCF8/0xCFC; walks bus 0, devices 0–31, multi-function aware; reads vendor/device ID, class/subclass, BARs, IRQ line; `class_name()` for display; wired into boot log + `hwinfo` shell command
 
 #### x86-64 Memory Management
-- [ ] **4-level page tables** — PML4 → PDPT → PD → PT; 4 KB pages (+ 2 MB / 1 GB huge pages for kernel mapping)
+- [x] **4-level page tables** — `map_page()` walks/allocates PML4→PDPT→PD→PT with 4 KiB pages; `unmap_page()` with `invlpg`; `identity_map_range()` helper; `load_cr3()`/`read_cr3()`/`flush_tlb()`; PTE flags (P/W/U/NX/HUGE/GLOBAL)
 - [ ] **Higher-half kernel** — kernel linked at 0xFFFF_8000_0000_0000+; user space in lower half 0x0000_0000–0x0000_7FFF_FFFF_FFFF; canonical address enforcement
 - [ ] **Per-process page tables** — each `Process` gets own PML4; `CR3` swap on context switch; PCID (Process Context Identifier) to avoid TLB flush
-- [ ] **Physical memory allocator** — bitmap or buddy allocator initialized from E820 memory map; 4 KB frame granularity
+- [x] **Physical memory allocator** — bitmap-based FrameAllocator (256 MiB / 4 KiB = 65536 frames); `init(usable_start, usable_end)` from `__kernel_end` linker symbol; `alloc_frame()`/`free_frame()`; integrated into boot sequence with free count logged
 - [ ] **Kernel heap** — `slab` or bump allocator for kernel-internal allocations; mapped in higher-half
 - [ ] **Ring 0/Ring 3 split** — kernel pages with `Supervisor` bit; user pages with `User` bit; NX (No-Execute) on data pages; SMEP + SMAP enforcement
 
@@ -1280,7 +1507,7 @@ _Modular, rule-based security policy framework. Policies are declarative configu
 - [ ] **Biba integrity model (stubs)** — no-write-up, no-read-down; ensures high-integrity processes can't be corrupted by low-integrity data
 
 ### 8J — Security Feature Integration Matrix
-_How security tiers map to distribution profiles and target hardware._
+_How security tiers map to features. For profile → security tier mapping and per-SoC hardware capabilities, see Phase 4D and 4F._
 
 ```
                     sec-base   sec-sandbox  sec-crypto  sec-crypto-pqc  sec-network  sec-hw    sec-verified
@@ -1310,27 +1537,8 @@ Policy engine         ─           ✓             ─            ─          
 Runtime attestation   ─           ─             ─            ─              ─           ─          ✓
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-Profile defaults:
-  dist-minimal    → sec-base
-  dist-app        → sec-base + sec-crypto
-  dist-rt         → sec-base
-  dist-edge       → sec-base + sec-crypto + sec-hw
-  dist-ai         → sec-base + sec-sandbox + sec-crypto + sec-hw
-  dist-full       → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-hw + sec-verified
-  dist-cluster    → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-verified
-  dist-cloud      → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-network + sec-hw + sec-verified
-  dist-firewall   → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
-  dist-gateway    → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
-
-Target hardware capabilities:
-  ESP32-C3/C6     → sec-hw: AES/SHA/RSA accel, eFuse, flash encrypt, Secure Boot V2, DS peripheral, HMAC
-  ESP32-S3        → sec-hw: same as C6 + World Controller (TrustZone-like)
-  RPi 3/Zero      → sec-hw: (limited) OTP, VideoCore secure boot
-  RPi 4           → sec-hw: GIC, SMMU (limited), OTP
-  RPi 5           → sec-hw: GIC, PAC (Cortex-A76), OTP, SMMU (via RP1)
-  RP2350          → sec-hw: ARM MPU (8 regions), TrustZone-M, OTP
-  RISC-V 64       → sec-hw: PMP/ePMP, Sv39/48 MMU, Zkr/Zkn (if supported)
-  x86-64          → sec-hw: TPM 2.0, AES-NI, SHA-NI, RDRAND, SMEP/SMAP, NX, SGX (optional), SEV (AMD)
+→ See Phase 4D for security tier defaults per distribution profile.
+→ See Phase 4F for hardware security capabilities per SoC.
 ```
 
 ## Phase 8K — Unified Accelerator Interface (UAI)
@@ -1642,7 +1850,7 @@ _Ergonomic Rust API for AI inference from userspace._
 - [ ] **Shell `ai chat` command** — interactive LLM conversation: `ai chat --model phi3-mini --local` or `ai chat --cloud`
 
 ### 10H — AI Feature Integration Matrix
-_How AI tiers map to hardware targets and distribution profiles._
+_How AI tiers map to features. For profile → AI tier mapping and per-target AI capabilities, see Phase 4D and 4G._
 
 ```
                      ai (core)  ai-npu    ai-cloud   ai-os
@@ -1660,13 +1868,8 @@ Smart shell            ─          ─          ✓          ✓
 ────────────────────────────────────────────────────────────────
 * LLM on CPU requires sufficient RAM (≥ 2 GB for Q4 models)
 
-Target capabilities:
-  ESP32-C6 (320 KB)   → ai: keyword spotter, anomaly detector
-  RPi Zero 2 W (512M) → ai: image classification, small models
-  RPi 3 (1 GB)        → ai + ai-cloud: local small models + cloud LLM
-  RPi 4 (4/8 GB)      → ai + ai-npu + ai-cloud: TinyLlama local, Coral TPU
-  RPi 5 (8 GB)        → ai + ai-npu + ai-cloud + ai-os: Phi-3-mini local, Hailo-8, full AI-OS
-  QEMU virt            → ai + ai-cloud: development/testing
+→ See Phase 4G for AI hardware capabilities per target.
+→ See Phase 4D for AI tier defaults per distribution profile.
 ```
 
 ### 10I — Natural Language Shell (`ai-nlp` feature)
@@ -2042,10 +2245,7 @@ QoS classes            ─            ─          ─          ─          ✓
 Bandwidth monitor      ─            ─          ─          ─          ✓
 ───────────────────────────────────────────────────────────────────────────
 
-Profile defaults:
-  dist-firewall      → net-firewall + net-nat + net-vpn + net-dpi + net-shape
-  dist-gateway       → net-firewall + net-nat (subset for IoT edge)
-  dist-cloud         → net-firewall (basic filtering for cloud workloads)
+→ See Phase 4D for network feature defaults per distribution profile.
 ```
 
 ## Session Log
