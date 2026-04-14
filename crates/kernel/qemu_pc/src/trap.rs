@@ -634,13 +634,18 @@ _veer_kernel_rsp:
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Copy a TrapFrame's register values into a task's X86_64Context.
+///
+/// In 64-bit long mode the CPU always pushes all 5 values on interrupt:
+/// SS, RSP, RFLAGS, CS, RIP — even for same-privilege (Ring 0) interrupts.
+/// Likewise, IRETQ always pops all 5.
 #[cfg(target_arch = "x86_64")]
 unsafe fn save_frame_to_context(frame: &TrapFrame, ctx: &mut TaskContext) {
     ctx.gpr[0]  = frame.rax as usize;  // rax
     ctx.gpr[1]  = frame.rcx as usize;  // rcx
     ctx.gpr[2]  = frame.rdx as usize;  // rdx
     ctx.gpr[3]  = frame.rbx as usize;  // rbx
-    ctx.gpr[4]  = frame.rsp as usize;  // rsp (from iretq frame)
+    // In 64-bit mode the CPU always pushes RSP on interrupt.
+    ctx.gpr[4]  = frame.rsp as usize;  // rsp
     ctx.gpr[5]  = frame.rbp as usize;  // rbp
     ctx.gpr[6]  = frame.rsi as usize;  // rsi
     ctx.gpr[7]  = frame.rdi as usize;  // rdi
@@ -656,6 +661,55 @@ unsafe fn save_frame_to_context(frame: &TrapFrame, ctx: &mut TaskContext) {
     ctx.rflags  = frame.rflags as usize;
 }
 
+/// Build an interrupt frame on the given task's stack and return a
+/// pointer to the new TrapFrame.
+///
+/// In 64-bit long mode, IRETQ always pops 5 values: RIP, CS, RFLAGS, RSP, SS.
+/// The CPU also always pushes all 5 on interrupt entry, even for same-privilege.
+///
+/// Layout (stack grows down, 176 bytes = full TrapFrame):
+///   ss (8), rsp (8), rflags (8), cs (8), rip (8)  ← IRETQ frame
+///   error_code (8, = 0), vector (8, = 0)           ← isr_common bookkeeping
+///   rax..r15 (15 × 8 = 120)                       ← GPRs from context
+///
+/// `task_rsp`: the saved RSP of the task. After IRETQ this becomes the new RSP.
+#[cfg(target_arch = "x86_64")]
+unsafe fn build_ring0_frame(ctx: &TaskContext, task_rsp: usize) -> *mut TrapFrame {
+    // Full TrapFrame = 176 bytes (22 × u64).
+    let frame_ptr = (task_rsp - 176) as *mut TrapFrame;
+    let f = unsafe { &mut *frame_ptr };
+
+    // IRETQ frame (all 5 words — mandatory in 64-bit mode).
+    f.rip    = ctx.rip     as u64;
+    f.cs     = KERNEL_CS   as u64;
+    f.rflags = ctx.rflags  as u64;
+    f.rsp    = task_rsp    as u64;  // RSP after IRETQ
+    f.ss     = KERNEL_DS   as u64;  // SS for kernel
+
+    // ISR bookkeeping fields.
+    f.vector     = 0;
+    f.error_code = 0;
+
+    // GPRs.
+    f.rax = ctx.gpr[0]  as u64;
+    f.rcx = ctx.gpr[1]  as u64;
+    f.rdx = ctx.gpr[2]  as u64;
+    f.rbx = ctx.gpr[3]  as u64;
+    f.rbp = ctx.gpr[5]  as u64;
+    f.rsi = ctx.gpr[6]  as u64;
+    f.rdi = ctx.gpr[7]  as u64;
+    f.r8  = ctx.gpr[8]  as u64;
+    f.r9  = ctx.gpr[9]  as u64;
+    f.r10 = ctx.gpr[10] as u64;
+    f.r11 = ctx.gpr[11] as u64;
+    f.r12 = ctx.gpr[12] as u64;
+    f.r13 = ctx.gpr[13] as u64;
+    f.r14 = ctx.gpr[14] as u64;
+    f.r15 = ctx.gpr[15] as u64;
+
+    frame_ptr
+}
+
 /// Write a task's X86_64Context back into a TrapFrame for iretq.
 #[cfg(target_arch = "x86_64")]
 unsafe fn restore_context_to_frame(ctx: &TaskContext, frame: &mut TrapFrame) {
@@ -663,7 +717,7 @@ unsafe fn restore_context_to_frame(ctx: &TaskContext, frame: &mut TrapFrame) {
     frame.rcx    = ctx.gpr[1]  as u64;
     frame.rdx    = ctx.gpr[2]  as u64;
     frame.rbx    = ctx.gpr[3]  as u64;
-    frame.rsp    = ctx.gpr[4]  as u64;  // restored by iretq
+    frame.rsp    = ctx.gpr[4]  as u64;  // Ring 3 only — restored by iretq
     frame.rbp    = ctx.gpr[5]  as u64;
     frame.rsi    = ctx.gpr[6]  as u64;
     frame.rdi    = ctx.gpr[7]  as u64;
@@ -748,13 +802,13 @@ pub unsafe extern "C" fn _veer_trap_dispatch_x86(frame: *mut TrapFrame) -> *mut 
 unsafe fn handle_timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
     // Send EOI to LAPIC (we're in IOAPIC mode, PIC is disabled).
     soc_qemu_pc::lapic::eoi();
-
     let timer = unsafe { &*TIMER.0.get() };
     timer.clear_pending();
 
     let sched: &mut Scheduler = unsafe { &mut *SCHEDULER.0.get() };
 
     // Save the current trap frame into the running task's context.
+    // For Ring-0 tasks, the correct RSP is recovered inside save_frame_to_context.
     let f = unsafe { &*frame };
     unsafe { save_frame_to_context(f, &mut sched.tasks[sched.current].context); }
 
@@ -769,11 +823,19 @@ unsafe fn handle_timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
 
     if need_switch {
         // tick() already picked the next task and set sched.current.
-        // Just restore that task's context into the trap frame.
         let next = sched.current;
-        // Write the new task's context into the trap frame.
-        let f = unsafe { &mut *frame };
-        unsafe { restore_context_to_frame(&sched.tasks[next].context, f); }
+        let next_ctx = &sched.tasks[next].context;
+        let next_rsp = next_ctx.gpr[4]; // saved RSP for the next task
+
+        // Build a Ring-0 interrupt frame on the next task's own stack.
+        // isr_common will do `mov rsp, rax` with this pointer, then pop
+        // all GPRs, skip error+vector, and iretq into the next task.
+        let new_frame = unsafe { build_ring0_frame(next_ctx, next_rsp) };
+
+        // Keep _veer_kernel_rsp pointing at the new task's stack top.
+        set_kernel_stack((sched.tasks[next].stack_bottom + sched.tasks[next].stack_size) as u64);
+
+        return new_frame;
     }
     frame
 }
@@ -859,19 +921,26 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
     match action {
         SyscallAction::Resume => {
             // Write back (possibly modified) context into the trap frame.
+            // Ring-0 iretq does not pop RSP/SS, so this path is simple.
             let f = unsafe { &mut *frame };
             unsafe { restore_context_to_frame(&sched.tasks[sched.current].context, f); }
             frame
         }
         SyscallAction::Reschedule | SyscallAction::TaskExited => {
-            if let Some(next) = sched.pick_next() {
+            // Build a proper Ring-0 frame on the next task's own stack so
+            // that isr_common iretq restores the correct RSP.
+            let next = if let Some(n) = sched.pick_next() {
                 use microkernel::task::TaskState;
-                sched.current = next;
-                sched.tasks[next].state = TaskState::Running;
-                let f = unsafe { &mut *frame };
-                unsafe { restore_context_to_frame(&sched.tasks[next].context, f); }
-            }
-            frame
+                sched.current = n;
+                sched.tasks[n].state = TaskState::Running;
+                n
+            } else {
+                sched.current
+            };
+            let next_ctx = &sched.tasks[next].context;
+            let next_rsp = next_ctx.gpr[4];
+            set_kernel_stack((sched.tasks[next].stack_bottom + sched.tasks[next].stack_size) as u64);
+            unsafe { build_ring0_frame(next_ctx, next_rsp) }
         }
     }
 }
@@ -941,6 +1010,10 @@ unsafe fn handle_exception(frame: *mut TrapFrame) -> *mut TrapFrame {
     use core::fmt::Write;
     let _ = writeln!(con, "");
     let _ = writeln!(con, "*** EXCEPTION #{} (error_code=0x{:x})", f.vector, f.error_code);
+    // Raw dump: [15]=vector [16]=error_code [17]=rip [18]=cs [19]=rflags
+    let raw = unsafe { core::slice::from_raw_parts(frame as *const u64, 20) };
+    let _ = writeln!(con, "    frame=0x{:x}  raw[15..19]: {:x} {:x} {:x} {:x} {:x}",
+        frame as usize, raw[15], raw[16], raw[17], raw[18], raw[19]);
     let _ = writeln!(con, "    RIP=0x{:016x}  RSP=0x{:016x}", f.rip, f.rsp);
     let _ = writeln!(con, "    RAX=0x{:016x}  RBX=0x{:016x}", f.rax, f.rbx);
     let _ = writeln!(con, "    RCX=0x{:016x}  RDX=0x{:016x}", f.rcx, f.rdx);

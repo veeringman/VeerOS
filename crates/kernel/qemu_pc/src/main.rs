@@ -342,8 +342,8 @@ fn idle_task() -> ! {
 }
 
 #[repr(align(16))]
-struct IdleStack([u8; 512]);
-static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
+struct IdleStack([u8; 4096]);
+static IDLE_STACK: IdleStack = IdleStack([0u8; 4096]);
 
 // ---------------------------------------------------------------------------
 // Shell task
@@ -351,9 +351,9 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
 
 #[cfg(feature = "shell")]
 #[repr(align(16))]
-struct ShellStack([u8; 8192]);
+struct ShellStack([u8; 32768]);
 #[cfg(feature = "shell")]
-static SHELL_STACK: ShellStack = ShellStack([0u8; 8192]);
+static SHELL_STACK: ShellStack = ShellStack([0u8; 32768]);
 
 // ---------------------------------------------------------------------------
 // Sample task stacks (userlib tests)
@@ -361,16 +361,16 @@ static SHELL_STACK: ShellStack = ShellStack([0u8; 8192]);
 
 #[cfg(feature = "samples")]
 #[repr(align(16))]
-struct SampleStack([u8; 4096]);
+struct SampleStack([u8; 16384]);
 
 #[cfg(feature = "samples")]
-static HELLO_STACK: SampleStack = SampleStack([0u8; 4096]);
+static HELLO_STACK: SampleStack = SampleStack([0u8; 16384]);
 #[cfg(feature = "samples")]
-static TIMER_STACK: SampleStack = SampleStack([0u8; 4096]);
+static TIMER_STACK: SampleStack = SampleStack([0u8; 16384]);
 #[cfg(feature = "samples")]
-static IPC_TX_STACK: SampleStack = SampleStack([0u8; 4096]);
+static IPC_TX_STACK: SampleStack = SampleStack([0u8; 16384]);
 #[cfg(feature = "samples")]
-static IPC_RX_STACK: SampleStack = SampleStack([0u8; 4096]);
+static IPC_RX_STACK: SampleStack = SampleStack([0u8; 16384]);
 
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
@@ -1459,21 +1459,21 @@ pub extern "C" fn _rust_start() -> ! {
         let user_tbl = &mut *USERS.0.get();
         user_tbl.init_defaults();
 
-        // Idle task (priority 0).
-        let sb = IDLE_STACK.0.as_ptr() as usize;
-        let st = sb + IDLE_STACK.0.len();
-        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
-            sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
-        }
-
-        // Shell task (priority 1).
+        // Shell task.
         #[cfg(feature = "shell")]
         {
             let sb = SHELL_STACK.0.as_ptr() as usize;
             let st = sb + SHELL_STACK.0.len();
-            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 0, 0) {
                 sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
             }
+        }
+
+        // Idle task.
+        let sb = IDLE_STACK.0.as_ptr() as usize;
+        let st = sb + IDLE_STACK.0.len();
+        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
+            sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
         }
 
         // Userlib sample tasks.
@@ -1523,6 +1523,20 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(con, "[boot] starting scheduler — preemptive mode");
     let _ = writeln!(con, "");
 
+    // Initialise _veer_kernel_rsp to the first runnable task's stack top
+    // so that SYSCALL entry works immediately on boot before any context switch.
+    #[cfg(feature = "shell")]
+    {
+        let sb = SHELL_STACK.0.as_ptr() as usize;
+        let st = sb + SHELL_STACK.0.len();
+        trap::set_kernel_stack(st as u64);
+    }
+    // Disable NMI via the legacy PC NMI control register (port 0x70 bit 7).
+    // This prevents spurious NMIs from the q35 chipset before we can handle them.
+    #[cfg(target_arch = "x86_64")]
+    unsafe { soc_qemu_pc::outb(0x70, 0x80); }
+    let _ = writeln!(con, "[boot] NMI disabled");
+
     // Enable interrupts and start the first task.
     // On x86-64 we don't have the RISC-V `_veer_start_first_task` trick —
     // instead we enable interrupts and jump directly to the first task.
@@ -1552,29 +1566,24 @@ pub extern "C" fn _rust_start() -> ! {
 
 /// Start the first task by constructing an iretq frame and executing iretq.
 /// This never returns.
+///
+/// All initial tasks run at Ring 0. For a same-privilege iretq (Ring 0 → Ring 0),
+/// the CPU pops only RIP, CS, RFLAGS — it does NOT pop RSP or SS. We therefore
+/// switch to the task's stack manually before building the 3-word iretq frame.
 #[cfg(target_arch = "x86_64")]
 unsafe fn _veer_start_first_task_x86(ctx: &arch::TaskContext) -> ! {
-    // Enable interrupts first (IF will be set by RFLAGS in the iretq frame).
-    // We push SS, RSP, RFLAGS, CS, RIP onto the stack and iretq.
     let rip = ctx.rip as u64;
-    let cs = 0x08u64;
-    let rflags = ctx.rflags as u64;
-    let rsp = ctx.get_sp() as u64;
-    let ss = 0x10u64;
+    let task_rsp = ctx.get_sp() as u64;
 
     unsafe {
         core::arch::asm!(
-            "push {ss}",
-            "push {rsp}",
-            "push {rflags}",
-            "push {cs}",
-            "push {rip}",
-            "iretq",
-            ss = in(reg) ss,
-            rsp = in(reg) rsp,
-            rflags = in(reg) rflags,
-            cs = in(reg) cs,
-            rip = in(reg) rip,
+            // Switch to the task's stack, enable interrupts, jump to entry.
+            // No iretq needed since all tasks run at Ring 0 (same privilege).
+            "mov rsp, {rsp}",
+            "sti",
+            "jmp {entry}",
+            rsp   = in(reg) task_rsp,
+            entry = in(reg) rip,
             options(noreturn),
         );
     }

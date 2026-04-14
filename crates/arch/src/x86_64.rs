@@ -51,8 +51,10 @@ impl X86_64Context {
 }
 
 impl SavedContext for X86_64Context {
-    /// `syscall` instruction length on x86_64.
-    const INSTRUCTION_SIZE: usize = 2;
+    /// On x86-64, the `syscall` instruction saves the *return* RIP into RCX,
+    /// and `_veer_syscall_entry` pushes that as `frame.rip`. So the saved PC
+    /// already points past the `syscall` instruction — `advance_pc` is a no-op.
+    const INSTRUCTION_SIZE: usize = 0;
 
     fn zero() -> Self {
         Self::zero()
@@ -95,8 +97,9 @@ impl SavedContext for X86_64Context {
 
     #[inline(always)]
     fn set_arg(&mut self, index: usize, val: usize) {
-        // SysV argument registers: rdi, rsi, rdx, rcx, r8, r9.
-        const ARG_REGS: [usize; 6] = [7, 6, 2, 1, 8, 9];
+        // Syscall argument registers: rdi, rsi, rdx, r10, r8, r9.
+        // arg[3] is r10 (not rcx) because `syscall` clobbers rcx with the return RIP.
+        const ARG_REGS: [usize; 6] = [7, 6, 2, 10, 8, 9];
         if index < ARG_REGS.len() {
             self.gpr[ARG_REGS[index]] = val;
         }
@@ -104,7 +107,9 @@ impl SavedContext for X86_64Context {
 
     #[inline(always)]
     fn get_arg(&self, index: usize) -> usize {
-        const ARG_REGS: [usize; 6] = [7, 6, 2, 1, 8, 9];
+        // Syscall argument registers: rdi, rsi, rdx, r10, r8, r9.
+        // arg[3] is r10 (not rcx) because `syscall` clobbers rcx with the return RIP.
+        const ARG_REGS: [usize; 6] = [7, 6, 2, 10, 8, 9];
         if index < ARG_REGS.len() {
             self.gpr[ARG_REGS[index]]
         } else {
@@ -114,19 +119,24 @@ impl SavedContext for X86_64Context {
 
     #[inline(always)]
     fn set_ret(&mut self, index: usize, val: usize) {
-        // Return registers: rax, rdx.
+        // Return registers: rax, rdx, rdi, rsi.
         match index {
-            0 => self.gpr[0] = val,
-            1 => self.gpr[2] = val,
+            0 => self.gpr[0]  = val, // rax
+            1 => self.gpr[2]  = val, // rdx
+            2 => self.gpr[7]  = val, // rdi
+            3 => self.gpr[6]  = val, // rsi
             _ => {}
         }
     }
 
     #[inline(always)]
     fn get_ret(&self, index: usize) -> usize {
+        // Return registers: rax, rdx, rdi, rsi.
         match index {
-            0 => self.gpr[0],
-            1 => self.gpr[2],
+            0 => self.gpr[0],  // rax
+            1 => self.gpr[2],  // rdx
+            2 => self.gpr[7],  // rdi
+            3 => self.gpr[6],  // rsi
             _ => 0,
         }
     }
