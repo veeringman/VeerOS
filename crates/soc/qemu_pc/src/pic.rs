@@ -80,6 +80,15 @@ pub fn send_eoi(irq: u8) {
     }
 }
 
+/// Mask all IRQs on both PICs (disable PIC entirely).
+/// Call this after switching to LAPIC/IOAPIC-based interrupt delivery.
+pub fn disable() {
+    unsafe {
+        outb(PIC1_DATA, 0xFF);
+        outb(PIC2_DATA, 0xFF);
+    }
+}
+
 /// Unmask a specific IRQ line (0–15).
 pub fn unmask(irq: u8) {
     unsafe {

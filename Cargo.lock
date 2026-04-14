@@ -87,6 +87,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel-qemu-pc"
+version = "0.1.0"
+dependencies = [
+ "arch",
+ "microkernel",
+ "panic-halt",
+ "shell",
+ "soc-qemu-pc",
+ "userlib",
+]
+
+[[package]]
 name = "kernel-qemu-virt"
 version = "0.1.0"
 dependencies = [
@@ -187,6 +199,13 @@ version = "0.1.0"
 dependencies = [
  "arch",
  "esp-wifi-sys",
+]
+
+[[package]]
+name = "soc-qemu-pc"
+version = "0.1.0"
+dependencies = [
+ "arch",
 ]
 
 [[package]]

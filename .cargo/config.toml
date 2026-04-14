@@ -9,3 +9,8 @@ build-qemu = "build --release -p kernel-qemu-virt --target riscv32imc-unknown-no
 build-raspi5 = "build --release -p kernel-raspi5 --target aarch64-unknown-none-softfloat"
 build-raspi5-minimal = "build --release -p kernel-raspi5 --target aarch64-unknown-none-softfloat --no-default-features --features dist-minimal,shell"
 build-raspi5-rt = "build --release -p kernel-raspi5 --target aarch64-unknown-none-softfloat --no-default-features --features dist-full"
+build-qemu-pc = "build -p kernel-qemu-pc --target x86_64-unknown-none"
+check-kernel-qemu-pc = "check -p kernel-qemu-pc --target x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = ["-C", "code-model=small", "-C", "relocation-model=static"]

@@ -46,7 +46,8 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
-    /* Bootstrap page tables — must be 4 KiB aligned. */
+    /* Bootstrap page tables — must be 4 KiB aligned.
+       4 PDs cover the full 4 GiB identity map (for LAPIC/IOAPIC MMIO). */
     .page_tables (NOLOAD) : ALIGN(4096)
     {
         __pml4 = .;
@@ -54,7 +55,7 @@ SECTIONS
         __pdpt = .;
         . += 4096;
         __pd = .;
-        . += 4096;
+        . += 4096 * 4;
     } > RAM
 
     .stack (NOLOAD) : ALIGN(16)

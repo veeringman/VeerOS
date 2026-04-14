@@ -127,13 +127,12 @@ pub fn init(bsp_apic_id: u8) {
     // Mask all entries first.
     mask_all();
 
-    // Route standard ISA IRQs to the BSP:
-    // IRQ 0  → timer      → vector 32
-    route_irq(0, 32, bsp_apic_id);
+    // Route standard ISA IRQs to the BSP.
+    // NOTE: ACPI MADT on QEMU q35 remaps ISA IRQ 0 (PIT) → GSI 2.
+    // So the PIT signal arrives on I/O APIC pin 2, not pin 0.
+    route_irq(2, 32, bsp_apic_id);  // PIT timer (GSI 2) → vector 32
     // IRQ 1  → keyboard   → vector 33
     route_irq(1, 33, bsp_apic_id);
-    // IRQ 2  → cascade    → masked (no slave PIC in APIC mode)
-    write_redir(2, MASKED as u64);
     // IRQ 4  → COM1       → vector 36
     route_irq(4, 36, bsp_apic_id);
 }

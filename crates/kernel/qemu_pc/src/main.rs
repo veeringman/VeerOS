@@ -231,6 +231,46 @@ unsafe impl Sync for KlogCell {}
 pub(crate) static KLOG: KlogCell = KlogCell(UnsafeCell::new(KernelLog::new()));
 
 // ---------------------------------------------------------------------------
+// ACPI info
+// ---------------------------------------------------------------------------
+
+use soc_qemu_pc::acpi::AcpiInfo;
+
+pub(crate) struct AcpiCell(pub UnsafeCell<AcpiInfo>);
+unsafe impl Sync for AcpiCell {}
+pub(crate) static ACPI_INFO: AcpiCell = AcpiCell(UnsafeCell::new(AcpiInfo::new()));
+
+// ---------------------------------------------------------------------------
+// VIRTIO block device
+// ---------------------------------------------------------------------------
+
+use soc_qemu_pc::virtio_blk::VirtioBlk;
+
+pub(crate) struct VirtioBlkCell(pub UnsafeCell<VirtioBlk>);
+unsafe impl Sync for VirtioBlkCell {}
+pub(crate) static VIRTIO_BLK: VirtioBlkCell = VirtioBlkCell(UnsafeCell::new(VirtioBlk::new()));
+
+// ---------------------------------------------------------------------------
+// VIRTIO network device
+// ---------------------------------------------------------------------------
+
+use soc_qemu_pc::virtio_net::VirtioNet;
+
+pub(crate) struct VirtioNetCell(pub UnsafeCell<VirtioNet>);
+unsafe impl Sync for VirtioNetCell {}
+pub(crate) static VIRTIO_NET: VirtioNetCell = VirtioNetCell(UnsafeCell::new(VirtioNet::new()));
+
+// ---------------------------------------------------------------------------
+// Address space table (per-process page tables)
+// ---------------------------------------------------------------------------
+
+use soc_qemu_pc::mm::AddressSpaceTable;
+
+pub(crate) struct AddrSpaceCell(pub UnsafeCell<AddressSpaceTable>);
+unsafe impl Sync for AddrSpaceCell {}
+pub(crate) static ADDR_SPACES: AddrSpaceCell = AddrSpaceCell(UnsafeCell::new(AddressSpaceTable::new()));
+
+// ---------------------------------------------------------------------------
 // Keyboard ring buffer (fed by IRQ1 / COM1 IRQ4 via trap handler)
 // ---------------------------------------------------------------------------
 
@@ -375,6 +415,8 @@ fn shell_task() -> ! {
         dmesg: Some(dmesg_info),
         reboot: None,
         shutdown: Some(do_shutdown),
+        caps_cmd: None,
+        auditlog_cmd: None,
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);
@@ -414,6 +456,47 @@ fn hw_info(w: &mut dyn core::fmt::Write) {
     let _ = writeln!(w, "  Display:  VGA text-mode (80x25)");
     let _ = writeln!(w, "  Input:    PS/2 keyboard");
     let _ = writeln!(w, "");
+
+    // ACPI info.
+    unsafe {
+        let acpi = &*ACPI_INFO.0.get();
+        if acpi.valid {
+            let _ = writeln!(w, "  ACPI:     {} CPU(s), BSP APIC ID={}",
+                acpi.cpu_count, acpi.bsp_apic_id);
+            let _ = writeln!(w, "  LAPIC:    0x{:08x}", acpi.local_apic_addr);
+            let _ = writeln!(w, "  I/O APIC: 0x{:08x} (ID={})", acpi.io_apic_addr, acpi.io_apic_id);
+            if acpi.hpet_base != 0 {
+                let _ = writeln!(w, "  HPET:     0x{:016x}", acpi.hpet_base);
+            }
+        } else {
+            let _ = writeln!(w, "  ACPI:     not available");
+        }
+    }
+
+    // SMP info.
+    let cpus_online = soc_qemu_pc::smp::online_cpu_count();
+    let _ = writeln!(w, "  CPUs:     {} online", cpus_online);
+    let _ = writeln!(w, "");
+
+    // VIRTIO devices.
+    unsafe {
+        let blk = &*VIRTIO_BLK.0.get();
+        if blk.active {
+            let _ = writeln!(w, "  virtio-blk: {} MiB ({} sectors){}",
+                blk.capacity_bytes() / (1024 * 1024),
+                blk.capacity_sectors(),
+                if blk.read_only { " [RO]" } else { "" });
+        }
+        let net = &*VIRTIO_NET.0.get();
+        if net.active {
+            let mut mac_buf = [0u8; 18];
+            let mac_len = net.mac_fmt(&mut mac_buf);
+            let mac_str = core::str::from_utf8(&mac_buf[..mac_len]).unwrap_or("??");
+            let _ = writeln!(w, "  virtio-net: MAC={}", mac_str);
+        }
+    }
+    let _ = writeln!(w, "");
+
     let _ = writeln!(w, "  PCI Devices:");
     unsafe {
         let pci = &*PCI_DEVICES.0.get();
@@ -795,8 +878,19 @@ fn mount_list(w: &mut dyn core::fmt::Write) {
 
 #[cfg(feature = "shell")]
 fn lsblk_info(w: &mut dyn core::fmt::Write) {
-    let _ = writeln!(w, "  NAME   TYPE   SIZE");
-    let _ = writeln!(w, "  (no block devices — VIRTIO-BLK not yet implemented)");
+    let _ = writeln!(w, "  NAME        TYPE     SIZE");
+    let _ = writeln!(w, "  ----------  -------  --------");
+    unsafe {
+        let blk = &*VIRTIO_BLK.0.get();
+        if blk.active {
+            let _ = writeln!(w, "  vda         virtblk  {} MiB ({} sectors){}",
+                blk.capacity_bytes() / (1024 * 1024),
+                blk.capacity_sectors(),
+                if blk.read_only { " [RO]" } else { "" });
+        } else {
+            let _ = writeln!(w, "  (no block devices)");
+        }
+    }
 }
 
 #[cfg(feature = "shell")]
@@ -817,13 +911,18 @@ fn dmesg_info(w: &mut dyn core::fmt::Write) {
 
 #[cfg(feature = "shell")]
 fn qemu_poweroff() -> ! {
-    // QEMU debug exit device at I/O port 0x501 (isa-debug-exit).
-    // Alternatively, ACPI shutdown via I/O port 0x604.
+    // Try ACPI shutdown using discovered PM1a_CNT_BLK.
+    unsafe {
+        let acpi = &*ACPI_INFO.0.get();
+        if acpi.valid && acpi.pm1a_control_block != 0 {
+            soc_qemu_pc::acpi::acpi_shutdown(acpi.pm1a_control_block);
+        }
+    }
+    // Fallback: QEMU-specific ports (0x2000 = SLP_EN | SLP_TYP, split into two bytes).
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        // Write to ACPI power management port to request shutdown.
-        soc_qemu_pc::outb(0x604, 0x2000u8 as u8);
-        // Fallback: isa-debug-exit (if -device isa-debug-exit is added).
+        soc_qemu_pc::outb(0x604, 0x00);
+        soc_qemu_pc::outb(0x605, 0x20);
         soc_qemu_pc::outb(0x501, 0x31);
     }
     loop {
@@ -882,9 +981,9 @@ _start:
     mov esi, ebx       // Multiboot info struct pointer (preserved into 64-bit)
     mov edi, eax       // Multiboot magic (preserved into 64-bit)
 
-    // ----- Zero the page table area (3 × 4096 bytes = 12 KiB) -----
+    // ----- Zero the page table area (PML4 + PDPT + 4×PD = 6 × 4096 = 24 KiB) -----
     lea    eax, [__pml4]
-    mov    ecx, (4096 * 3 / 4)
+    mov    ecx, (4096 * 6 / 4)
     xor    edx, edx
 .zero_pt:
     mov    [eax], edx
@@ -892,31 +991,38 @@ _start:
     dec    ecx
     jnz    .zero_pt
 
-    // ----- Set up PML4 → PDPT → PD identity map (first 1 GiB) -----
+    // ----- Set up PML4 → PDPT → 4×PD identity map (full 4 GiB) -----
     // PML4[0] = &PDPT | PRESENT | WRITABLE
     lea    eax, [__pdpt]
     or     eax, 0x03     // PRESENT + WRITABLE
     lea    ebx, [__pml4]
     mov    [ebx], eax
 
-    // PDPT[0] = &PD | PRESENT | WRITABLE
+    // PDPT[0..3] = &PD[i] | PRESENT | WRITABLE
+    lea    ebx, [__pdpt]
     lea    eax, [__pd]
     or     eax, 0x03
-    lea    ebx, [__pdpt]
-    mov    [ebx], eax
+    mov    [ebx],      eax
+    add    eax, 4096            // PD for 2nd GiB
+    mov    [ebx + 8],  eax
+    add    eax, 4096            // PD for 3rd GiB
+    mov    [ebx + 16], eax
+    add    eax, 4096            // PD for 4th GiB
+    mov    [ebx + 24], eax
 
-    // PD[0..511] = i * 2 MiB | PRESENT | WRITABLE | HUGE (PS bit 7)
+    // PD[0..2047] = i * 2 MiB | PRESENT | WRITABLE | HUGE (PS bit 7)
+    // 4 PDs × 512 entries = 2048 entries = 4 GiB
     lea    ebx, [__pd]
     xor    ecx, ecx      // i = 0
-    xor    edx, edx      // address accumulator
+    xor    edx, edx      // address accumulator (low 32 bits)
 .fill_pd:
     mov    eax, edx
     or     eax, 0x83     // PRESENT(0) + WRITABLE(1) + HUGE(7)
     mov    [ebx + ecx*8], eax
-    mov    dword ptr [ebx + ecx*8 + 4], 0   // high 32 bits = 0
+    mov    dword ptr [ebx + ecx*8 + 4], 0  // high 32 bits = 0 (< 4 GiB)
     add    edx, 0x200000 // += 2 MiB
     inc    ecx
-    cmp    ecx, 512
+    cmp    ecx, 2048
     jb     .fill_pd
 
     // ----- Enable PAE (CR4.PAE = bit 5) -----
@@ -941,7 +1047,11 @@ _start:
 
     // ----- Load the boot GDT (defined below) and far-jump to 64-bit -----
     lgdt   [boot_gdt_ptr]
-    jmp    0x08:.long_mode_entry
+    // Far jump to 64-bit code segment — encoded manually because
+    // LLVM's Intel-syntax assembler doesn't support `jmp seg:offset`.
+    .byte  0xEA                    // far jmp (opcode)
+    .long  .long_mode_entry        // 32-bit target offset
+    .word  0x08                    // code segment selector
 
 // =====================================================================
 // Boot GDT (minimal, used only for the 32→64 trampoline).
@@ -1140,6 +1250,178 @@ pub extern "C" fn _rust_start() -> ! {
                 d.bus, d.device, d.function,
                 d.vendor_id, d.device_id, name,
             );
+        }
+    }
+
+    // ── ACPI table discovery ─────────────────────────────────
+    unsafe {
+        let acpi = &mut *ACPI_INFO.0.get();
+        if soc_qemu_pc::acpi::parse(acpi) {
+            let _ = writeln!(con, "[boot] ACPI: {} CPU(s) found (BSP APIC ID={})",
+                acpi.cpu_count, acpi.bsp_apic_id);
+            let _ = writeln!(con, "  LAPIC @ 0x{:08x}, I/O APIC @ 0x{:08x} (ID={})",
+                acpi.local_apic_addr, acpi.io_apic_addr, acpi.io_apic_id);
+            if acpi.hpet_base != 0 {
+                let _ = writeln!(con, "  HPET  @ 0x{:016x}", acpi.hpet_base);
+            }
+            if acpi.pm1a_control_block != 0 {
+                let _ = writeln!(con, "  FADT: PM1a_CNT=0x{:04x}, SCI_INT={}",
+                    acpi.pm1a_control_block, acpi.sci_interrupt);
+            }
+            for i in 0..acpi.irq_override_count {
+                let ovr = &acpi.irq_overrides[i];
+                let _ = writeln!(con, "  IRQ override: ISA {} → GSI {} flags=0x{:x}",
+                    ovr.source_irq, ovr.gsi, ovr.flags);
+            }
+            for i in 0..acpi.cpu_count {
+                let cpu = &acpi.cpus[i];
+                let _ = writeln!(con, "  CPU {}: APIC ID={}, ACPI ID={}, {}",
+                    i, cpu.apic_id, cpu.acpi_id,
+                    if cpu.enabled { "enabled" } else { "disabled" });
+            }
+        } else {
+            let _ = writeln!(con, "[boot] ACPI: tables not found (using defaults)");
+        }
+    }
+
+    // ── Local APIC + I/O APIC initialisation ─────────────────
+    unsafe {
+        let acpi = &*ACPI_INFO.0.get();
+
+        // Init LAPIC (BSP).
+        soc_qemu_pc::lapic::init();
+        let lapic_ver = soc_qemu_pc::lapic::version();
+        let bsp_id = soc_qemu_pc::lapic::id();
+        let _ = writeln!(con, "[boot] LAPIC: BSP ID={}, version=0x{:02x}", bsp_id, lapic_ver);
+
+        // Calibrate LAPIC timer.
+        let ticks_1ms = soc_qemu_pc::lapic::calibrate_timer_1ms();
+        let _ = writeln!(con, "[boot] LAPIC timer: {} ticks/ms (div16)", ticks_1ms);
+
+        // Init I/O APIC with standard ISA routing.
+        let bsp_apic_id = if acpi.valid { acpi.bsp_apic_id } else { bsp_id as u8 };
+        soc_qemu_pc::ioapic::init(bsp_apic_id);
+        let ioapic_entries = soc_qemu_pc::ioapic::max_entries();
+        let _ = writeln!(con, "[boot] I/O APIC: {} entries, routing IRQs to BSP (ID={})",
+            ioapic_entries, bsp_apic_id);
+
+        // Disable legacy PIC — all interrupts now go through I/O APIC → LAPIC.
+        soc_qemu_pc::pic::disable();
+        let _ = writeln!(con, "[boot] legacy PIC disabled (IOAPIC mode)");
+
+        // Register LAPIC + IOAPIC as drivers.
+        {
+            let reg = &mut *DRIVERS.0.get();
+            let _ = reg.register("lapic", DriverCaps {
+                mmio_regions: 1,
+                uses_interrupts: true,
+                uses_dma: false,
+                uses_network: false,
+            });
+            let _ = reg.register("ioapic", DriverCaps {
+                mmio_regions: 1,
+                uses_interrupts: false,
+                uses_dma: false,
+                uses_network: false,
+            });
+        }
+    }
+
+    // ── NXE (No-Execute Enable) ──────────────────────────────
+    soc_qemu_pc::mm::enable_nxe();
+    let _ = writeln!(con, "[boot] NXE enabled (No-Execute page protection)");
+
+    // ── Higher-half kernel mapping ───────────────────────────
+    // Set up the higher-half mapping (PML4[256] = PML4[0]) for future use.
+    // The kernel continues to run identity-mapped for now.
+    unsafe {
+        extern "C" {
+            static __pml4: u8;
+        }
+        let pml4_addr = core::ptr::addr_of!(__pml4) as usize;
+        let pml4 = &mut *(pml4_addr as *mut soc_qemu_pc::mm::PageTable);
+        soc_qemu_pc::mm::setup_higher_half(pml4);
+    }
+    let _ = writeln!(con, "[boot] higher-half mapping installed (0xFFFF_8000_0000_0000)");
+
+    // ── VIRTIO device probing ────────────────────────────────
+    unsafe {
+        let pci = &*PCI_DEVICES.0.get();
+        let fa = &mut *FRAME_ALLOC.0.get();
+        let reg = &mut *DRIVERS.0.get();
+
+        for i in 0..pci.count {
+            let d = &pci.devices[i];
+            if d.vendor_id != soc_qemu_pc::virtio::VIRTIO_VENDOR {
+                continue;
+            }
+
+            // Read BAR0 (I/O base for legacy VIRTIO).
+            let bar0 = soc_qemu_pc::pci::read_bar(d.bus, d.device, d.function, 0);
+            if bar0 & 1 == 0 { continue; } // not I/O BAR
+            let io_base = (bar0 & 0xFFFF_FFFC) as u16;
+
+            match d.device_id {
+                soc_qemu_pc::virtio::VIRTIO_DEV_BLK => {
+                    let blk = &mut *VIRTIO_BLK.0.get();
+                    if blk.init(io_base, fa) {
+                        let cap_mb = blk.capacity_bytes() / (1024 * 1024);
+                        let _ = writeln!(con, "[boot] virtio-blk: {} MiB ({} sectors), io=0x{:x}",
+                            cap_mb, blk.capacity_sectors(), io_base);
+                        let _ = reg.register("virtio-blk", DriverCaps {
+                            mmio_regions: 0,
+                            uses_interrupts: true,
+                            uses_dma: true,
+                            uses_network: false,
+                        });
+                    } else {
+                        let _ = writeln!(con, "[boot] virtio-blk: init failed (io=0x{:x})", io_base);
+                    }
+                }
+                soc_qemu_pc::virtio::VIRTIO_DEV_NET => {
+                    let net = &mut *VIRTIO_NET.0.get();
+                    if net.init(io_base, fa) {
+                        let mut mac_buf = [0u8; 18];
+                        let mac_len = net.mac_fmt(&mut mac_buf);
+                        let mac_str = core::str::from_utf8(&mac_buf[..mac_len]).unwrap_or("??");
+                        let _ = writeln!(con, "[boot] virtio-net: MAC={}, io=0x{:x}", mac_str, io_base);
+                        let _ = reg.register("virtio-net", DriverCaps {
+                            mmio_regions: 0,
+                            uses_interrupts: true,
+                            uses_dma: true,
+                            uses_network: true,
+                        });
+                    } else {
+                        let _ = writeln!(con, "[boot] virtio-net: init failed (io=0x{:x})", io_base);
+                    }
+                }
+                _ => {
+                    let _ = writeln!(con, "[boot] virtio: unknown device 0x{:04x} (io=0x{:x})",
+                        d.device_id, io_base);
+                }
+            }
+        }
+    }
+
+    // ── SMP bring-up ─────────────────────────────────────────
+    unsafe {
+        let acpi = &*ACPI_INFO.0.get();
+        if acpi.valid && acpi.cpu_count > 1 {
+            // Collect AP APIC IDs.
+            let mut ap_ids = [0u8; 16];
+            let mut ap_count = 0usize;
+            for i in 1..acpi.cpu_count {
+                if acpi.cpus[i].enabled && ap_count < 16 {
+                    ap_ids[ap_count] = acpi.cpus[i].apic_id;
+                    ap_count += 1;
+                }
+            }
+            let booted = soc_qemu_pc::smp::bring_up_aps(&ap_ids[..ap_count], acpi.bsp_apic_id);
+            let total = soc_qemu_pc::smp::online_cpu_count();
+            let _ = writeln!(con, "[boot] SMP: {}/{} APs booted ({} CPUs online)",
+                booted, ap_count, total);
+        } else {
+            let _ = writeln!(con, "[boot] SMP: single-core mode");
         }
     }
 

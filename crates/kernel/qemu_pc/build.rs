@@ -4,5 +4,8 @@ fn main() {
         "cargo:rustc-link-arg=-T{}",
         ld_dir.join("qemu-pc.x").display()
     );
+    // Allow R_X86_64_32 relocations from 32-bit boot assembly in a 64-bit ELF.
+    println!("cargo:rustc-link-arg=-z");
+    println!("cargo:rustc-link-arg=notext");
     println!("cargo:rerun-if-changed=link/qemu-pc.x");
 }

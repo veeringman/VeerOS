@@ -17,6 +17,11 @@ pub mod ioapic;
 pub mod hpet;
 pub mod pci;
 pub mod mm;
+pub mod acpi;
+pub mod virtio;
+pub mod virtio_blk;
+pub mod virtio_net;
+pub mod smp;
 
 // ─── I/O port helpers ────────────────────────────────────────────────────
 

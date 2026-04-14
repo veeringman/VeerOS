@@ -412,7 +412,6 @@ _veer_isr_common:
     push rcx
     push rdx
     push rbx
-    push rbp        // placeholder for rsp (not meaningful here)
     push rbp
     push rsi
     push rdi
@@ -445,7 +444,6 @@ _veer_isr_common:
     pop  rdi
     pop  rsi
     pop  rbp
-    add  rsp, 8     // skip saved rbp placeholder
     pop  rbx
     pop  rdx
     pop  rcx
@@ -510,22 +508,30 @@ ISR_ERR   30   // Security Exception
 ISR_NOERR 31
 
 // IRQs 32–47 (remapped PIC) + software vectors 48–255.
+.altmacro
 .set i, 32
 .rept 224
-ISR_NOERR i
+ISR_NOERR %i
 .set i, i+1
 .endr
 
 // ---- ISR table: array of 256 function pointers ----
-.section .rodata
+// Wrapper macro so we can use .altmacro %i expansion for label names.
+.macro EMIT_ISR_QUAD num
+    .quad _veer_isr_\num
+.endm
+
+// Keep in .text so local ISR stub labels are resolvable.
+.section .text
 .balign 8
 .global _veer_isr_table
 _veer_isr_table:
 .set i, 0
 .rept 256
-    .quad _veer_isr_\i
+EMIT_ISR_QUAD %i
 .set i, i+1
 .endr
+.noaltmacro
 
 // ---- SYSCALL fast-path entry point ----
 // On `syscall` from Ring 3:
@@ -698,6 +704,12 @@ const VEC_COM1: u64 = 36;
 /// Syscall vector (int 0x80).
 #[allow(dead_code)]
 const VEC_SYSCALL: u64 = 0x80;
+/// Page fault vector.
+#[allow(dead_code)]
+const VEC_PAGE_FAULT: u64 = 14;
+/// LAPIC spurious interrupt vector.
+#[allow(dead_code)]
+const VEC_SPURIOUS: u64 = 0xFF;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Rust trap dispatcher — called from _veer_isr_common
@@ -718,10 +730,15 @@ pub unsafe extern "C" fn _veer_trap_dispatch_x86(frame: *mut TrapFrame) -> *mut 
         VEC_KEYBOARD => handle_keyboard_irq(frame),
         VEC_COM1 => handle_com1_irq(frame),
         VEC_SYSCALL => handle_syscall(frame),
+        VEC_PAGE_FAULT => handle_page_fault(frame),
+        VEC_SPURIOUS => frame, // spurious — no EOI
         0..=31 => handle_exception(frame),
         _ => {
-            // Unknown vector — just send EOI and return.
-            soc_qemu_pc::pic::send_eoi((vector - 32) as u8);
+            // Unknown vector — send EOI to both PIC and LAPIC.
+            if vector >= 32 && vector < 48 {
+                soc_qemu_pc::pic::send_eoi((vector - 32) as u8);
+            }
+            soc_qemu_pc::lapic::eoi();
             frame
         }
     }
@@ -729,8 +746,8 @@ pub unsafe extern "C" fn _veer_trap_dispatch_x86(frame: *mut TrapFrame) -> *mut 
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn handle_timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
-    // Send EOI to PIC first.
-    soc_qemu_pc::pic::send_eoi(0);
+    // Send EOI to LAPIC (we're in IOAPIC mode, PIC is disabled).
+    soc_qemu_pc::lapic::eoi();
 
     let timer = unsafe { &*TIMER.0.get() };
     timer.clear_pending();
@@ -751,14 +768,12 @@ unsafe fn handle_timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
     microkernel::poll::wake_poll_waiters(poll, sched, ipc, channels);
 
     if need_switch {
-        if let Some(next) = sched.pick_next() {
-            use microkernel::task::TaskState;
-            sched.current = next;
-            sched.tasks[next].state = TaskState::Running;
-            // Write the new task's context into the trap frame.
-            let f = unsafe { &mut *frame };
-            unsafe { restore_context_to_frame(&sched.tasks[next].context, f); }
-        }
+        // tick() already picked the next task and set sched.current.
+        // Just restore that task's context into the trap frame.
+        let next = sched.current;
+        // Write the new task's context into the trap frame.
+        let f = unsafe { &mut *frame };
+        unsafe { restore_context_to_frame(&sched.tasks[next].context, f); }
     }
     frame
 }
@@ -772,7 +787,7 @@ unsafe fn handle_keyboard_irq(frame: *mut TrapFrame) -> *mut TrapFrame {
             crate::kbd_buffer_push(ascii);
         }
     }
-    soc_qemu_pc::pic::send_eoi(1);
+    soc_qemu_pc::lapic::eoi();
     frame
 }
 
@@ -786,7 +801,7 @@ unsafe fn handle_com1_irq(frame: *mut TrapFrame) -> *mut TrapFrame {
         };
         crate::kbd_buffer_push(byte);
     }
-    soc_qemu_pc::pic::send_eoi(4);
+    soc_qemu_pc::lapic::eoi();
     frame
 }
 
@@ -858,6 +873,60 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
             }
             frame
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn handle_page_fault(frame: *mut TrapFrame) -> *mut TrapFrame {
+    let f = unsafe { &*frame };
+
+    // Read CR2 (faulting virtual address).
+    let cr2: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nostack, nomem));
+    }
+
+    let serial = soc_qemu_pc::default_serial();
+    let mut con = arch::Console::new(serial);
+    use core::fmt::Write;
+
+    // Decode error code.
+    let present = (f.error_code & 1) != 0;
+    let write = (f.error_code & 2) != 0;
+    let user = (f.error_code & 4) != 0;
+    let rsvd = (f.error_code & 8) != 0;
+    let ifetch = (f.error_code & 16) != 0;
+
+    let _ = writeln!(con, "");
+    let _ = writeln!(con, "*** PAGE FAULT at 0x{:016x}", cr2);
+    let _ = writeln!(con, "    RIP=0x{:016x}  error=0x{:x}", f.rip, f.error_code);
+    let _ = writeln!(con, "    {} {} {} {} {}",
+        if present { "page-prot" } else { "non-present" },
+        if write { "WRITE" } else { "READ" },
+        if user { "user" } else { "kernel" },
+        if rsvd { "reserved-bit" } else { "" },
+        if ifetch { "instr-fetch" } else { "" },
+    );
+    let _ = writeln!(con, "    RSP=0x{:016x}  CS=0x{:x}", f.rsp, f.cs);
+
+    if user {
+        // User-mode page fault — kill the faulting task and reschedule.
+        let sched = unsafe { &mut *SCHEDULER.0.get() };
+        let _ = writeln!(con, "*** Killing task {} (page fault)", sched.tasks[sched.current].name);
+        sched.tasks[sched.current].state = microkernel::task::TaskState::Zombie;
+        if let Some(next) = sched.pick_next() {
+            sched.current = next;
+            sched.tasks[next].state = microkernel::task::TaskState::Running;
+            let f_mut = unsafe { &mut *frame };
+            unsafe { restore_context_to_frame(&sched.tasks[next].context, f_mut); }
+        }
+        return frame;
+    }
+
+    // Kernel page fault — fatal.
+    let _ = writeln!(con, "*** Kernel page fault — system halted.");
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
     }
 }
 

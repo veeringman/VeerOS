@@ -337,3 +337,230 @@ fn zero_frame(phys: usize) {
         core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Higher-half kernel mapping
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Higher-half kernel virtual base address.
+/// Canonical 64-bit: 0xFFFF_8000_0000_0000 (PML4 index 256).
+pub const KERNEL_VIRT_BASE: usize = 0xFFFF_8000_0000_0000;
+
+/// PML4 index for the higher-half kernel mapping.
+const KERNEL_PML4_INDEX: usize = 256;
+
+/// Set up higher-half kernel mapping by copying PML4[0] (identity map)
+/// into PML4[256] (higher-half). The identity map is kept for transition.
+///
+/// After this call, kernel code/data at physical address P is also
+/// accessible at virtual address KERNEL_VIRT_BASE + P.
+///
+/// `pml4` — the current PML4 table (identity-mapped).
+pub fn setup_higher_half(pml4: &mut PageTable) {
+    // Copy the PDPT pointer from PML4[0] to PML4[256].
+    // This makes the same 1 GiB identity map available at the higher-half.
+    pml4.entries[KERNEL_PML4_INDEX] = pml4.entries[0];
+}
+
+/// Remove the low identity mapping (PML4[0]).
+///
+/// Call this only after all kernel code uses higher-half addresses
+/// (including the instruction pointer). Not safe to call during
+/// early boot — deferred to after SMP bringup.
+pub fn remove_identity_map(pml4: &mut PageTable) {
+    pml4.entries[0] = 0;
+    flush_tlb();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-process address space
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// User-space virtual address range (below canonical hole).
+pub const USER_VIRT_BASE: usize = 0x0000_0040_0000_0000;   // 256 GiB mark
+/// Default user stack top.
+pub const USER_STACK_TOP: usize = 0x0000_0080_0000_0000;    // 512 GiB mark
+/// User stack size (64 KiB).
+pub const USER_STACK_SIZE: usize = 64 * 1024;
+
+/// Maximum per-process page tables we track.
+pub const MAX_ADDRESS_SPACES: usize = 16;
+
+/// A per-process address space: owns a PML4 physical address.
+#[derive(Clone, Copy)]
+pub struct AddressSpace {
+    /// Physical address of this process's PML4 table.
+    pub pml4_phys: usize,
+    /// Process ID that owns this address space (0 = free slot).
+    pub pid: u16,
+    /// Number of user pages mapped.
+    pub user_page_count: usize,
+}
+
+impl AddressSpace {
+    pub const EMPTY: Self = Self {
+        pml4_phys: 0,
+        pid: 0,
+        user_page_count: 0,
+    };
+}
+
+/// Table of per-process address spaces.
+pub struct AddressSpaceTable {
+    pub spaces: [AddressSpace; MAX_ADDRESS_SPACES],
+    pub count: usize,
+}
+
+impl AddressSpaceTable {
+    pub const fn new() -> Self {
+        Self {
+            spaces: [AddressSpace::EMPTY; MAX_ADDRESS_SPACES],
+            count: 0,
+        }
+    }
+
+    /// Create a new address space for a process.
+    ///
+    /// Allocates a fresh PML4 and copies the kernel's higher-half mapping
+    /// (PML4 entries 256–511) so kernel code is accessible in every process.
+    ///
+    /// `kernel_pml4` — pointer to the kernel's PML4 (identity-mapped physical address).
+    /// `alloc` — the physical frame allocator.
+    ///
+    /// Returns the slot index, or None on failure.
+    pub fn create(
+        &mut self,
+        pid: u16,
+        kernel_pml4: &PageTable,
+        alloc: &mut FrameAllocator,
+    ) -> Option<usize> {
+        if self.count >= MAX_ADDRESS_SPACES {
+            return None;
+        }
+
+        // Allocate a frame for the new PML4.
+        let pml4_phys = alloc.alloc_frame()?;
+        zero_frame(pml4_phys);
+
+        // Copy kernel higher-half entries (PML4[256..512]).
+        let new_pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
+        for i in KERNEL_PML4_INDEX..512 {
+            new_pml4.entries[i] = kernel_pml4.entries[i];
+        }
+        // Also copy identity map (PML4[0]) while we're still in identity-map mode.
+        new_pml4.entries[0] = kernel_pml4.entries[0];
+
+        let idx = self.count;
+        self.spaces[idx] = AddressSpace {
+            pml4_phys,
+            pid,
+            user_page_count: 0,
+        };
+        self.count += 1;
+        Some(idx)
+    }
+
+    /// Find the address space for a given process ID.
+    pub fn find(&self, pid: u16) -> Option<usize> {
+        for i in 0..self.count {
+            if self.spaces[i].pid == pid {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Map a user page in a process's address space.
+    pub fn map_user_page(
+        &mut self,
+        idx: usize,
+        virt: usize,
+        phys: usize,
+        alloc: &mut FrameAllocator,
+    ) -> bool {
+        if idx >= self.count {
+            return false;
+        }
+        let pml4_phys = self.spaces[idx].pml4_phys;
+        let pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
+        let flags = PTE_WRITABLE | PTE_USER;
+        if map_page(pml4, virt, phys, flags, alloc) {
+            self.spaces[idx].user_page_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Switch to a process's address space (load its CR3).
+    pub fn switch_to(&self, idx: usize) {
+        if idx < self.count {
+            load_cr3(self.spaces[idx].pml4_phys);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CR4 control bits for security
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Enable SMEP (Supervisor Mode Execution Prevention) — prevents kernel
+/// from executing code in user-accessible pages (CR4 bit 20).
+#[cfg(target_arch = "x86_64")]
+pub fn enable_smep() {
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, nomem));
+        cr4 |= 1 << 20; // SMEP
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack));
+    }
+}
+
+/// Enable SMAP (Supervisor Mode Access Prevention) — prevents kernel
+/// from reading/writing user-accessible pages (CR4 bit 21).
+/// Kernel must use STAC/CLAC around legitimate user-memory accesses.
+#[cfg(target_arch = "x86_64")]
+pub fn enable_smap() {
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, nomem));
+        cr4 |= 1 << 21; // SMAP
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack));
+    }
+}
+
+/// Enable NXE (No-Execute Enable) in IA32_EFER — required for PTE_NX.
+#[cfg(target_arch = "x86_64")]
+pub fn enable_nxe() {
+    unsafe {
+        let efer: u64;
+        core::arch::asm!(
+            "mov ecx, 0xC0000080",
+            "rdmsr",
+            "shl rdx, 32",
+            "or rax, rdx",
+            out("rax") efer,
+            out("rcx") _,
+            out("rdx") _,
+            options(nomem, nostack),
+        );
+        let new_efer = efer | (1 << 11); // NXE bit
+        let lo = new_efer as u32;
+        let hi = (new_efer >> 32) as u32;
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") 0xC000_0080u32,
+            in("eax") lo,
+            in("edx") hi,
+            options(nomem, nostack),
+        );
+    }
+}
+
+// Non-x86 stubs.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn enable_smep() {}
+#[cfg(not(target_arch = "x86_64"))]
+pub fn enable_smap() {}
+#[cfg(not(target_arch = "x86_64"))]
+pub fn enable_nxe() {}

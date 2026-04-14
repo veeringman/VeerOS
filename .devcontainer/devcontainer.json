@@ -1,0 +1,43 @@
+{
+  "name": "VeerOS Dev",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        "webfreak.debug"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.target": "x86_64-unknown-none",
+        "rust-analyzer.check.command": "check",
+        "rust-analyzer.check.extraArgs": [
+          "-p", "kernel-qemu-pc",
+          "--target", "x86_64-unknown-none"
+        ]
+      }
+    }
+  },
+
+  "forwardPorts": [5900, 6080],
+  "portsAttributes": {
+    "5900": { "label": "QEMU VNC" },
+    "6080": { "label": "noVNC (browser)" }
+  },
+
+  "remoteUser": "vscode"
+}
