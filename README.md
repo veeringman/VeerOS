@@ -1,5 +1,5 @@
 <!-- LOGO PLACEHOLDER -->
-![VeerOS Logo](./docs/veeros.logo.png)
+![VeerOS Logo](./IMG_2008.png)
 
 <div align="center">
 
