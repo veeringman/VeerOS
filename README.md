@@ -1,6 +1,6 @@
 <!-- LOGO PLACEHOLDER -->
-<img src="./IMG_2008.png" alt="VeerOS Logo" width="120" height="120" align="center"/>
-
+<div align="center"><img src="./IMG_2008.png" alt="VeerOS Logo" width="120" height="120" align="center"/>
+</div>
 <div align="center">
 
 **The world's first AI-native operating system.**
