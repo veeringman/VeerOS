@@ -1,5 +1,5 @@
 <!-- LOGO PLACEHOLDER -->
-![VeerOS Logo](./IMG_2008.png)
+<img src="./IMG_2008.png" alt="VeerOS Logo" width="120" height="120" />
 
 <div align="center">
 
@@ -56,9 +56,7 @@ schedules, places, monitors, and learns.
 
 ### Edge AI & Industrial IoT
 A factory floor with 200 ESP32 sensors, 10 RPi gateways, and 2 cloud GPUs.
-Submit `intent submit pipeline collect vibration data, detect anomalies, alert`
-— the kernel decomposes across the fabric, ingest on sensors, normalize on
-gateways, inference on GPU. Zero middleware.
+Submit `intent submit pipeline collect vibration data, detect anomalies, alert` — the kernel decomposes across the fabric, ingest on sensors, normalize on gateways, inference on GPU. Zero middleware.
 **→ Smart manufacturing, precision agriculture, oil & gas monitoring.**
 
 ### Autonomous Robotics & Drones
@@ -335,4 +333,3 @@ cargo build -p kernel-qemu-pc --features dist-firewall,ai
 ```
 
 ➡️ **Full distribution details:** see Phase 4 in [TODO.md](TODO.md)
-
