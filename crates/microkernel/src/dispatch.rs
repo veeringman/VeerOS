@@ -9,12 +9,17 @@
 //! it can service any syscall without global state lookups.
 
 use arch::{SavedContext, TaskContext, MemPerms, validate_user_ptr};
+use crate::agent::{AgentTable, AgentState, AgentBlockReason, Goal, GoalPriority};
 use crate::channel::{Channels, ChanMsg};
 use crate::driver::DriverRegistry;
+use crate::fabric::ExecutionFabric;
 use crate::fat32::Fat32;
 use crate::futex::FutexTable;
 use crate::input::InputSubsystem;
+use crate::intent::{IntentEngine, IntentClass, IntentStatus};
+use crate::intent_sched::IntentScheduler;
 use crate::ipc::{Ipc, Message};
+use crate::memory_engine::{MemoryEngine, MemoryTag, MemoryScope};
 use crate::poll::PollTable;
 use crate::process::{ProcessTable, ProcessCaps};
 use crate::ramfs::RamFs;
@@ -115,6 +120,11 @@ pub unsafe fn dispatch(
     input: &mut InputSubsystem,
     drivers: &mut DriverRegistry,
     audit: &mut AuditLog,
+    agents: &mut AgentTable,
+    intents: &mut IntentEngine,
+    memory: &mut MemoryEngine,
+    fabric: &mut ExecutionFabric,
+    intent_sched: &mut IntentScheduler,
     console_write: fn(u8),
     console_read: fn() -> u8,
 ) -> SyscallAction {
@@ -219,6 +229,39 @@ pub unsafe fn dispatch(
 
         // Audit syscalls — read-only, always allowed
         SYS_AUDIT_READ | SYS_AUDIT_COUNT => ProcessCaps::TASK_BASIC,
+
+        // AI-Native Execution — Agents
+        SYS_AGENT_SPAWN | SYS_AGENT_STATUS | SYS_AGENT_COMPLETE
+        | SYS_AGENT_CTX_SET | SYS_AGENT_CTX_GET | SYS_AGENT_COUNT
+            => ProcessCaps::AGENT,
+
+        // AI-Native Execution — Intents
+        SYS_INTENT_SUBMIT | SYS_INTENT_STATUS | SYS_INTENT_CANCEL
+            => ProcessCaps::INTENT,
+
+        // AI-Native Execution — Memory Engine
+        SYS_MEMORY_STORE | SYS_MEMORY_QUERY
+            => ProcessCaps::MEMORY_ENGINE,
+
+        // AI-Native Execution — Fabric + Intent Scheduler stats (read-only)
+        SYS_FABRIC_STATUS | SYS_INTENT_SCHED_STATS
+            => ProcessCaps::TASK_BASIC,
+
+        // Distributed Fabric — Peer management (admin)
+        SYS_PEER_REGISTER | SYS_PEER_VERIFY
+            => ProcessCaps::FABRIC_ADMIN,
+
+        // Distributed Fabric — Peer status (read-only)
+        SYS_PEER_STATUS | SYS_MESH_STATUS | SYS_FABRIC_SESSION_COUNT
+            => ProcessCaps::TASK_BASIC,
+
+        // Distributed Fabric — ZKP proofs
+        SYS_ZKP_PROVE | SYS_ZKP_VERIFY
+            => ProcessCaps::ZKP,
+
+        // Distributed Fabric — Mesh transport
+        SYS_MESH_SEND
+            => ProcessCaps::FABRIC_MIGRATE,
 
         // Debug / platform info — always allowed
         SYS_PANIC | SYS_PLATFORM_NAME => ProcessCaps::TASK_BASIC,
@@ -1974,6 +2017,301 @@ pub unsafe fn dispatch(
             // runtime integration is provided by accelerator drivers.
             c.set_ret(0, usize::MAX);
             c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        // ── Accelerators / FPGA / Quantum (desktop/server only) ──
+        #[cfg(feature = "accel")]
+        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
+        | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
+        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => {
+            // ABI surface is reserved and capability-gated. Platform-specific
+            // runtime integration is provided by accelerator drivers.
+            c.set_ret(0, usize::MAX);
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // AI-Native Execution (0xF0–0xFF)
+        // ═══════════════════════════════════════════════════════════
+
+        // ── Agent Lifecycle ─────────────────────────────────────
+        SYS_AGENT_SPAWN => {
+            let desc_ptr = a0;
+            let desc_len = a1;
+            let priority  = a2;
+            let entry     = a3;
+            let stack_top = a4;
+
+            if desc_len == 0 || desc_len > 64 {
+                c.set_ret(0, usize::MAX);
+                return SyscallAction::Resume;
+            }
+
+            let prio = match priority {
+                0 => GoalPriority::Background,
+                1 => GoalPriority::Normal,
+                2 => GoalPriority::Elevated,
+                3 => GoalPriority::Critical,
+                4 => GoalPriority::Realtime,
+                _ => GoalPriority::Normal,
+            };
+
+            let mut goal = Goal::empty();
+            goal.priority = prio;
+            // Copy description from user memory (validated by capability check above).
+            let src = core::slice::from_raw_parts(desc_ptr as *const u8, desc_len);
+            let copy_len = desc_len.min(goal.description.len());
+            goal.description[..copy_len].copy_from_slice(&src[..copy_len]);
+            goal.desc_len = copy_len;
+
+            let tick = sched.ticks;
+            if let Some(aid) = agents.spawn(goal, entry, stack_top, tick) {
+                c.set_ret(0, aid);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_AGENT_STATUS => {
+            let aid = a0;
+            if aid < crate::agent::MAX_AGENTS {
+                let a = &agents.agents[aid];
+                c.set_ret(0, a.state as usize);
+                c.set_ret(1, a.ticks_used as usize);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_AGENT_COMPLETE => {
+            let aid = a0;
+            let new_state = a1;
+            if aid >= crate::agent::MAX_AGENTS {
+                c.set_ret(0, usize::MAX);
+                return SyscallAction::Resume;
+            }
+            match new_state {
+                5 => { agents.complete(aid); c.set_ret(0, 0); }
+                6 => { agents.fail(aid); c.set_ret(0, 0); }
+                _  => { c.set_ret(0, usize::MAX); }
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_AGENT_CTX_SET => {
+            let key_ptr = a0;
+            let key_len = a1;
+            let val_ptr = a2;
+            let val_len = a3;
+
+            // Find agent owned by current task.
+            let tid = sched.current;
+            let mut found = usize::MAX;
+            for i in 0..crate::agent::MAX_AGENTS {
+                if agents.agents[i].task_id == tid
+                    && agents.agents[i].state != AgentState::Free
+                {
+                    found = i;
+                    break;
+                }
+            }
+            if found == usize::MAX || key_len == 0 || key_len > 32 || val_len > 64 {
+                c.set_ret(0, usize::MAX);
+                return SyscallAction::Resume;
+            }
+            let key = core::slice::from_raw_parts(key_ptr as *const u8, key_len.min(32));
+            let val = core::slice::from_raw_parts(val_ptr as *const u8, val_len.min(64));
+            agents.agents[found].context.set(key, val);
+            c.set_ret(0, 0);
+            SyscallAction::Resume
+        }
+
+        SYS_AGENT_CTX_GET => {
+            let key_ptr = a0;
+            let key_len = a1;
+            let out_ptr = a2;
+            let out_len = a3;
+
+            let tid = sched.current;
+            let mut found = usize::MAX;
+            for i in 0..crate::agent::MAX_AGENTS {
+                if agents.agents[i].task_id == tid
+                    && agents.agents[i].state != AgentState::Free
+                {
+                    found = i;
+                    break;
+                }
+            }
+            if found == usize::MAX || key_len == 0 {
+                c.set_ret(0, usize::MAX);
+                return SyscallAction::Resume;
+            }
+            let key = core::slice::from_raw_parts(key_ptr as *const u8, key_len.min(32));
+            if let Some(val) = agents.agents[found].context.get(key) {
+                let copy = val.len().min(out_len);
+                let dst = core::slice::from_raw_parts_mut(out_ptr as *mut u8, copy);
+                dst.copy_from_slice(&val[..copy]);
+                c.set_ret(0, val.len());
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_AGENT_COUNT => {
+            let mut count = 0usize;
+            for i in 0..crate::agent::MAX_AGENTS {
+                if agents.agents[i].state != AgentState::Free {
+                    count += 1;
+                }
+            }
+            c.set_ret(0, count);
+            SyscallAction::Resume
+        }
+
+        // ── Intent Engine ───────────────────────────────────────
+        SYS_INTENT_SUBMIT => {
+            let desc_ptr = a0;
+            let desc_len = a1;
+            let class    = a2;
+            let priority = a3;
+
+            if desc_len == 0 || desc_len > 64 {
+                c.set_ret(0, usize::MAX);
+                return SyscallAction::Resume;
+            }
+
+            let ic = match class {
+                0 => IntentClass::Compute,
+                1 => IntentClass::Deploy,
+                2 => IntentClass::Monitor,
+                3 => IntentClass::Communicate,
+                4 => IntentClass::Data,
+                5 => IntentClass::Admin,
+                6 => IntentClass::Pipeline,
+                _ => IntentClass::Custom,
+            };
+
+            let prio = match priority {
+                0 => GoalPriority::Background,
+                1 => GoalPriority::Normal,
+                2 => GoalPriority::Elevated,
+                3 => GoalPriority::Critical,
+                4 => GoalPriority::Realtime,
+                _ => GoalPriority::Normal,
+            };
+
+            let src = core::slice::from_raw_parts(desc_ptr as *const u8, desc_len.min(64));
+            let tick = sched.ticks;
+            let tid = sched.current;
+
+            if let Some(iid) = intents.submit(ic, src, prio, tid, tick) {
+                c.set_ret(0, iid as usize);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_INTENT_STATUS => {
+            let iid = a0;
+            if iid < crate::intent::MAX_INTENTS && intents.intents[iid].id == iid as u16 {
+                c.set_ret(0, intents.intents[iid].status as usize);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        SYS_INTENT_CANCEL => {
+            let iid = a0;
+            if intents.cancel(iid as u16) {
+                c.set_ret(0, 0);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        // ── Memory Engine ───────────────────────────────────────
+        SYS_MEMORY_STORE => {
+            let key_ptr = a0;
+            let key_len = a1;
+            let val_ptr = a2;
+            let val_len = a3;
+
+            if key_len == 0 || key_len > 32 || val_len > 64 {
+                c.set_ret(0, usize::MAX);
+                return SyscallAction::Resume;
+            }
+            let key = core::slice::from_raw_parts(key_ptr as *const u8, key_len);
+            let val = core::slice::from_raw_parts(val_ptr as *const u8, val_len);
+            let tick = sched.ticks;
+            memory.persistent.store(
+                key, val,
+                MemoryTag::UserKnow,
+                MemoryScope::Global,
+                0,
+                tick,
+                100,
+            );
+            c.set_ret(0, 0);
+            SyscallAction::Resume
+        }
+
+        SYS_MEMORY_QUERY => {
+            let key_ptr = a0;
+            let key_len = a1;
+            let out_ptr = a2;
+            let out_len = a3;
+
+            if key_len == 0 || key_len > 32 {
+                c.set_ret(0, usize::MAX);
+                return SyscallAction::Resume;
+            }
+            let key = core::slice::from_raw_parts(key_ptr as *const u8, key_len);
+            if let Some(entry) = memory.persistent.query(key, MemoryScope::Global, 0) {
+                let vlen = entry.value_len;
+                let copy = vlen.min(out_len);
+                let dst = core::slice::from_raw_parts_mut(out_ptr as *mut u8, copy);
+                dst.copy_from_slice(&entry.value[..copy]);
+                c.set_ret(0, vlen);
+            } else {
+                c.set_ret(0, usize::MAX);
+            }
+            SyscallAction::Resume
+        }
+
+        // ── Fabric / Intent Scheduler Stats ─────────────────────
+        SYS_FABRIC_STATUS => {
+            let (total, healthy) = fabric.node_counts();
+            c.set_ret(0, total);
+            c.set_ret(1, healthy);
+            SyscallAction::Resume
+        }
+
+        SYS_INTENT_SCHED_STATS => {
+            c.set_ret(0, intent_sched.stats.intents_fulfilled as usize);
+            c.set_ret(1, intent_sched.stats.agents_spawned as usize);
+            SyscallAction::Resume
+        }
+
+        // ── Distributed Fabric (dist-cluster) ──────────────────
+        //
+        // These syscalls are always compiled (the numbers are always
+        // defined) so that userlib can reference them on any build.
+        // On non-cluster builds they simply return usize::MAX.
+        //
+        SYS_PEER_REGISTER | SYS_PEER_VERIFY | SYS_PEER_STATUS
+        | SYS_ZKP_PROVE | SYS_ZKP_VERIFY
+        | SYS_MESH_SEND | SYS_MESH_STATUS
+        | SYS_FABRIC_SESSION_COUNT => {
+            // Stub: not available on this build.
+            c.set_ret(0, usize::MAX);
             SyscallAction::Resume
         }
 

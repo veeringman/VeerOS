@@ -150,6 +150,11 @@ impl SocketTable {
         }
     }
 
+    /// Read-only view of all socket slots.
+    pub fn socks_ref(&self) -> &[Socket; MAX_SOCKETS] {
+        &self.socks
+    }
+
     // ── SYS_SOCKET ──────────────────────────────────────────────────
 
     /// Create a socket. Returns handle or `usize::MAX`.

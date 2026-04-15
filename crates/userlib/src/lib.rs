@@ -52,3 +52,7 @@ pub mod cap;
 pub mod gpio;
 pub mod hw;
 pub mod config;
+pub mod agent;
+pub mod intent;
+pub mod memory;
+pub mod fabric_net;

@@ -4,7 +4,7 @@
 //! x86 PCI host bridge. On QEMU q35, this gives access to all emulated
 //! PCI/PCIe devices (VIRTIO-PCI, AHCI, USB xHCI, etc.).
 
-use crate::{inb, outb};
+use crate::{inl, outl};
 
 /// PCI config address port.
 const PCI_CONFIG_ADDR: u16 = 0x0CF8;
@@ -107,19 +107,8 @@ fn pci_addr(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 pub fn config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     let addr = pci_addr(bus, device, function, offset);
     unsafe {
-        // Write address as 4 bytes via outb (can also use outl).
-        let addr_bytes = addr.to_le_bytes();
-        outb(PCI_CONFIG_ADDR, addr_bytes[0]);
-        outb(PCI_CONFIG_ADDR + 1, addr_bytes[1]);
-        outb(PCI_CONFIG_ADDR + 2, addr_bytes[2]);
-        outb(PCI_CONFIG_ADDR + 3, addr_bytes[3]);
-
-        // Read data.
-        let b0 = inb(PCI_CONFIG_DATA) as u32;
-        let b1 = (inb(PCI_CONFIG_DATA + 1) as u32) << 8;
-        let b2 = (inb(PCI_CONFIG_DATA + 2) as u32) << 16;
-        let b3 = (inb(PCI_CONFIG_DATA + 3) as u32) << 24;
-        b0 | b1 | b2 | b3
+        outl(PCI_CONFIG_ADDR, addr);
+        inl(PCI_CONFIG_DATA)
     }
 }
 
@@ -141,17 +130,8 @@ pub fn config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
 pub fn config_write32(bus: u8, device: u8, function: u8, offset: u8, val: u32) {
     let addr = pci_addr(bus, device, function, offset);
     unsafe {
-        let addr_bytes = addr.to_le_bytes();
-        outb(PCI_CONFIG_ADDR, addr_bytes[0]);
-        outb(PCI_CONFIG_ADDR + 1, addr_bytes[1]);
-        outb(PCI_CONFIG_ADDR + 2, addr_bytes[2]);
-        outb(PCI_CONFIG_ADDR + 3, addr_bytes[3]);
-
-        let val_bytes = val.to_le_bytes();
-        outb(PCI_CONFIG_DATA, val_bytes[0]);
-        outb(PCI_CONFIG_DATA + 1, val_bytes[1]);
-        outb(PCI_CONFIG_DATA + 2, val_bytes[2]);
-        outb(PCI_CONFIG_DATA + 3, val_bytes[3]);
+        outl(PCI_CONFIG_ADDR, addr);
+        outl(PCI_CONFIG_DATA, val);
     }
 }
 

@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod agent;
 pub mod alloc;
 #[cfg(feature = "accel")]
 pub mod accelerator;
@@ -7,12 +8,26 @@ pub mod audit;
 pub mod channel;
 pub mod dispatch;
 pub mod driver;
+pub mod fabric;
+#[cfg(feature = "dist-cluster")]
+pub mod fabric_proto;
+#[cfg(feature = "dist-cluster")]
+pub mod node_identity;
+#[cfg(feature = "dist-cluster")]
+pub mod zkp;
+#[cfg(feature = "dist-cluster")]
+pub mod fabric_crypto;
+#[cfg(feature = "dist-cluster")]
+pub mod mesh;
 pub mod fat32;
 pub mod futex;
 pub mod hid;
 pub mod input;
+pub mod intent;
+pub mod intent_sched;
 pub mod ipc;
 pub mod klog;
+pub mod memory_engine;
 pub mod poll;
 pub mod process;
 pub mod ramfs;

@@ -242,6 +242,36 @@ unsafe impl Sync for AuditCell {}
 pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()));
 
 // ---------------------------------------------------------------------------
+// AI-Native Execution subsystems
+// ---------------------------------------------------------------------------
+
+use microkernel::agent::AgentTable;
+use microkernel::intent::IntentEngine;
+use microkernel::memory_engine::MemoryEngine;
+use microkernel::fabric::ExecutionFabric;
+use microkernel::intent_sched::IntentScheduler;
+
+pub(crate) struct AgentCell(pub UnsafeCell<AgentTable>);
+unsafe impl Sync for AgentCell {}
+pub(crate) static AGENTS: AgentCell = AgentCell(UnsafeCell::new(AgentTable::new()));
+
+pub(crate) struct IntentCell(pub UnsafeCell<IntentEngine>);
+unsafe impl Sync for IntentCell {}
+pub(crate) static INTENTS: IntentCell = IntentCell(UnsafeCell::new(IntentEngine::new()));
+
+pub(crate) struct MemoryEngineCell(pub UnsafeCell<MemoryEngine>);
+unsafe impl Sync for MemoryEngineCell {}
+pub(crate) static MEMORY_ENGINE: MemoryEngineCell = MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
+
+pub(crate) struct FabricCell(pub UnsafeCell<ExecutionFabric>);
+unsafe impl Sync for FabricCell {}
+pub(crate) static FABRIC: FabricCell = FabricCell(UnsafeCell::new(ExecutionFabric::new()));
+
+pub(crate) struct IntentSchedCell(pub UnsafeCell<IntentScheduler>);
+unsafe impl Sync for IntentSchedCell {}
+pub(crate) static INTENT_SCHED: IntentSchedCell = IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
+
+// ---------------------------------------------------------------------------
 // Socket table
 // ---------------------------------------------------------------------------
 
@@ -618,6 +648,36 @@ fn shell_task() -> ! {
         shutdown: None,
         caps_cmd: Some(caps_command),
         auditlog_cmd: Some(auditlog_command),
+        #[cfg(feature = "multi-user")]
+        login: Some(do_login),
+        #[cfg(not(feature = "multi-user"))]
+        login: None,
+        #[cfg(feature = "multi-user")]
+        logout: Some(do_logout),
+        #[cfg(not(feature = "multi-user"))]
+        logout: None,
+        #[cfg(feature = "multi-user")]
+        change_password: Some(do_change_password),
+        #[cfg(not(feature = "multi-user"))]
+        change_password: None,
+        #[cfg(feature = "multi-user")]
+        add_user: Some(do_add_user),
+        #[cfg(not(feature = "multi-user"))]
+        add_user: None,
+        #[cfg(feature = "multi-user")]
+        remove_user: Some(do_remove_user),
+        #[cfg(not(feature = "multi-user"))]
+        remove_user: None,
+        // AI-native
+        get_agent_list: None,
+        agent_cmd: None,
+        get_intent_list: None,
+        intent_cmd: None,
+        memory_cmd: None,
+        get_fabric_status: None,
+        peers_cmd: None,
+        mesh_cmd: None,
+        zkp_cmd: None,
     };
     let mut sh = Shell::new(env);
     loop {
@@ -903,6 +963,21 @@ fn net_task() -> ! {
                         shutdown: None,
                         caps_cmd: Some(caps_command),
                         auditlog_cmd: Some(auditlog_command),
+                        login: None,
+                        logout: None,
+                        change_password: None,
+                        add_user: None,
+                        remove_user: None,
+                        // AI-native
+                        get_agent_list: None,
+                        agent_cmd: None,
+                        get_intent_list: None,
+                        intent_cmd: None,
+                        memory_cmd: None,
+                        get_fabric_status: None,
+                        peers_cmd: None,
+                        mesh_cmd: None,
+                        zkp_cmd: None,
                     };
                     let mut sh = Shell::new(env);
                     sh.run(&mut tcp_con);
@@ -1944,6 +2019,61 @@ fn write_user_list(w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "  {:7}  {:3}  {}", u.name, u.uid, st);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-user callbacks
+// ---------------------------------------------------------------------------
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_login(username: &str, password: &[u8]) -> u32 {
+    unsafe {
+        let users = &mut *USERS.0.get();
+        match users.login(username, password) {
+            Ok(token) => {
+                if let Some((uid, gid)) = users.session_info(token) {
+                    (*PROCESSES.0.get()).processes[0].uid = uid;
+                    (*PROCESSES.0.get()).processes[0].gid = gid;
+                }
+                token
+            }
+            Err(_) => 0,
+        }
+    }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_logout() -> bool {
+    unsafe {
+        let users = &mut *USERS.0.get();
+        let uid = (*PROCESSES.0.get()).processes[0].uid;
+        let mut found = false;
+        for s in users.sessions.iter_mut() {
+            if s.active && s.uid == uid {
+                *s = microkernel::user::Session::empty();
+                found = true;
+                break;
+            }
+        }
+        (*PROCESSES.0.get()).processes[0].uid = microkernel::user::ROOT_UID;
+        (*PROCESSES.0.get()).processes[0].gid = microkernel::user::ROOT_GID;
+        found
+    }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_change_password(uid: u16, new_password: &[u8]) -> bool {
+    unsafe { (*USERS.0.get()).change_password(uid, new_password) }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_add_user(name: &'static str, gid: u16, password: &[u8]) -> Option<u16> {
+    unsafe { (*USERS.0.get()).add_user(name, gid, password) }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_remove_user(uid: u16) -> bool {
+    unsafe { (*USERS.0.get()).remove_user(uid) }
 }
 
 // ---------------------------------------------------------------------------

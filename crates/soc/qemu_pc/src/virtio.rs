@@ -17,7 +17,7 @@ pub const VIRTIO_DEV_NET: u16 = 0x1000;
 pub const VIRTIO_DEV_BLK: u16 = 0x1001;
 
 /// Maximum number of descriptors in a virtqueue (must be power of 2).
-pub const QUEUE_SIZE: usize = 128;
+pub const QUEUE_SIZE: usize = 256;
 
 // ─── Legacy PCI I/O bar register offsets ─────────────────────────────────
 
@@ -249,6 +249,13 @@ impl Virtqueue {
         unsafe {
             write16(self.io_base + REG_QUEUE_NOTIFY, self.queue_idx);
         }
+    }
+
+    /// Check if the used ring has any completed requests without consuming.
+    pub fn has_used(&self) -> bool {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let used = unsafe { &*self.used };
+        self.last_used_idx != used.idx
     }
 
     /// Poll the used ring for a completed request.

@@ -92,8 +92,10 @@ version = "0.1.0"
 dependencies = [
  "arch",
  "microkernel",
+ "net",
  "panic-halt",
  "shell",
+ "smoltcp",
  "soc-qemu-pc",
  "userlib",
 ]
@@ -238,5 +240,6 @@ version = "0.1.0"
 dependencies = [
  "arch",
  "libc",
+ "microkernel",
  "shell",
 ]

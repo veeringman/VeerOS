@@ -9,4 +9,5 @@ repository.workspace = true
 [dependencies]
 arch = { path = "../arch" }
 shell = { path = "../shell" }
+microkernel = { path = "../microkernel", default-features = false }
 libc = "0.2"

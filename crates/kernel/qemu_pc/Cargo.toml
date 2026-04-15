@@ -12,15 +12,18 @@ dist-rt      = ["microkernel/dist-rt"]
 dist-xrt     = ["microkernel/dist-xrt", "accel"]
 dist-full    = ["dist-app", "dist-xrt"]
 
-accel   = ["microkernel/accel"]
-shell   = ["dep:shell"]
-userlib = ["dep:userlib"]
-samples = ["userlib"]
+accel      = ["microkernel/accel"]
+shell      = ["dep:shell"]
+userlib    = ["dep:userlib"]
+samples    = ["userlib"]
+multi-user = ["microkernel/multi-user", "shell/multi-user"]
 
 [dependencies]
 arch = { path = "../../arch" }
 microkernel = { path = "../../microkernel", default-features = false }
 soc-qemu-pc = { path = "../../soc/qemu_pc" }
+net = { path = "../../net" }
+smoltcp = { workspace = true }
 shell = { path = "../../shell", optional = true }
 userlib = { path = "../../userlib", optional = true }
 panic-halt = "1.0"

@@ -140,12 +140,12 @@ impl UserTable {
 
     /// Initialise with a default root user.  Call once at boot.
     pub fn init_defaults(&mut self) {
-        // Root user: uid=0, gid=0, password="root"
+        // Root user: uid=0, gid=0, password="toor"
         self.users[0] = UserEntry {
             uid: 0,
             gid: 0,
             name: "root",
-            password_hash: simple_hash(b"root"),
+            password_hash: simple_hash(b"toor"),
             flags: UserFlags::ENABLED,
         };
         // Default normal user: uid=1, gid=1, password="veeros"

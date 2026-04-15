@@ -628,3 +628,145 @@ pub const SYS_AUDIT_READ: usize = 0xE0;
 ///   (no args)
 /// Returns: a0 = total events recorded, a1 = current entry count in buffer.
 pub const SYS_AUDIT_COUNT: usize = 0xE1;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Distributed Fabric (0xE2–0xE9) — Zero Trust, ZKP, Mesh, PQC Sessions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Register a peer node and initiate Zero Trust challenge.
+///   a0 = pointer to 32-byte peer node ID
+///   a1 = pointer to 32-byte entropy for challenge nonce
+/// Returns: a0 = peer index on success, `usize::MAX` on failure.
+pub const SYS_PEER_REGISTER: usize = 0xE2;
+
+/// Verify a challenge response from a peer.
+///   a0 = peer index
+///   a1 = pointer to 32-byte response hash
+/// Returns: a0 = 0 on success (peer promoted to Verified), `usize::MAX` on failure.
+pub const SYS_PEER_VERIFY: usize = 0xE3;
+
+/// Query peer trust level.
+///   a0 = peer index
+/// Returns: a0 = TrustLevel (0=Untrusted..4=Revoked), a1 = node capabilities bitmask.
+pub const SYS_PEER_STATUS: usize = 0xE4;
+
+/// Prove a capability via ZKP (selective disclosure).
+///   a0 = capability bitmask to prove
+///   a1 = pointer to output buffer for proof (128 bytes)
+///   a2 = output buffer length
+/// Returns: a0 = proof length on success, `usize::MAX` on failure.
+pub const SYS_ZKP_PROVE: usize = 0xE5;
+
+/// Verify a ZKP capability proof from a peer.
+///   a0 = pointer to proof data
+///   a1 = proof length
+///   a2 = expected capability bitmask
+/// Returns: a0 = 0 on success (proof valid), `usize::MAX` on failure.
+pub const SYS_ZKP_VERIFY: usize = 0xE6;
+
+/// Enqueue a message in the mesh transport.
+///   a0 = pointer to 32-byte destination node ID
+///   a1 = pointer to message data
+///   a2 = message length
+///   a3 = priority (0–255)
+/// Returns: a0 = 0 on success, `usize::MAX` if queue full.
+pub const SYS_MESH_SEND: usize = 0xE7;
+
+/// Get mesh transport statistics.
+///   (no args)
+/// Returns: a0 = route count, a1 = queued messages.
+pub const SYS_MESH_STATUS: usize = 0xE8;
+
+/// Get fabric crypto session count.
+///   (no args)
+/// Returns: a0 = active encrypted sessions.
+pub const SYS_FABRIC_SESSION_COUNT: usize = 0xE9;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AI-Native Execution (0xF0–0xFF) — Agents, Intents, Memory, Fabric
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Spawn a new autonomous agent with a goal.
+///   a0 = pointer to goal description string
+///   a1 = goal description length
+///   a2 = goal priority (0=Background, 1=Normal, 2=Elevated, 3=Critical, 4=Realtime)
+///   a3 = entry point (function pointer for agent thread)
+///   a4 = stack top address
+/// Returns: a0 = agent ID on success, `usize::MAX` on failure.
+pub const SYS_AGENT_SPAWN: usize = 0xF0;
+
+/// Query agent status.
+///   a0 = agent ID
+/// Returns: a0 = AgentState (0=Free..6=Failed), a1 = ticks_used.
+pub const SYS_AGENT_STATUS: usize = 0xF1;
+
+/// Transition an agent to a new state (e.g. mark completed / failed).
+///   a0 = agent ID
+///   a1 = new state (5=Completed, 6=Failed)
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_AGENT_COMPLETE: usize = 0xF2;
+
+/// Set a key-value pair in the calling agent's context memory.
+///   a0 = pointer to key bytes
+///   a1 = key length
+///   a2 = pointer to value bytes
+///   a3 = value length
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_AGENT_CTX_SET: usize = 0xF3;
+
+/// Get a value from the calling agent's context memory.
+///   a0 = pointer to key bytes
+///   a1 = key length
+///   a2 = pointer to output buffer
+///   a3 = buffer length
+/// Returns: a0 = value length on success, `usize::MAX` on not found.
+pub const SYS_AGENT_CTX_GET: usize = 0xF4;
+
+/// Submit an intent (high-level goal) to the intent engine.
+///   a0 = pointer to intent description string
+///   a1 = description length
+///   a2 = intent class (0=Compute..6=Pipeline, 255=Custom)
+///   a3 = priority (0=Background..4=Realtime)
+/// Returns: a0 = intent ID on success, `usize::MAX` on failure.
+pub const SYS_INTENT_SUBMIT: usize = 0xF5;
+
+/// Query intent status.
+///   a0 = intent ID
+/// Returns: a0 = IntentStatus (0=Free..6=Cancelled).
+pub const SYS_INTENT_STATUS: usize = 0xF6;
+
+/// Cancel an in-flight intent.
+///   a0 = intent ID
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_INTENT_CANCEL: usize = 0xF7;
+
+/// Store a key-value pair in persistent memory.
+///   a0 = pointer to key bytes
+///   a1 = key length
+///   a2 = pointer to value bytes
+///   a3 = value length
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_MEMORY_STORE: usize = 0xF8;
+
+/// Query persistent memory by key.
+///   a0 = pointer to key bytes
+///   a1 = key length
+///   a2 = pointer to output buffer
+///   a3 = buffer length
+/// Returns: a0 = value length on success, `usize::MAX` on not found.
+pub const SYS_MEMORY_QUERY: usize = 0xF9;
+
+/// Get execution fabric node count.
+///   (no args)
+/// Returns: a0 = total nodes, a1 = healthy nodes.
+pub const SYS_FABRIC_STATUS: usize = 0xFA;
+
+/// Get intent scheduler statistics.
+///   (no args)
+/// Returns: a0 = intents_fulfilled, a1 = agents_spawned.
+pub const SYS_INTENT_SCHED_STATS: usize = 0xFB;
+
+/// Get agent count.
+///   (no args)
+/// Returns: a0 = active agent count.
+pub const SYS_AGENT_COUNT: usize = 0xFC;

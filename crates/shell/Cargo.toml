@@ -6,5 +6,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+multi-user = []
+
 [dependencies]
 arch = { path = "../arch" }

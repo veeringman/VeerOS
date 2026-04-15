@@ -557,6 +557,66 @@ pub fn enable_nxe() {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// User address space construction helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Create a user address space for the given process.
+///
+/// 1. Allocates a new PML4 and copies the kernel half (PML4[0] and [256..512]).
+/// 2. Identity-maps the user code region (`code_start..code_end`) as
+///    read-only + executable + user-accessible.
+/// 3. Allocates `stack_pages` physical frames and maps them below
+///    `USER_STACK_TOP` as read-write + no-execute + user-accessible.
+///
+/// Returns `(pml4_phys, stack_bottom_virt, stack_top_virt)` on success.
+pub fn create_user_address_space(
+    kernel_pml4: &PageTable,
+    alloc: &mut FrameAllocator,
+    code_start: usize,
+    code_end: usize,
+    stack_pages: usize,
+) -> Option<(usize, usize, usize)> {
+    // Allocate PML4 frame.
+    let pml4_phys = alloc.alloc_frame()?;
+    zero_frame(pml4_phys);
+
+    let pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
+
+    // Copy kernel mappings: identity map (PML4[0]) + higher-half (PML4[256..512]).
+    pml4.entries[0] = kernel_pml4.entries[0];
+    for i in KERNEL_PML4_INDEX..512 {
+        pml4.entries[i] = kernel_pml4.entries[i];
+    }
+
+    // Identity-map user code pages as User + Read + Execute (no write).
+    let code_flags = PTE_USER; // PTE_PRESENT is added by map_page; read-only (no PTE_WRITABLE)
+    let mut addr = code_start & !(PAGE_SIZE - 1);
+    while addr < code_end {
+        if !map_page(pml4, addr, addr, code_flags, alloc) {
+            return None;
+        }
+        addr += PAGE_SIZE;
+    }
+
+    // Allocate and map user stack pages.
+    let stack_size = stack_pages * PAGE_SIZE;
+    let stack_top = USER_STACK_TOP;
+    let stack_bottom = stack_top - stack_size;
+    let stack_flags = PTE_USER | PTE_WRITABLE | PTE_NX;
+
+    for i in 0..stack_pages {
+        let frame = alloc.alloc_frame()?;
+        zero_frame(frame);
+        let virt = stack_bottom + i * PAGE_SIZE;
+        if !map_page(pml4, virt, frame, stack_flags, alloc) {
+            return None;
+        }
+    }
+
+    Some((pml4_phys, stack_bottom, stack_top))
+}
+
 // Non-x86 stubs.
 #[cfg(not(target_arch = "x86_64"))]
 pub fn enable_smep() {}

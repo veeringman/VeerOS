@@ -21,6 +21,7 @@ shell      = ["dep:shell"]
 wifi       = ["dep:net", "dep:smoltcp"]
 ble        = []
 ieee802154 = ["dep:smoltcp"]
+multi-user = ["microkernel/multi-user", "shell/multi-user"]
 
 [dependencies]
 arch = { path = "../../arch" }

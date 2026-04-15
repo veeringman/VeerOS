@@ -171,26 +171,26 @@ _Built-in documentation accessible from the shell._
 _Configurable single-user vs multi-user system. Feature-gated: `single-user` (default on embedded) vs `multi-user`._
 
 #### Core Identity Model
-- [ ] **`multi-user` / `single-user` feature flags** — `single-user` default for embedded targets (no login, implicit root); `multi-user` enables full identity system
-- [ ] **`UserId` (UID) type** — `u16` user identifier; UID 0 = root/system, UID 1–65534 = normal users, 65535 = nobody
-- [ ] **`GroupId` (GID) type** — `u16` group identifier for coarse-grained access grouping
-- [ ] **`UserEntry` struct** — `uid`, `gid`, `name: &str`, `password_hash: [u8; 32]`, `home_dir`, `shell`, `flags` (enabled/disabled/locked)
-- [ ] **User table** — static `[UserEntry; MAX_USERS]` (8–16 slots); stored in `.rodata` for single-user, kernel RAM for multi-user
-- [ ] **Group table** — static `[GroupEntry; MAX_GROUPS]` with membership bitmask per user
+- [x] **`multi-user` / `single-user` feature flags** — `single-user` default for embedded targets (no login, implicit root); `multi-user` enables full identity system
+- [x] **`UserId` (UID) type** — `u16` user identifier; UID 0 = root/system, UID 1–65534 = normal users, 65535 = nobody
+- [x] **`GroupId` (GID) type** — `u16` group identifier for coarse-grained access grouping
+- [x] **`UserEntry` struct** — `uid`, `gid`, `name: &str`, `password_hash: [u8; 32]`, `home_dir`, `shell`, `flags` (enabled/disabled/locked)
+- [x] **User table** — static `[UserEntry; MAX_USERS]` (8–16 slots); stored in `.rodata` for single-user, kernel RAM for multi-user
+- [x] **Group table** — static `[GroupEntry; MAX_GROUPS]` with membership bitmask per user
 
 #### Authentication
-- [ ] **`SYS_LOGIN` syscall** — validate username + password, return session token on success
-- [ ] **`SYS_LOGOUT` syscall** — invalidate session, terminate user's processes (optional)
-- [ ] **Password hashing** — lightweight hash (SHA-256 or SipHash) for credential verification; no plaintext storage
-- [ ] **Login shell flow** (`multi-user` only) — boot → `login:` prompt → authenticate → spawn user shell with UID set
-- [ ] **Auto-login** (`single-user`) — skip authentication, all processes run as UID 0 (root)
-- [ ] **Session token** — kernel-issued opaque `u32` token tied to UID; passed in process descriptor on spawn
-- [ ] **Failed login lockout** — optional: 3 failed attempts → 30s cooldown (prevents brute-force on serial/SSH)
+- [x] **`SYS_LOGIN` syscall** — validate username + password, return session token on success
+- [x] **`SYS_LOGOUT` syscall** — invalidate session, terminate user's processes (optional)
+- [x] **Password hashing** — lightweight hash (SHA-256 or SipHash) for credential verification; no plaintext storage
+- [x] **Login shell flow** (`multi-user` only) — boot → `login:` prompt → authenticate → spawn user shell with UID set
+- [x] **Auto-login** (`single-user`) — skip authentication, all processes run as UID 0 (root)
+- [x] **Session token** — kernel-issued opaque `u32` token tied to UID; passed in process descriptor on spawn
+- [x] **Failed login lockout** — optional: 3 failed attempts → 30s cooldown (prevents brute-force on serial/SSH)
 
 #### Per-User Process Ownership
-- [ ] **UID field in `Process` struct** — every process tagged with owner's UID at spawn time
-- [ ] **`SYS_GETUID` / `SYS_GETGID` syscalls** — return calling process's UID/GID
-- [ ] **`SYS_SETUID` syscall** — privilege escalation (root only); allows spawning processes as another user
+- [x] **UID field in `Process` struct** — every process tagged with owner's UID at spawn time
+- [x] **`SYS_GETUID` / `SYS_GETGID` syscalls** — return calling process's UID/GID
+- [x] **`SYS_SETUID` syscall** — privilege escalation (root only); allows spawning processes as another user
 - [ ] **Process visibility** — `ps`/`tasks` shows owner; non-root users see only their own processes (configurable)
 - [ ] **Signal/kill permissions** — `SYS_KILL` restricted: users can only signal their own processes; root can signal any
 
@@ -201,12 +201,13 @@ _Configurable single-user vs multi-user system. Feature-gated: `single-user` (de
 - [ ] **Driver access control** — only root (UID 0) or designated group can register/interact with hardware drivers
 
 #### Shell Integration
-- [ ] **`whoami` command** — display current user name and UID
-- [ ] **`su` command** — switch user (requires target user's password or root privilege)
-- [ ] **`users` command** — list logged-in users and their sessions
-- [ ] **`useradd` / `userdel` commands** — runtime user management (root only, `multi-user` feature)
-- [ ] **`passwd` command** — change password for current user (or any user if root)
-- [ ] **Shell prompt** — include username: `user@veeros $` (multi-user) vs `veeros $` (single-user)
+- [x] **`whoami` command** — display current user name and UID
+- [x] **`su` command** — switch user (requires target user's password or root privilege)
+- [x] **`users` command** — list logged-in users and their sessions
+- [x] **`useradd` / `userdel` commands** — runtime user management (root only, `multi-user` feature)
+- [x] **`passwd` command** — change password for current user (or any user if root)
+- [x] **Shell prompt** — include username: `user@veeros $` (multi-user) vs `veeros $` (single-user)
+- [x] **`logout` command** — end session and return to login prompt (`multi-user` only)
 
 #### Distribution Integration
 _See Phase 4D (User Model Defaults) for the complete profile → user model mapping._
@@ -2248,6 +2249,224 @@ Bandwidth monitor      ─            ─          ─          ─          ✓
 → See Phase 4D for network feature defaults per distribution profile.
 ```
 
+---
+
+## Phase 14 — AI-Native Execution Kernel (Implemented)
+_The OS kernel treats autonomous agents, goals, and memory as first-class primitives — not userspace libraries. Agents replace processes as the primary execution unit for AI workloads. Intents replace manual commands with declarative goals. The kernel plans, schedules, and orchestrates autonomously._
+
+**Status**: Core kernel modules implemented. Syscall ABI defined (0xF0–0xFF). Wired into dispatch + all 5 kernel targets. Compiles clean.
+
+### 14A — Agent Primitive (`microkernel::agent`)
+_Agents are autonomous execution units that own goals, working memory, hierarchies, and compute budgets. They map 1:1 to kernel threads but carry rich metadata for AI-aware scheduling._
+
+- [x] **`AgentState` lifecycle** — `Free → Spawned → Planning → Executing → Blocked → Completed / Failed`; state machine enforced by `AgentTable`
+- [x] **`Goal` struct** — description (64 bytes), priority (`Background`/`Normal`/`Elevated`/`Critical`/`Realtime`), optional deadline tick, tick budget, linked intent ID
+- [x] **`AgentContext` (working memory)** — 8-slot key-value store per agent (32-byte keys, 64-byte values); context carried across planning/execution phases
+- [x] **`AgentCb` (control block)** — goal, task_id link, parent/children hierarchy (MAX_CHILDREN=8), tick budget tracking, spawn/complete timestamps
+- [x] **`AgentTable`** — 32 agent slots; `spawn()`, `transition()`, `complete()`, `fail()`, `destroy()`, `tick()` (budget enforcement, returns expired agents)
+- [x] **`AgentMessage`** — 4-word envelope for inter-agent communication via kernel channels; `pack()`/`unpack()` serialization
+- [x] **`AgentBlockReason`** — `WaitingForChild`, `WaitingForResource`, `WaitingForIntent`, `WaitingForMessage`, `WaitingForPlacement`
+- [x] **Hierarchical agents** — parent→child relationships; parent tracks children IDs; depth limited to `MAX_GOAL_DEPTH=8`
+- [ ] **Agent factory registry** — pre-registered agent blueprints (entry point + capability set) for common intents
+- [ ] **Agent migration** — migrate agent state between fabric nodes; serialize `AgentCb` + context → remote node
+- [ ] **Shell `agents` command** — list active agents, their goals, states, budget usage; `agent spawn <goal>`, `agent kill <id>`
+
+### 14B — Intent Engine (`microkernel::intent`)
+_Declarative goal decomposition — users submit "what" they want, the kernel figures out "how"._
+
+- [x] **`IntentClass` taxonomy** — `Compute`, `Deploy`, `Monitor`, `Communicate`, `Data`, `Admin`, `Pipeline`, `Custom`
+- [x] **`IntentConstraint` system** — `MaxLatencyMs`, `NodeAffinity`, `MinReliability`, `MaxCost`, `Locality`, `SecurityLevel`; up to 4 constraints per intent
+- [x] **`IntentStatus` lifecycle** — `Free → Pending → Planning → Active → Fulfilled / Failed / Cancelled`
+- [x] **`IntentDescriptor`** — ID, class, status, description (64 bytes), priority, constraints, root_agent, submitter_task, timestamps
+- [x] **`Plan` (step DAG)** — up to 16 `PlanStep`s with `StepRelation` (`Independent`/`DependsOn(idx)`/`Parallel`); dependency-aware readiness check
+- [x] **Rule-based decomposition** — `Compute→1 step`, `Deploy→3 steps (validate→provision→verify)`, `Data→2 steps (acquire→transform)`, etc.
+- [x] **`IntentEngine`** — 16 intent slots; `submit()`, `decompose()`, `cancel()`, `tick()` (sync agent completion → intent status), `status()`
+- [ ] **Constraint solver** — advanced constraint satisfaction for multi-constraint intents; Pareto-optimal placement
+- [ ] **NL intent parsing (userspace)** — natural language → `IntentClass` + constraints via AI model; bridges Phase 10I NL shell
+- [ ] **Composite intents** — intent that decomposes into sub-intents (not just plan steps); recursive decomposition
+- [ ] **Intent templates** — pre-defined intent schemas for common operations (deploy-service, scale-up, backup-data)
+
+### 14C — Memory Engine (`microkernel::memory_engine`)
+_Three-tier memory system: per-agent context (hot), persistent knowledge (warm), episodic history (cold)._
+
+- [x] **Context memory** — per-agent 8-slot key-value store in `AgentContext`; fast O(n) lookup; carried through agent lifecycle
+- [x] **`PersistentMemory`** — global key-value store with `MemoryTag` (System/Preference/Cache/Config/Relation/Skill/UserKnow/Observation) and `MemoryScope` (Global/Intent/Agent/Process); LRU eviction; confidence scoring; read-count tracking
+- [x] **`EpisodicMemory`** — ring buffer of `Episode` records with `EpisodeKind` (12 variants: TaskSpawned, AgentSpawned, IntentSubmitted, ...) and `EpisodeOutcome` (Success/Failure/Partial/Pending); `success_rate()`, `find_by_intent()`, `find_latest()`
+- [x] **`MemoryEngine`** — owns persistent + episodic memories; distribution-profile sized (32/128/512 persistent, 64/256/1024 episodic)
+- [x] **Syscall interface** — `SYS_MEMORY_STORE` (0xF8), `SYS_MEMORY_QUERY` (0xF9) for userspace read/write to persistent memory
+- [ ] **Memory consolidation** — periodic sweep: merge duplicate keys, decay low-confidence entries, promote high-read entries
+- [ ] **Cross-agent memory sharing** — agents in same intent can share a scoped memory partition
+- [ ] **Flash-backed persistence** — serialize persistent memory to flash/SD on shutdown; restore on boot
+- [ ] **Temporal queries** — query episodic memory by time range, success rate in window, trend detection
+
+### 14D — Execution Fabric (`microkernel::fabric`)
+_Unified compute plane spanning heterogeneous nodes — from ESP32 to cloud VMs._
+
+- [x] **`FabricNode`** — health state, name, architecture (`Riscv32`/`Riscv64`/`Aarch64`/`X86_64`/`Xtensa`), locality zone (`Local`/`Rack`/`DataCenter`/`Region`/`Global`), capability bitmask (16 caps: Compute, GpuCompute, NpuInference, Storage, ...), resource snapshot (cores, MHz, RAM, load, agent count), heartbeat/RTT tracking
+- [x] **`PlacementConstraint`** — required capability, min cores/RAM, max RTT, preferred zone, prefer-low-load flag
+- [x] **`ExecutionFabric`** — 1/8/64 nodes by distribution profile; `register_local()`, `register_remote()`, `heartbeat()`, `check_health()`, `select_node()` (weighted scoring: capability match → resource fit → locality → load)
+- [x] **Health monitoring** — periodic heartbeat timeout check; nodes transition `Healthy → Degraded → Offline`; overload detection from load %
+- [ ] **Cluster discovery** — mDNS/gossip protocol for automatic node discovery in LAN; Phase 11 integration
+- [ ] **Remote agent dispatch** — serialize agent goal + context, send to remote fabric node, await completion
+- [ ] **Resource reservation** — reserve cores/RAM on target node before agent placement; release on completion
+- [ ] **Fabric dashboard** — shell `fabric` command: list nodes, health, capabilities, load; `fabric add/remove`
+
+### 14E — Intent Scheduler (`microkernel::intent_sched`)
+_Meta-scheduler that orchestrates the AI-native execution loop — sits above the task scheduler._
+
+- [x] **6-phase tick cycle** — (1) decompose pending intents, (2) assign agents to ready plan steps with placement, (3) monitor executing agents (budget/deadline enforcement), (4) sync intent status from agents, (5) record outcomes in episodic memory, (6) fabric health check
+- [x] **`IntentSchedStats`** — intents submitted/fulfilled/failed, agents spawned/completed/failed, replans count
+- [x] **Budget enforcement** — agents exceeding tick budget marked failed; intent re-plan triggered if possible
+- [x] **Placement integration** — `build_placement_constraint()` maps intent constraints → fabric placement; critical goals prefer low-load nodes
+- [x] **Episodic feedback loop** — successful strategies stored in persistent memory; failed patterns recorded for future avoidance
+- [x] **Rate-limited execution** — scheduler runs every `INTENT_SCHED_INTERVAL=10` ticks; fabric health every 100 ticks
+- [ ] **Adaptive scheduling** — learn optimal tick interval from workload patterns; throttle under high load
+- [ ] **Priority inversion prevention** — detect when low-priority intent blocks high-priority agent; reorder or preempt
+- [ ] **Speculative execution** — pre-spawn agents for likely next steps while current step executes
+- [ ] **SLA tracking** — per-intent latency/success SLA; alert when SLA at risk; escalate priority automatically
+
+### 14F — AI-Native Syscall ABI (0xF0–0xFF)
+_Kernel-mediated agent and intent lifecycle — capability-gated, architecture-neutral._
+
+- [x] **`SYS_AGENT_SPAWN` (0xF0)** — spawn agent with goal description, priority, entry point, stack; returns agent ID
+- [x] **`SYS_AGENT_STATUS` (0xF1)** — query agent state + ticks_used
+- [x] **`SYS_AGENT_COMPLETE` (0xF2)** — mark agent completed (5) or failed (6)
+- [x] **`SYS_AGENT_CTX_SET` (0xF3)** — set key-value in calling agent's context memory
+- [x] **`SYS_AGENT_CTX_GET` (0xF4)** — get value from calling agent's context memory
+- [x] **`SYS_INTENT_SUBMIT` (0xF5)** — submit intent with class, description, priority; returns intent ID
+- [x] **`SYS_INTENT_STATUS` (0xF6)** — query intent status
+- [x] **`SYS_INTENT_CANCEL` (0xF7)** — cancel in-flight intent
+- [x] **`SYS_MEMORY_STORE` (0xF8)** — store key-value to persistent memory
+- [x] **`SYS_MEMORY_QUERY` (0xF9)** — query persistent memory by key
+- [x] **`SYS_FABRIC_STATUS` (0xFA)** — query fabric node counts (total, healthy)
+- [x] **`SYS_INTENT_SCHED_STATS` (0xFB)** — query scheduler statistics
+- [x] **`SYS_AGENT_COUNT` (0xFC)** — get active agent count
+- [x] **Capability gates** — `ProcessCaps::AGENT`, `INTENT`, `MEMORY_ENGINE`, `FABRIC` (bits 19–22)
+- [ ] **Userlib wrappers** — `userlib::agent`, `userlib::intent`, `userlib::memory` modules wrapping raw syscalls
+- [ ] **Async intent API** — submit intent, receive channel notification on fulfillment; integrates with Phase 6F poll
+
+### 14G — Kernel Integration
+_All 5 kernel targets wired with AI-native subsystem statics and dispatch._
+
+- [x] **Static instances** — `AgentTable`, `IntentEngine`, `MemoryEngine`, `ExecutionFabric`, `IntentScheduler` declared in each kernel `main.rs`
+- [x] **Dispatch wiring** — all 5 subsystems passed to `dispatch()` function; capability enforcement for all 13 new syscalls
+- [x] **x86_64 (qemu_pc)** — compiled and verified
+- [x] **RISC-V 32 (qemu_virt, esp32c3, xiao_esp32c6)** — dispatch call updated
+- [x] **AArch64 (raspi5)** — dispatch call updated
+
+### 14H — Userlib + Shell + Demo (Implemented)
+_Full userspace API, shell commands, man pages, and interactive demo binary for all AI-native subsystems._
+
+- [x] **Userlib modules** — `userlib::agent` (spawn/status/complete/fail/ctx_set/ctx_get/count), `userlib::intent` (submit/status/cancel/sched_stats), `userlib::memory` (store/query/fabric_status)
+- [x] **Shell commands** — `agents` (list/status), `intent` (submit/status/cancel), `memory`/`kv` (store/query/list), `fabric` (node list/stats)
+- [x] **Demo command** — 3 interactive scenarios: deploy (service deployment), pipeline (4-stage data processing), monitor (agent swarm)
+- [x] **Man pages** — `agents`, `intent`, `memory`, `fabric`, `demo`
+- [x] **Demo binary** — `veeros-demo` with 4-node pre-populated fabric (x86 host, ARM64 RPi5, RISC-V ESP32, cloud GPU), seeded memory, all AI callbacks wired
+- [x] **Shell callbacks** — 6 new `ShellEnv` callback fields wired across all 5 kernel targets
+- [x] **Launcher** — `scripts/demo.sh` with `--scenario` mode
+- [x] **Documentation** — `docs/demo-walkthrough.md`, README marketing update, `docs/architecture.md` application domains
+
+---
+
+## Phase 15 — Distributed Fabric, Zero Trust & ZKP Security (In Progress)
+_Transform the local-only execution fabric into a real distributed system spanning heterogeneous nodes — secured by Zero Trust identity, Zero Knowledge capability proofs, and PQC-hybrid cryptography at the kernel level. No other embedded OS provides this._
+
+**Goal**: Any VeerOS instance — an ESP32 sensor, a Raspberry Pi gateway, a cloud GPU, a phone app — joins a single coherent fabric with cryptographic identity, capability attestation, encrypted transport, agent migration, and distributed memory. All without a central coordinator.
+
+### 15A — Fabric Wire Protocol (`microkernel::fabric_proto`)
+_Binary wire format for all fabric operations. Fixed-size, `no_alloc`, parseable on a 32-bit MCU._
+
+- [ ] **`FabricMsg` enum** — message types: `NodeAnnounce`, `NodeHeartbeat`, `IntentForward`, `AgentMigrate`, `MemorySync`, `MemoryQuery`, `CapabilityProof`, `Challenge`, `ChallengeResponse`, `Ack`, `Nack`
+- [ ] **Binary encoding** — `[u8; N]` serialization with type-tag + length + payload; no serde, no alloc
+- [ ] **Message framing** — 4-byte header (magic `0xVE`, version, msg_type, payload_len) + payload + HMAC-SHA256 integrity tag
+- [ ] **Version negotiation** — protocol version in header; receivers reject unknown versions
+- [ ] **Sequence numbers** — monotonic u32 per-peer for replay protection
+- [ ] **Max message size** — 512 bytes (fits in single UDP datagram or BLE packet)
+
+### 15B — Zero Trust Node Identity (`microkernel::node_identity`)
+_Every node has a cryptographic identity. No implicit trust based on network location._
+
+- [ ] **Node keypair** — Ed25519 (classical) + ML-DSA-65 (PQC hybrid) per-node identity keypair, generated at first boot, stored in persistent memory
+- [ ] **Node ID** — SHA-256 hash of public key = 32-byte globally unique node identifier
+- [ ] **Attestation certificate** — self-signed statement: `{node_id, arch, capabilities, zone, timestamp, signature}` — nodes present this on join
+- [ ] **Mutual authentication** — challenge-response: A sends nonce → B signs nonce+A's_node_id → A verifies; then reverse. Both sides authenticated before any data flows
+- [ ] **Session key derivation** — after mutual auth, derive per-session ChaCha20-Poly1305 key via HKDF(shared_nonce, node_ids, "veeros-fabric-session-v1")
+- [ ] **Capability-based authorization** — `ProcessCaps::FABRIC_ADMIN` for join/remove, `ProcessCaps::FABRIC_READ` for queries, `ProcessCaps::FABRIC_MIGRATE` for agent migration
+- [ ] **Trust levels** — `TrustLevel` enum: `Untrusted` (just joined, challenge pending), `Verified` (mutual auth passed), `Attested` (ZKP capability proof verified), `Revoked`
+- [ ] **Certificate revocation** — node can broadcast revocation of another node's cert; peers stop accepting messages from revoked nodes
+
+### 15C — Zero Knowledge Capability Proofs (`microkernel::zkp`)
+_Nodes prove they have capabilities without revealing full resource profiles. Agents prove goal completion without leaking processed data._
+
+- [ ] **Schnorr-based ZKP** — efficient, `no_std`-friendly Σ-protocol over SHA-256 commitments
+- [ ] **Capability commitment** — node commits to capability bitmask: `C = H(capabilities || salt)`, reveals `C` publicly
+- [ ] **Selective disclosure** — prove "I have GPU capability" without revealing full bitmask: construct Merkle proof over individual capability bits
+- [ ] **Agent completion proof** — agent proves it reached `Completed` state with specific output hash, without revealing the data: `proof = ZKP{H(output) == claimed_hash}`
+- [ ] **Memory entry proofs** — prove a persistent memory entry exists with a certain tag/scope without revealing the value
+- [ ] **Proof verification** — deterministic verifier in `< 200 lines`, runs on riscv32imc within tick budget
+- [ ] **Challenge-proof protocol** — integrated into fabric join handshake: after mutual auth, verifier challenges prover's claimed capabilities via ZKP before granting `Attested` trust level
+
+### 15D — PQC-Hybrid Fabric Encryption (`microkernel::fabric_crypto`)
+_All inter-node communication encrypted with PQC-hybrid AEAD. Defense against harvest-now-decrypt-later attacks._
+
+- [ ] **Session establishment** — X25519 + ML-KEM-768 hybrid KEM for key exchange (uses existing `crypto::hybrid` combiner)
+- [ ] **Channel encryption** — every `FabricMsg` payload encrypted with ChaCha20-Poly1305 using session key + per-message nonce (counter-based)
+- [ ] **Key rotation** — session keys rotated every 2^32 messages or 1 hour (whichever first); re-derive via HKDF with new salt
+- [ ] **Forward secrecy** — previous session keys zeroized after rotation; compromise of current key doesn't reveal past traffic
+- [ ] **Per-message authentication** — HMAC-SHA256 over (header + encrypted_payload + sequence_number); prevents tampering + replay
+- [ ] **Downgrade prevention** — if node advertises PQC capability, classical-only sessions are rejected
+- [ ] **Crypto agility** — `CryptoMode` (Classical/Hybrid/PqcOnly) negotiated at session start; allows gradual fleet-wide migration
+
+### 15E — Mesh Transport (`microkernel::mesh`)
+_Decentralized node discovery and message routing. No central broker._
+
+- [ ] **Discovery protocol** — periodic `NodeAnnounce` broadcast (multicast on LAN, BLE advertisement on IoT, gossip on WAN)
+- [ ] **Gossip protocol** — each node shares its neighbor table with peers; convergence in O(log N) rounds
+- [ ] **Peer table** — `PeerTable` struct: per-peer state (node_id, trust_level, session_key, last_seen, rtt_us, address)
+- [ ] **Message routing** — if destination not a direct peer, forward via lowest-RTT path (greedy geographic routing)
+- [ ] **Transport abstraction** — `MeshTransport` trait with `send(node_id, msg)` / `recv() → (node_id, msg)` — implemented over TCP, UDP, BLE, UART, SPI
+- [ ] **Backpressure** — per-peer send queue (8 messages); drop lowest-priority messages on overflow
+- [ ] **Partition tolerance** — nodes continue operating locally during network partition; auto-rejoin and re-sync on reconnection
+- [ ] **NAT traversal** — optional STUN-like hole punching for nodes behind NAT (WAN deployments)
+
+### 15F — Agent Serialization & Migration
+_Agents can be frozen on one node and resumed on another — the kernel primitive for workload mobility._
+
+- [ ] **`AgentSnapshot`** — serialized representation of `AgentCb`: state, goal, context, ticks_used, parent/children references (by node_id + agent_id)
+- [ ] **Snapshot syscall** — `SYS_AGENT_SNAPSHOT` freezes agent → `AgentSnapshot` bytes
+- [ ] **Restore syscall** — `SYS_AGENT_RESTORE` on destination node creates agent from snapshot
+- [ ] **Migration protocol** — source: freeze → snapshot → encrypt → send `AgentMigrate` msg; destination: receive → decrypt → verify → restore → ack
+- [ ] **Context transfer** — agent's working memory (8 KV slots) migrated atomically with the agent
+- [ ] **Child reassignment** — if parent migrates, children updated with new parent location (node_id, agent_id)
+- [ ] **Integrity verification** — SHA-256 hash of snapshot included in `AgentMigrate` message; destination verifies before restore
+
+### 15G — Distributed Memory Sync
+_Persistent and episodic memory replicated across the fabric for resilience and coordination._
+
+- [ ] **`MemorySync` message** — carries key/value/tag/scope + origin node_id + vector clock
+- [ ] **Conflict resolution** — last-writer-wins with vector clock tie-breaking; configurable per-tag (e.g., Config entries merge, Cache entries overwrite)
+- [ ] **Scoped replication** — `MemoryScope::Global` entries replicated to all nodes; `MemoryScope::Agent` entries follow agent migration only
+- [ ] **Episodic gossip** — recent episodes broadcast to fabric peers for distributed learning; ring buffer merge by tick ordering
+- [ ] **Bandwidth budget** — sync rate limited per-peer to prevent flooding constrained links (e.g., BLE = 2 entries/sec)
+- [ ] **Consistency model** — eventual consistency with causal ordering (vector clocks); no distributed consensus overhead
+
+### 15H — Cross-Node Intent Dispatch
+_The Intent Scheduler places agents on the best node — including remote nodes._
+
+- [ ] **Remote agent spawn** — when `select_node()` returns a remote node, send `IntentForward` message instead of local spawn
+- [ ] **Remote status tracking** — agent status updates flow back via `AgentMigrate` (status variant) messages
+- [ ] **Re-planning on failure** — if remote node goes offline, intent scheduler re-decomposes and re-places on surviving nodes
+- [ ] **Distributed plan DAG** — plan steps track which node each agent lives on; cross-node dependencies resolved via `MemorySync`
+- [ ] **Load-aware placement** — `NodeResources.cpu_load` and `active_agents` updated via heartbeat; scheduler prefers least-loaded capable node
+
+### 15I — Kernel Integration & Feature Flags
+
+- [ ] **`dist-cluster` feature** — gates all distributed code; `dist-minimal` stays single-node with zero overhead
+- [ ] **New modules in `lib.rs`** — `fabric_proto`, `node_identity`, `zkp`, `fabric_crypto`, `mesh`
+- [ ] **New syscalls** — `SYS_NODE_ID` (0xE0), `SYS_PEER_COUNT` (0xE1), `SYS_MESH_SEND` (0xE2), `SYS_MESH_RECV` (0xE3), `SYS_AGENT_SNAPSHOT` (0xE4), `SYS_AGENT_RESTORE` (0xE5), `SYS_ZKP_PROVE` (0xE6), `SYS_ZKP_VERIFY` (0xE7)
+- [ ] **ProcessCaps** — `FABRIC_ADMIN` (bit 23), `FABRIC_MIGRATE` (bit 24), `ZKP` (bit 25)
+- [ ] **All 5 kernel targets** — static instances + dispatch wiring for new subsystems
+
 ## Session Log
 - 2026-02-26: Bootstrapped workspace and crate architecture, documented design, and enabled distribution feature model.
 - 2026-02-26: Installed Rust toolchain in container, added ESP32 kernel entry crate, linker script, and target-specific cargo checks.
@@ -2267,3 +2486,5 @@ Bandwidth monitor      ─            ─          ─          ─          ✓
 - Shell enhancements — readline line editor, advanced vi, history & set commands. Created `line_ed.rs`: full readline-style `LineEditor` with `History` ring buffer (32 entries, dedup), cursor movement (Ctrl-A/E/B/F), kill-line (Ctrl-U/K/W), transpose (Ctrl-T), clear (Ctrl-L), arrow keys, Alt-b/f/d word movement. Rewrote Shell struct to use `LineEditor` + `ShellVars` (vi_number, tabstop, showmatch, autoindent, prompt). Added `history` command (show/N/clear) and `set` command (view/modify shell vars). Enhanced `vi.rs` (1600+ lines): 5 modes (Normal/Insert/Replace/Command/Search), `ViSettings` struct, count prefixes on commands, `e` word-end, `H/M/L` screen-relative, `Ctrl-D/U` half-page scroll, `f/F/t/T` find-char-in-line, `/` and `?` search with `n/N/*`, `R` replace mode, `~` case toggle, `D/C` delete/change-to-end, `dw/d$/d0/cc/cw/c$` motions, `>>` / `<<` indent/dedent, `%` bracket matching, `.` repeat last edit with `LastEdit`/`EditKind` tracking, `:set` (number/tabstop/autoindent/showmatch/showmode), `:s/pat/rep/[g]` substitute, line numbers in `draw_screen()`. Added man pages for vi, history, set. All 4 targets build clean (0 warnings).
 - RPi5 full stub implementation — Replaced ALL remaining stubs with real hardware implementations. **Trivial stubs fixed**: GIC `disable_interrupt()` → GICD_ICENABLER write; Platform `init_cpu` → FP/NEON enable (CPACR_EL1); `init_interrupts` → GIC-400 init; `init_timer` → 10ms tick; `console_read_byte()` → PL011 UART read. **New RP1 drivers**: GPIO (28 pins, function/mode/pull/drive/schmitt/slew, RIO atomic outputs), SPI (DW APB SSI, SPI0–5, polled full-duplex), I2C (DW APB I2C, I2C0–6, Standard/Fast mode, write/read/write_read). **xHCI DMA engine**: TRB rings (Command+Event+Transfer), DCBAA, statically-allocated buffers (no heap), cycle bit management. **USB enumeration**: enable_slot → address_device → GET_DESCRIPTOR → parse VID/PID; HID endpoint config → SET_CONFIGURATION → Configure Endpoint; boot protocol keyboard/mouse. **Shell callbacks**: `lsblk` queries real SD card (sector count, MiB), `usb_list` queries real xHCI ports + enumerated devices. All 4 targets build clean (0 errors, 0 warnings).
 - 2026-03-16: Phase 6D/6E/6G/6H completion — RwLock<T> (futex-based reader-writer lock), priority inheritance in kernel futex (base_priority field, boost on wait, restore on wake). SYS_CHAN_POLL (0x5C) non-blocking channel depth query + userlib poll() wrapper. Typed channels: Channel<T> generic wrapper with compile-time size check. 4-word channel messages (ChanMsg expanded to word0–word3), syscall5/syscall_ret4 in userlib sys.rs. Phase 6G: BSD-style sockets — SocketTable (16 slots), Domain::Local/Inet, SockType::Stream/Dgram, full lifecycle (create/bind/listen/accept/connect/send/recv/close), 256-byte RingBuf per socket direction, BlockReason::SockAccept/SockSend/SockRecv. Socket syscalls 0x70–0x77 wired into dispatch with pointer validation. Userlib socket module with Domain/SockType enums. Phase 6H: embedded man page system — `MAN_PAGES` static table (18 topics: scheduler, ipc, memory, boot, yield, exit, spawn, join, sleep, send, recv, channel, socket, futex, sync, tasks, help, poll), `man` shell command with topic listing. All 3 targets build clean.
+- 2026-04-15: Phase 14 — AI-Native Execution Kernel. Implemented 5 core kernel modules: (1) `agent.rs` — Agent as first-class primitive (AgentState lifecycle, Goal with priority/deadline/budget, AgentContext 8-slot working memory, AgentCb with parent/child hierarchy, AgentTable 32 slots, AgentMessage for inter-agent IPC), (2) `intent.rs` — Intent Engine (IntentClass taxonomy, constraint system, IntentDescriptor, Plan with 16-step DAG and StepRelation dependency tracking, rule-based decomposition), (3) `memory_engine.rs` — Three-tier Memory (PersistentMemory with MemoryTag/MemoryScope/LRU eviction/confidence scoring, EpisodicMemory ring buffer with 12 EpisodeKind variants and success_rate analytics, distribution-profile sizing), (4) `fabric.rs` — Execution Fabric (FabricNode with 16 NodeCapability flags, NodeArch/LocalityZone/NodeHealth, PlacementConstraint, weighted node selection with capability→resource→locality→load scoring), (5) `intent_sched.rs` — Intent Scheduler meta-scheduler (6-phase tick: decompose→assign→monitor→sync→record→health, budget enforcement, episodic feedback loop). Added 13 AI-native syscalls (0xF0–0xFF) to syscall.rs. Wired all modules into lib.rs. Extended dispatch.rs with full syscall handlers + 4 new ProcessCaps (AGENT/INTENT/MEMORY_ENGINE/FABRIC bits 19–22). Updated all 5 kernel targets (qemu_pc, qemu_virt, esp32c3, xiao_esp32c6, raspi5) with static subsystem instances and dispatch call wiring. x86_64 builds clean (0 errors). Added Phase 14 to TODO.md with 7 subsections (14A–14G) covering implemented items and remaining work.
+- 2026-04-15: Phase 14H — Userlib + Shell + Demo. Created 3 userlib modules (`userlib::agent`, `userlib::intent`, `userlib::memory`) wrapping all 13 AI-native syscalls. Added 6 shell callbacks (`get_agent_list`, `agent_cmd`, `get_intent_list`, `intent_cmd`, `memory_cmd`, `get_fabric_status`) to `ShellEnv`. Implemented 4 shell commands (`agents`, `intent`, `memory`/`kv`, `fabric`) with dispatch + subcommands. Added `demo` command with 3 interactive scenarios (`deploy`, `pipeline`, `monitor`). Added 5 man pages (`agents`, `intent`, `memory`, `fabric`, `demo`). Updated `veeros-demo` binary with fully-wired AI-native callbacks: pre-populated 4-node execution fabric (x86 host, ARM64 RPi5 edge, RISC-V ESP32 sensor, cloud GPU), seeded persistent memory, live agent/intent/memory/fabric operations. Added `scripts/demo.sh` launcher + `docs/demo-walkthrough.md` usage guide. Updated all 8 `ShellEnv` initializers across 5 kernel targets. Updated README with marketing-ready content (application domains, comparison table, quick start). Updated architecture.md with 7 application domain sections and "What VeerOS Replaces" comparison. All builds clean.

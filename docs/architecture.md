@@ -204,9 +204,242 @@ pub trait SavedContext: Copy + Sized {
 ## Summary
 
 VeerOS provides a **clean, modern OS architecture** that combines:
-- Rust safety
-- Strong abstraction boundaries
-- First-class networking
-- Long-term scalability
+- Rust safety with zero-cost abstractions
+- Strong abstraction boundaries (arch → soc → kernel → userlib)
+- First-class networking and wireless radio stacks
+- AI-native execution as a kernel primitive, not an afterthought
+- Long-term scalability from 320 KB MCUs to cloud GPU clusters
 
-This makes VeerOS suitable for **embedded devices, IoT platforms, and future edge systems**.
+This makes VeerOS suitable for **embedded devices, IoT platforms, autonomous
+robotics, satellite systems, telecom infrastructure, medical devices, AI
+pipelines, and tactical edge computing**.
+
+---
+
+## AI-Native Execution Architecture
+
+VeerOS treats AI workloads as first-class kernel primitives. Instead of bolting
+agent frameworks on top of the OS, the kernel itself understands goals, agents,
+and plans.
+
+### Conceptual Stack
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Userspace                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────────────────┐  │
+│  │ AI Shell │  │ Agent    │  │  Application / NL Pipeline   │  │
+│  │ (10I)    │  │ Factory  │  │  (submit intents via syscall)│  │
+│  └────┬─────┘  └────┬─────┘  └────────────┬─────────────────┘  │
+│       │              │                     │                    │
+│  ─────┼──────────────┼─────────────────────┼──── syscall ──────│
+│       ▼              ▼                     ▼                    │
+├─────────────────────────────────────────────────────────────────┤
+│  Kernel — AI-Native Layer                                       │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │             Intent Scheduler (meta-scheduler)            │   │
+│  │   6-phase tick: decompose → assign → monitor →           │   │
+│  │                 sync → record → health                   │   │
+│  └─────┬──────────┬──────────┬──────────┬───────────────────┘   │
+│        │          │          │          │                        │
+│  ┌─────▼────┐ ┌──▼───────┐ ┌▼────────┐ ┌▼──────────────────┐   │
+│  │  Intent  │ │  Agent   │ │ Memory  │ │ Execution Fabric  │   │
+│  │  Engine  │ │  Table   │ │ Engine  │ │ (node placement)  │   │
+│  │ (goals→  │ │ (32 slots│ │ 3-tier: │ │ Local + remote    │   │
+│  │  plans)  │ │  goal+   │ │ context │ │ node scoring      │   │
+│  │ step DAG │ │  context)│ │ persist │ │ capability match  │   │
+│  │ decompose│ │ lifecycle│ │ episodic│ │ health monitor    │   │
+│  └──────────┘ └──────────┘ └─────────┘ └───────────────────┘   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Kernel — Classic Layer                                         │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐          │
+│  │Scheduler │ │ IPC/Chan │ │   VFS    │ │ Sockets  │ ...      │
+│  │(threads) │ │ (futex)  │ │ (files)  │ │ (net)    │          │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Modules
+
+| Module | File | Purpose |
+|--------|------|---------|
+| Agent Table | `microkernel/src/agent.rs` | Autonomous execution units with goals, context memory, parent/child hierarchy, budget tracking |
+| Intent Engine | `microkernel/src/intent.rs` | Declarative goal decomposition into step DAGs with dependency relations |
+| Memory Engine | `microkernel/src/memory_engine.rs` | Three-tier memory: per-agent context, persistent key-value, episodic ring buffer |
+| Execution Fabric | `microkernel/src/fabric.rs` | Heterogeneous node registry with capability matching and placement scoring |
+| Intent Scheduler | `microkernel/src/intent_sched.rs` | Meta-scheduler: orchestrates intent→agent→fabric→memory feedback loop |
+
+### Syscall Surface (0xF0–0xFF)
+
+| Nr | Name | Capability | Purpose |
+|----|------|------------|---------|
+| 0xF0 | `SYS_AGENT_SPAWN` | AGENT | Spawn agent with goal, priority, entry point |
+| 0xF1 | `SYS_AGENT_STATUS` | AGENT | Query agent state + CPU ticks used |
+| 0xF2 | `SYS_AGENT_COMPLETE` | AGENT | Mark agent completed or failed |
+| 0xF3 | `SYS_AGENT_CTX_SET` | AGENT | Set key-value in agent context memory |
+| 0xF4 | `SYS_AGENT_CTX_GET` | AGENT | Get value from agent context memory |
+| 0xF5 | `SYS_INTENT_SUBMIT` | INTENT | Submit declarative goal to intent engine |
+| 0xF6 | `SYS_INTENT_STATUS` | INTENT | Query intent lifecycle status |
+| 0xF7 | `SYS_INTENT_CANCEL` | INTENT | Cancel in-flight intent |
+| 0xF8 | `SYS_MEMORY_STORE` | MEMORY_ENGINE | Store key-value in persistent memory |
+| 0xF9 | `SYS_MEMORY_QUERY` | MEMORY_ENGINE | Query persistent memory by key |
+| 0xFA | `SYS_FABRIC_STATUS` | TASK_BASIC | Query fabric node counts |
+| 0xFB | `SYS_INTENT_SCHED_STATS` | TASK_BASIC | Query scheduler statistics |
+| 0xFC | `SYS_AGENT_COUNT` | AGENT | Get active agent count |
+
+### Data Flow
+
+```
+User submits intent (SYS_INTENT_SUBMIT)
+    → IntentEngine stores IntentDescriptor (Pending)
+    → IntentScheduler.tick():
+        1. Decompose: intent → Plan (step DAG)
+        2. Assign: for each ready step, select fabric node + spawn Agent
+        3. Monitor: check budget/deadline, expire over-budget agents
+        4. Sync: agent completion → update plan step → check intent resolved
+        5. Record: fulfilled/failed intents → EpisodicMemory + PersistentMemory
+        6. Health: fabric node heartbeat check
+    → Agent executes on kernel thread (task_id link)
+    → Agent reads/writes context memory (SYS_AGENT_CTX_SET/GET)
+    → Agent completes (SYS_AGENT_COMPLETE)
+    → Intent fulfilled → episodic record + persistent knowledge updated
+```
+
+---
+
+## Target Application Domains
+
+The AI-native architecture is designed for domains where autonomous decision-making,
+heterogeneous hardware, and real-time coordination intersect.
+
+### Edge AI & Industrial IoT
+
+**Problem:** A factory floor with 200 sensors, 10 gateways, and 2 cloud GPUs
+requires MQTT + Node-RED + Kubernetes + TensorFlow Serving — 5+ middleware layers.
+
+**VeerOS approach:** One `intent submit pipeline` call. The kernel decomposes
+across the fabric — sensors ingest, gateways normalize, GPU runs inference. No
+middleware, no container runtime, no orchestrator. The Memory Engine stores
+calibration data and anomaly thresholds; the Episodic Memory records detection
+history for model retraining.
+
+**Distribution profile:** `dist-edge` (sensors) + `dist-ai` (gateways) +
+`dist-cloud` (GPU nodes).
+
+### Autonomous Robotics & Drones
+
+**Problem:** A delivery drone must simultaneously navigate, avoid obstacles,
+manage battery, and communicate with base — traditionally requiring ROS2 with
+complex node lifecycle management and inter-process communication.
+
+**VeerOS approach:** Each function is a kernel agent with a compute budget and
+deadline. If the navigation agent detects low battery, it submits
+`intent submit admin emergency-return-to-base` — the kernel re-plans in
+microseconds. Agent hierarchies let a fleet coordinator spawn per-drone children.
+Budget enforcement guarantees safety-critical agents meet deadlines.
+
+**Distribution profile:** `dist-rt` (flight controller) + `dist-edge` (perception).
+
+### Satellite & Space Systems
+
+**Problem:** CubeSats have severe power and compute constraints. Traditional
+Linux-based flight software has high overhead and poor determinism.
+
+**VeerOS approach:** The RISC-V compute module, camera, and radio are fabric
+nodes. Ground control sends an imaging intent; the kernel budgets compute ticks,
+schedules capture only when power is sufficient, queues downlink for the next
+ground pass. Episodic Memory provides flight history for anomaly diagnosis.
+`dist-minimal` fits in < 512 KB.
+
+**Distribution profile:** `dist-minimal` or `dist-rt`.
+
+### Telecom & 5G Network Functions
+
+**Problem:** Network Function Virtualization (NFV) requires heavy container
+infrastructure to deploy packet forwarding, beamforming, and encryption functions
+across heterogeneous hardware.
+
+**VeerOS approach:** Network functions become agents with placement constraints
+(e.g., `latency < 1ms` → FPGA node). If a node degrades, the Intent Scheduler
+re-places the agent on the next-best node. The Fabric tracks per-node capabilities
+(crypto accelerator, NIC offload) for optimal placement.
+
+**Distribution profile:** `dist-firewall` + `dist-cluster`.
+
+### Medical Devices & Wearables
+
+**Problem:** Safety-critical real-time constraints (insulin pump timing) cannot
+be guaranteed by a general-purpose userspace scheduler.
+
+**VeerOS approach:** Sensor agent runs on wearable RISC-V, stores readings in
+Persistent Memory, phone agent detects dangerous trends and spawns a
+critical-priority dosage agent. Kernel-level budget enforcement guarantees
+deadline compliance. Episodic Memory provides a complete patient event log.
+
+**Distribution profile:** `dist-rt` (implantable) + `dist-edge` (phone gateway).
+
+### Distributed ML / AI Pipelines
+
+**Problem:** Distributed training requires Slurm, Ray, or Horovod with manual
+resource management and no unified observability.
+
+**VeerOS approach:** `intent submit pipeline distributed training across GPUs`.
+The Fabric maps GPU-capable nodes; the scheduler spawns data-loader, trainer, and
+checkpoint agents with the right placement constraints. Node overloads → automatic
+agent migration. Episodic Memory records training runs for experiment tracking.
+
+**Distribution profile:** `dist-ai` + `dist-cluster`.
+
+### Defense & Tactical C2
+
+**Problem:** Disconnected, intermittent, limited (DIL) networks make centralized
+orchestration impossible.
+
+**VeerOS approach:** Nodes join the fabric when in range. `intent submit monitor
+persistent surveillance of sector 7` — the kernel decomposes across available
+assets, re-plans when a drone goes offline, records all decisions in Episodic
+Memory for after-action review. Persistent Memory stores rules of engagement
+that agents enforce autonomously. No cloud dependency.
+
+**Distribution profile:** `dist-cluster` + `dist-rt`.
+
+---
+
+## What VeerOS Replaces
+
+```
+Traditional Cloud Stack              VeerOS Equivalent
+─────────────────────────             ──────────────────
+Kubernetes / Nomad                    Intent Engine + Intent Scheduler
+etcd / Consul / ZooKeeper            Persistent Memory (in-kernel KV)
+Prometheus / Grafana / OTel          Episodic Memory + monitor agents
+Istio / Envoy service mesh           Fabric + kernel agents
+Airflow / Temporal / Celery          Intent decomposition → agent DAGs
+Docker multi-arch + QEMU             Native fabric placement
+PagerDuty / health checks            Kernel heartbeat + auto-replan
+Ansible / Terraform                  Persistent Memory + deploy intents
+```
+
+**Total lines of code replaced:** millions → ~3,000 lines of kernel Rust.
+
+---
+
+## Interactive Demo
+
+VeerOS ships with a host-runnable demo that exercises all AI-native subsystems
+using real kernel code (not mocks):
+
+```bash
+cargo run -p veeros-demo              # interactive shell
+./scripts/demo.sh --scenario deploy   # service deployment walkthrough
+./scripts/demo.sh --scenario full     # all scenarios
+```
+
+Available demo scenarios:
+- **deploy** — end-to-end service deployment (fabric → config → intent → agents → outcome)
+- **pipeline** — 4-stage data pipeline with auto-decomposition
+- **monitor** — monitoring agent swarm across heterogeneous fabric nodes
+
+See [docs/demo-walkthrough.md](demo-walkthrough.md) for full usage guide.

@@ -57,6 +57,70 @@ pub unsafe fn inb(port: u16) -> u8 {
     { let _ = port; 0 }
 }
 
+/// Write a 16-bit word to an x86 I/O port.
+///
+/// # Safety
+/// Caller must ensure the port address is valid.
+#[inline(always)]
+pub unsafe fn outw(port: u16, val: u16) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = (port, val); }
+}
+
+/// Read a 16-bit word from an x86 I/O port.
+///
+/// # Safety
+/// Caller must ensure the port address is valid.
+#[inline(always)]
+pub unsafe fn inw(port: u16) -> u16 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let val: u16;
+        unsafe {
+            core::arch::asm!("in ax, dx", out("ax") val, in("dx") port, options(nomem, nostack, preserves_flags));
+        }
+        val
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = port; 0 }
+}
+
+/// Write a 32-bit dword to an x86 I/O port.
+///
+/// # Safety
+/// Caller must ensure the port address is valid.
+#[inline(always)]
+pub unsafe fn outl(port: u16, val: u32) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("out dx, eax", in("dx") port, in("eax") val, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = (port, val); }
+}
+
+/// Read a 32-bit dword from an x86 I/O port.
+///
+/// # Safety
+/// Caller must ensure the port address is valid.
+#[inline(always)]
+pub unsafe fn inl(port: u16) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let val: u32;
+        unsafe {
+            core::arch::asm!("in eax, dx", out("eax") val, in("dx") port, options(nomem, nostack, preserves_flags));
+        }
+        val
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    { let _ = port; 0 }
+}
+
 /// Short I/O delay (read from port 0x80, which is unused POST diagnostic).
 #[inline(always)]
 pub unsafe fn io_wait() {

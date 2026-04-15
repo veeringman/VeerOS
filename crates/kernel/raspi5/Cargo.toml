@@ -18,10 +18,11 @@ dist-xrt     = ["microkernel/dist-xrt", "accel"]
 dist-full    = ["dist-app", "dist-xrt"]
 
 # Optional components
-accel   = ["microkernel/accel"]
-shell   = ["dep:shell"]
-userlib = ["dep:userlib"]
-samples = ["userlib"]
+accel      = ["microkernel/accel"]
+shell      = ["dep:shell"]
+userlib    = ["dep:userlib"]
+samples    = ["userlib"]
+multi-user = ["microkernel/multi-user", "shell/multi-user"]
 
 [dependencies]
 arch = { path = "../../arch" }

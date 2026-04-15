@@ -97,6 +97,24 @@ bitflags! {
         /// Only available when the `accel` feature is enabled (desktop/server).
         #[cfg(feature = "accel")]
         const ACCEL           = 1 << 18;
+
+        // ── AI-Native Execution ───────────────────────────────────
+        /// Agent lifecycle: spawn, complete, fail, context read/write.
+        const AGENT           = 1 << 19;
+        /// Intent submission and management.
+        const INTENT          = 1 << 20;
+        /// Memory engine: persistent/episodic read/write.
+        const MEMORY_ENGINE   = 1 << 21;
+        /// Fabric: query node topology and placement.
+        const FABRIC          = 1 << 22;
+
+        // ── Distributed Fabric ────────────────────────────────────
+        /// Fabric admin: peer registration, trust management, session setup.
+        const FABRIC_ADMIN    = 1 << 23;
+        /// Agent/intent migration across nodes.
+        const FABRIC_MIGRATE  = 1 << 24;
+        /// ZKP capability proofs: prove and verify.
+        const ZKP             = 1 << 25;
     }
 }
 
@@ -180,6 +198,8 @@ pub struct Process {
     pub fds: [Option<FileDescriptor>; MAX_FDS],
     /// Current working directory (inode ID).
     pub cwd: u16,
+    /// Physical address of PML4 page table root (0 = shares kernel address space).
+    pub cr3: usize,
 }
 
 impl Process {
@@ -199,6 +219,7 @@ impl Process {
             caps: ProcessCaps::all(),
             fds: [None; MAX_FDS],
             cwd: ROOT_INODE,
+            cr3: 0,
         }
     }
 }
@@ -251,6 +272,7 @@ impl ProcessTable {
                     caps: inherited_caps,
                     fds: [None; MAX_FDS],
                     cwd: ROOT_INODE,
+                    cr3: 0,
                 };
                 return Some(i);
             }

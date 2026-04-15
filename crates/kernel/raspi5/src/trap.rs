@@ -13,7 +13,8 @@ use microkernel::task::Scheduler;
 use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, GIC, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT};
+use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, GIC, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT,
+            AGENTS, INTENTS, MEMORY_ENGINE, FABRIC, INTENT_SCHED};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AArch64 ESR_EL1 constants
@@ -112,6 +113,11 @@ unsafe fn handle_svc(ctx: *mut TaskContext) -> *mut TaskContext {
     let input = unsafe { &mut *INPUT.0.get() };
     let drivers = unsafe { &mut *DRIVERS.0.get() };
     let audit = unsafe { &mut *AUDIT.0.get() };
+    let agents = unsafe { &mut *AGENTS.0.get() };
+    let intents = unsafe { &mut *INTENTS.0.get() };
+    let memory = unsafe { &mut *MEMORY_ENGINE.0.get() };
+    let fabric = unsafe { &mut *FABRIC.0.get() };
+    let intent_sched = unsafe { &mut *INTENT_SCHED.0.get() };
 
     let action = unsafe {
         dispatch::dispatch(
@@ -132,6 +138,11 @@ unsafe fn handle_svc(ctx: *mut TaskContext) -> *mut TaskContext {
             input,
             drivers,
             audit,
+            agents,
+            intents,
+            memory,
+            fabric,
+            intent_sched,
             crate::console_write_byte,
             crate::console_read_byte,
         )

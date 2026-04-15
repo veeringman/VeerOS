@@ -65,6 +65,12 @@ SECTIONS
         __stack_top = .;
     } > RAM
 
+    /* GOT — must be placed explicitly so __kernel_end is past it. */
+    .got : ALIGN(8)
+    {
+        *(.got .got.*)
+    } > RAM
+
     /* End of kernel image — free physical memory starts here (page-aligned). */
     . = ALIGN(4096);
     __kernel_end = .;

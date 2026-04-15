@@ -20,6 +20,7 @@ dist-full    = ["dist-app", "dist-rt"]
 shell      = ["dep:shell"]
 wifi       = ["dep:net", "dep:smoltcp"]
 ble        = []
+multi-user = ["microkernel/multi-user", "shell/multi-user"]
 
 [dependencies]
 arch = { path = "../../arch" }

@@ -104,3 +104,36 @@ pub fn ipc_receiver_task() -> ! {
     println!("[ipc-rx] done — exiting");
     userlib::task::exit(0);
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sample 5: Ring 3 user-mode task — proves true user-space syscalls work
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A minimal user-mode task that runs at Ring 3 (CPL=3).
+///
+/// It has its own per-process page tables and uses `int 0x80` to make
+/// syscalls into the kernel.
+pub fn ring3_task() -> ! {
+    println!("╔════════════════════════════════════╗");
+    println!("║  ring3_task: TRUE USERSPACE (CPL3) ║");
+    println!("╚════════════════════════════════════╝");
+
+    let tid = userlib::task::id();
+    println!("[ring3] task id = {}", tid);
+
+    let ticks = userlib::time::ticks();
+    println!("[ring3] ticks = {}", ticks);
+
+    println!("[ring3] sleeping 50 ticks...");
+    userlib::time::sleep(50);
+    let t1 = userlib::time::ticks();
+    println!("[ring3] after sleep: ticks = {}", t1);
+
+    println!("[ring3] yielding 3 times...");
+    for _ in 0..3 {
+        userlib::task::yield_now();
+    }
+
+    println!("[ring3] done — exiting from userspace!");
+    userlib::task::exit(0);
+}

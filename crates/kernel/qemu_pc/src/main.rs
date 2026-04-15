@@ -8,6 +8,7 @@
 #![no_main]
 
 mod trap;
+mod net;
 #[cfg(feature = "samples")]
 mod samples;
 
@@ -192,6 +193,36 @@ unsafe impl Sync for AuditCell {}
 pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()));
 
 // ---------------------------------------------------------------------------
+// AI-Native Execution subsystems
+// ---------------------------------------------------------------------------
+
+use microkernel::agent::AgentTable;
+use microkernel::intent::IntentEngine;
+use microkernel::memory_engine::MemoryEngine;
+use microkernel::fabric::ExecutionFabric;
+use microkernel::intent_sched::IntentScheduler;
+
+pub(crate) struct AgentCell(pub UnsafeCell<AgentTable>);
+unsafe impl Sync for AgentCell {}
+pub(crate) static AGENTS: AgentCell = AgentCell(UnsafeCell::new(AgentTable::new()));
+
+pub(crate) struct IntentCell(pub UnsafeCell<IntentEngine>);
+unsafe impl Sync for IntentCell {}
+pub(crate) static INTENTS: IntentCell = IntentCell(UnsafeCell::new(IntentEngine::new()));
+
+pub(crate) struct MemoryEngineCell(pub UnsafeCell<MemoryEngine>);
+unsafe impl Sync for MemoryEngineCell {}
+pub(crate) static MEMORY_ENGINE: MemoryEngineCell = MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
+
+pub(crate) struct FabricCell(pub UnsafeCell<ExecutionFabric>);
+unsafe impl Sync for FabricCell {}
+pub(crate) static FABRIC: FabricCell = FabricCell(UnsafeCell::new(ExecutionFabric::new()));
+
+pub(crate) struct IntentSchedCell(pub UnsafeCell<IntentScheduler>);
+unsafe impl Sync for IntentSchedCell {}
+pub(crate) static INTENT_SCHED: IntentSchedCell = IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
+
+// ---------------------------------------------------------------------------
 // PCI device table
 // ---------------------------------------------------------------------------
 
@@ -372,6 +403,18 @@ static IPC_TX_STACK: SampleStack = SampleStack([0u8; 16384]);
 #[cfg(feature = "samples")]
 static IPC_RX_STACK: SampleStack = SampleStack([0u8; 16384]);
 
+// Kernel stack for Ring 3 user task (used for interrupt/syscall entry).
+#[cfg(feature = "samples")]
+#[repr(align(16))]
+struct Ring3KernelStack([u8; 8192]);
+#[cfg(feature = "samples")]
+static RING3_KSTACK: Ring3KernelStack = Ring3KernelStack([0u8; 8192]);
+
+// Network polling task stack
+#[repr(align(16))]
+struct NetStack([u8; 8192]);
+static NET_POLL_STACK: NetStack = NetStack([0u8; 8192]);
+
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
     let serial = default_serial();
@@ -401,8 +444,8 @@ fn shell_task() -> ! {
         vfs_tree: Some(vfs_tree),
         vfs_touch: Some(vfs_touch),
         mount_list: Some(mount_list),
-        mount_fs: None,
-        umount_fs: None,
+        mount_fs: Some(do_mount),
+        umount_fs: Some(do_umount),
         lsblk: Some(lsblk_info),
         input_status: Some(input_status),
         usb_list: None,
@@ -413,10 +456,43 @@ fn shell_task() -> ! {
         hw_info: Some(hw_info),
         get_temp_millic: None,
         dmesg: Some(dmesg_info),
-        reboot: None,
+        reboot: Some(do_reboot),
         shutdown: Some(do_shutdown),
-        caps_cmd: None,
-        auditlog_cmd: None,
+        caps_cmd: Some(caps_command),
+        auditlog_cmd: Some(auditlog_command),
+        ifconfig_cmd: Some(ifconfig_callback),
+        ping_cmd: Some(ping_callback),
+        netstat_cmd: Some(netstat_callback),
+        #[cfg(feature = "multi-user")]
+        login: Some(do_login),
+        #[cfg(not(feature = "multi-user"))]
+        login: None,
+        #[cfg(feature = "multi-user")]
+        logout: Some(do_logout),
+        #[cfg(not(feature = "multi-user"))]
+        logout: None,
+        #[cfg(feature = "multi-user")]
+        change_password: Some(do_change_password),
+        #[cfg(not(feature = "multi-user"))]
+        change_password: None,
+        #[cfg(feature = "multi-user")]
+        add_user: Some(do_add_user),
+        #[cfg(not(feature = "multi-user"))]
+        add_user: None,
+        #[cfg(feature = "multi-user")]
+        remove_user: Some(do_remove_user),
+        #[cfg(not(feature = "multi-user"))]
+        remove_user: None,
+        // AI-native
+        get_agent_list: None,
+        agent_cmd: None,
+        get_intent_list: None,
+        intent_cmd: None,
+        memory_cmd: None,
+        get_fabric_status: None,
+        peers_cmd: None,
+        mesh_cmd: None,
+        zkp_cmd: None,
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);
@@ -562,6 +638,291 @@ fn write_user_list(w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "  {:7}  {:3}  {}", u.name, u.uid, st);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-user callbacks
+// ---------------------------------------------------------------------------
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_login(username: &str, password: &[u8]) -> u32 {
+    unsafe {
+        let users = &mut *USERS.0.get();
+        match users.login(username, password) {
+            Ok(token) => {
+                if let Some((uid, gid)) = users.session_info(token) {
+                    (*PROCESSES.0.get()).processes[0].uid = uid;
+                    (*PROCESSES.0.get()).processes[0].gid = gid;
+                }
+                token
+            }
+            Err(_) => 0,
+        }
+    }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_logout() -> bool {
+    unsafe {
+        let users = &mut *USERS.0.get();
+        let uid = (*PROCESSES.0.get()).processes[0].uid;
+        let mut found = false;
+        for s in users.sessions.iter_mut() {
+            if s.active && s.uid == uid {
+                *s = microkernel::user::Session::empty();
+                found = true;
+                break;
+            }
+        }
+        (*PROCESSES.0.get()).processes[0].uid = microkernel::user::ROOT_UID;
+        (*PROCESSES.0.get()).processes[0].gid = microkernel::user::ROOT_GID;
+        found
+    }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_change_password(uid: u16, new_password: &[u8]) -> bool {
+    unsafe {
+        let users = &mut *USERS.0.get();
+        users.change_password(uid, new_password)
+    }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_add_user(name: &'static str, gid: u16, password: &[u8]) -> Option<u16> {
+    unsafe {
+        let users = &mut *USERS.0.get();
+        users.add_user(name, gid, password)
+    }
+}
+
+#[cfg(all(feature = "shell", feature = "multi-user"))]
+fn do_remove_user(uid: u16) -> bool {
+    unsafe {
+        let users = &mut *USERS.0.get();
+        users.remove_user(uid)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capability / audit / mount / reboot callbacks
+// ---------------------------------------------------------------------------
+
+// ── Capability names table ───────────────────────────────────────────────
+#[cfg(feature = "shell")]
+const CAP_NAMES: &[(u32, &str)] = &[
+    (0, "task_basic"), (1, "mem"), (2, "time"), (3, "sync"),
+    (4, "ipc"), (5, "channel"), (6, "poll"), (7, "console_io"),
+    (8, "fs"), (9, "net"), (10, "spawn_thread"), (11, "spawn_process"),
+    (12, "user_admin"), (13, "driver"), (14, "mount"), (15, "hw"),
+    (16, "crypto"), (17, "cap_admin"),
+];
+
+#[cfg(feature = "shell")]
+fn caps_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    use microkernel::process::{ProcessState, ProcessCaps};
+
+    let pt = unsafe { &mut *PROCESSES.0.get() };
+
+    match sub {
+        // `caps` — list all active processes with cap summary
+        "" => {
+            let _ = writeln!(w, "  PID  NAME             CAPS");
+            let _ = writeln!(w, "  ───  ───────────────  ─────────────────────────");
+            for (pid, p) in pt.processes.iter().enumerate() {
+                if p.state == ProcessState::Free {
+                    continue;
+                }
+                let bits = p.caps.bits();
+                let mut buf = [0u8; 128];
+                let mut pos = 0;
+                for &(bit, name) in CAP_NAMES {
+                    if bits & (1 << bit) != 0 {
+                        if pos > 0 && pos + 1 < buf.len() {
+                            buf[pos] = b',';
+                            pos += 1;
+                        }
+                        let nb = name.as_bytes();
+                        let end = (pos + nb.len()).min(buf.len());
+                        buf[pos..end].copy_from_slice(&nb[..end - pos]);
+                        pos = end;
+                    }
+                }
+                let caps_str = core::str::from_utf8(&buf[..pos]).unwrap_or("?");
+                let _ = writeln!(w, "  {:>3}  {:<15}  {}", pid, p.name, caps_str);
+            }
+        }
+        // `caps <pid>` — detailed view
+        _ if sub.as_bytes().first().map_or(false, |b| b.is_ascii_digit()) && args.is_empty() => {
+            let pid = parse_usize(sub);
+            if pid >= 8 {
+                let _ = writeln!(w, "  invalid pid: {}", sub);
+                return;
+            }
+            let p = &pt.processes[pid];
+            if p.state == ProcessState::Free {
+                let _ = writeln!(w, "  pid {} is not active", pid);
+                return;
+            }
+            let bits = p.caps.bits();
+            let _ = writeln!(w, "  Process {} ({})", pid, p.name);
+            let _ = writeln!(w, "  Capabilities (0x{:05X}):", bits);
+            for &(bit, name) in CAP_NAMES {
+                let flag = if bits & (1 << bit) != 0 { "+" } else { "-" };
+                let _ = writeln!(w, "    {} {}", flag, name);
+            }
+        }
+        // `caps drop <pid> <cap_name>`
+        "drop" => {
+            let (pid_str, cap_name) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => {
+                    let _ = writeln!(w, "  usage: caps drop <pid> <cap_name>");
+                    return;
+                }
+            };
+            let pid = parse_usize(pid_str);
+            if pid >= 8 {
+                let _ = writeln!(w, "  invalid pid: {}", pid_str);
+                return;
+            }
+            if pt.processes[pid].state == ProcessState::Free {
+                let _ = writeln!(w, "  pid {} is not active", pid);
+                return;
+            }
+            let bit = CAP_NAMES.iter().find(|&&(_, n)| n == cap_name);
+            match bit {
+                Some(&(b, name)) => {
+                    let mask = ProcessCaps::from_bits_truncate(1 << b);
+                    pt.drop_caps(pid, mask);
+                    let remaining = pt.processes[pid].caps.bits();
+                    let tick = unsafe { (*SCHEDULER.0.get()).ticks } as u32;
+                    let audit = unsafe { &mut *AUDIT.0.get() };
+                    audit.log(tick, pid as u8, 0, microkernel::audit::AuditEvent::CapDropped, 1 << b, remaining);
+                    let _ = writeln!(w, "  dropped '{}' from pid {} — caps now 0x{:05X}",
+                        name, pid, remaining);
+                }
+                None => {
+                    let _ = writeln!(w, "  unknown capability: '{}'", cap_name);
+                    let _ = writeln!(w, "  valid caps: task_basic, mem, time, sync, ipc, channel, poll,");
+                    let _ = writeln!(w, "    console_io, fs, net, spawn_thread, spawn_process, user_admin,");
+                    let _ = writeln!(w, "    driver, mount, hw, crypto, cap_admin");
+                }
+            }
+        }
+        _ => {
+            let _ = writeln!(w, "  usage: caps              — list all processes");
+            let _ = writeln!(w, "         caps <pid>        — show process capabilities");
+            let _ = writeln!(w, "         caps drop <pid> <cap>  — drop a capability");
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+fn parse_usize(s: &str) -> usize {
+    let mut n: usize = 0;
+    for b in s.bytes() {
+        if b.is_ascii_digit() {
+            n = n.wrapping_mul(10).wrapping_add((b - b'0') as usize);
+        } else {
+            return usize::MAX;
+        }
+    }
+    n
+}
+
+#[cfg(feature = "shell")]
+fn auditlog_command(args: &str, w: &mut dyn core::fmt::Write) {
+    let audit = unsafe { &*AUDIT.0.get() };
+    let max = if args.is_empty() {
+        32
+    } else {
+        let n = parse_usize(args);
+        if n == usize::MAX { 32 } else { n }
+    };
+    if audit.total() == 0 {
+        let _ = writeln!(w, "  (no audit events recorded)");
+    } else {
+        audit.dump(w, max);
+    }
+}
+
+#[cfg(feature = "shell")]
+fn do_mount(device: &str, path: &str) -> bool {
+    use microkernel::vfs::{FsType, NO_INODE};
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let mounts = &mut *MOUNTS.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let dir = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+        if dir == NO_INODE {
+            return false;
+        }
+        // Determine fs type from device name.
+        let fs_type = if device.starts_with("ram") {
+            FsType::RamFs
+        } else {
+            FsType::Fat32
+        };
+        mounts.mount(dir, fs_type, device).is_some()
+    }
+}
+
+#[cfg(feature = "shell")]
+fn do_umount(path: &str) -> bool {
+    use microkernel::vfs::NO_INODE;
+    unsafe {
+        let inodes = &*INODES.0.get();
+        let mounts = &mut *MOUNTS.0.get();
+        let cwd = (*PROCESSES.0.get()).processes[0].cwd;
+        let dir = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+        if dir == NO_INODE {
+            return false;
+        }
+        mounts.unmount(dir)
+    }
+}
+
+#[cfg(feature = "shell")]
+fn do_reboot() {
+    // x86 keyboard controller reset (pulse CPU RESET line).
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        // Wait for the keyboard controller input buffer to drain.
+        for _ in 0..10_000u32 {
+            let status: u8;
+            core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nomem, nostack));
+            if status & 0x02 == 0 { break; }
+        }
+        // Send 0xFE (pulse reset) to port 0x64.
+        core::arch::asm!("out dx, al", in("al") 0xFEu8, in("dx") 0x64u16, options(nomem, nostack));
+    }
+    // Halt if reset doesn't fire immediately.
+    loop {
+        #[cfg(target_arch = "x86_64")]
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        #[cfg(not(target_arch = "x86_64"))]
+        core::hint::spin_loop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Network callbacks (injected into the shell via ShellEnv)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "shell")]
+fn ifconfig_callback(w: &mut dyn core::fmt::Write) {
+    net::ifconfig_cmd(w);
+}
+
+#[cfg(feature = "shell")]
+fn ping_callback(args: &str, w: &mut dyn core::fmt::Write) {
+    net::ping_cmd(args, w);
+}
+
+#[cfg(feature = "shell")]
+fn netstat_callback(w: &mut dyn core::fmt::Write) {
+    net::netstat_cmd(w);
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,18 +1566,9 @@ pub extern "C" fn _rust_start() -> ! {
 
     // ── GDT + IDT ────────────────────────────────────────────
     trap::load_gdt();
-    let _ = writeln!(con, "[boot] GDT loaded (kernel + user segments + TSS)");
     trap::load_idt();
-    let _ = writeln!(con, "[boot] IDT loaded (256 vectors)");
     trap::setup_syscall_msrs();
-    let _ = writeln!(con, "[boot] SYSCALL/SYSRET MSRs configured");
-
-    // ── PIC remap ────────────────────────────────────────────
-    // (Already called by Platform::init_interrupts via kernel.boot(),
-    //  but we call it explicitly here so the banner order is clear.)
-    let _ = writeln!(con, "[boot] PIC remapped (IRQ 0-15 → vectors 32-47)");
-    let _ = writeln!(con, "[boot] PS/2 keyboard enabled (IRQ 1, vector 33)");
-    let _ = writeln!(con, "[boot] COM1 RX enabled (IRQ 4, vector 36)");
+    let _ = writeln!(con, "[boot] GDT + IDT + SYSCALL/SYSRET configured");
 
     // ── VGA text-mode console ────────────────────────────────
     let vga = soc_qemu_pc::vga::VgaText::new();
@@ -1226,7 +1578,6 @@ pub extern "C" fn _rust_start() -> ! {
         let _ = writeln!(vcon, "VeerOS v{VERSION} — {}", kernel.platform_name());
         let _ = writeln!(vcon, "VGA text console active (80x25)");
     }
-    let _ = writeln!(con, "[boot] VGA text-mode console initialised (80x25 @ 0xB8000)");
 
     // ── PIT timer ────────────────────────────────────────────
     let timer = system_timer();
@@ -1234,7 +1585,7 @@ pub extern "C" fn _rust_start() -> ! {
     unsafe {
         *TIMER.0.get() = timer;
     }
-    let _ = writeln!(con, "[boot] PIT timer tick @ {} us", TICK_PERIOD_US);
+    let _ = writeln!(con, "[boot] VGA + PIT + PS/2 + COM1 ready");
 
     // ── PCI bus enumeration ──────────────────────────────────
     unsafe {
@@ -1257,28 +1608,8 @@ pub extern "C" fn _rust_start() -> ! {
     unsafe {
         let acpi = &mut *ACPI_INFO.0.get();
         if soc_qemu_pc::acpi::parse(acpi) {
-            let _ = writeln!(con, "[boot] ACPI: {} CPU(s) found (BSP APIC ID={})",
-                acpi.cpu_count, acpi.bsp_apic_id);
-            let _ = writeln!(con, "  LAPIC @ 0x{:08x}, I/O APIC @ 0x{:08x} (ID={})",
-                acpi.local_apic_addr, acpi.io_apic_addr, acpi.io_apic_id);
-            if acpi.hpet_base != 0 {
-                let _ = writeln!(con, "  HPET  @ 0x{:016x}", acpi.hpet_base);
-            }
-            if acpi.pm1a_control_block != 0 {
-                let _ = writeln!(con, "  FADT: PM1a_CNT=0x{:04x}, SCI_INT={}",
-                    acpi.pm1a_control_block, acpi.sci_interrupt);
-            }
-            for i in 0..acpi.irq_override_count {
-                let ovr = &acpi.irq_overrides[i];
-                let _ = writeln!(con, "  IRQ override: ISA {} → GSI {} flags=0x{:x}",
-                    ovr.source_irq, ovr.gsi, ovr.flags);
-            }
-            for i in 0..acpi.cpu_count {
-                let cpu = &acpi.cpus[i];
-                let _ = writeln!(con, "  CPU {}: APIC ID={}, ACPI ID={}, {}",
-                    i, cpu.apic_id, cpu.acpi_id,
-                    if cpu.enabled { "enabled" } else { "disabled" });
-            }
+            let _ = writeln!(con, "[boot] ACPI: {} CPU(s), LAPIC @ 0x{:08x}, I/O APIC @ 0x{:08x}",
+                acpi.cpu_count, acpi.local_apic_addr, acpi.io_apic_addr);
         } else {
             let _ = writeln!(con, "[boot] ACPI: tables not found (using defaults)");
         }
@@ -1290,24 +1621,18 @@ pub extern "C" fn _rust_start() -> ! {
 
         // Init LAPIC (BSP).
         soc_qemu_pc::lapic::init();
-        let lapic_ver = soc_qemu_pc::lapic::version();
         let bsp_id = soc_qemu_pc::lapic::id();
-        let _ = writeln!(con, "[boot] LAPIC: BSP ID={}, version=0x{:02x}", bsp_id, lapic_ver);
 
         // Calibrate LAPIC timer.
         let ticks_1ms = soc_qemu_pc::lapic::calibrate_timer_1ms();
-        let _ = writeln!(con, "[boot] LAPIC timer: {} ticks/ms (div16)", ticks_1ms);
 
         // Init I/O APIC with standard ISA routing.
         let bsp_apic_id = if acpi.valid { acpi.bsp_apic_id } else { bsp_id as u8 };
         soc_qemu_pc::ioapic::init(bsp_apic_id);
-        let ioapic_entries = soc_qemu_pc::ioapic::max_entries();
-        let _ = writeln!(con, "[boot] I/O APIC: {} entries, routing IRQs to BSP (ID={})",
-            ioapic_entries, bsp_apic_id);
 
         // Disable legacy PIC — all interrupts now go through I/O APIC → LAPIC.
         soc_qemu_pc::pic::disable();
-        let _ = writeln!(con, "[boot] legacy PIC disabled (IOAPIC mode)");
+        let _ = writeln!(con, "[boot] LAPIC + I/O APIC ready (timer {} ticks/ms)", ticks_1ms);
 
         // Register LAPIC + IOAPIC as drivers.
         {
@@ -1329,7 +1654,6 @@ pub extern "C" fn _rust_start() -> ! {
 
     // ── NXE (No-Execute Enable) ──────────────────────────────
     soc_qemu_pc::mm::enable_nxe();
-    let _ = writeln!(con, "[boot] NXE enabled (No-Execute page protection)");
 
     // ── Higher-half kernel mapping ───────────────────────────
     // Set up the higher-half mapping (PML4[256] = PML4[0]) for future use.
@@ -1342,7 +1666,7 @@ pub extern "C" fn _rust_start() -> ! {
         let pml4 = &mut *(pml4_addr as *mut soc_qemu_pc::mm::PageTable);
         soc_qemu_pc::mm::setup_higher_half(pml4);
     }
-    let _ = writeln!(con, "[boot] higher-half mapping installed (0xFFFF_8000_0000_0000)");
+    let _ = writeln!(con, "[boot] NXE + higher-half (0xFFFF_8000_0000_0000) enabled");
 
     // ── VIRTIO device probing ────────────────────────────────
     unsafe {
@@ -1360,6 +1684,13 @@ pub extern "C" fn _rust_start() -> ! {
             let bar0 = soc_qemu_pc::pci::read_bar(d.bus, d.device, d.function, 0);
             if bar0 & 1 == 0 { continue; } // not I/O BAR
             let io_base = (bar0 & 0xFFFF_FFFC) as u16;
+
+            // Enable PCI bus-mastering (required for VIRTIO DMA) + I/O space.
+            let cmd = soc_qemu_pc::pci::config_read16(d.bus, d.device, d.function, 0x04);
+            soc_qemu_pc::pci::config_write32(
+                d.bus, d.device, d.function, 0x04,
+                (cmd as u32 | 0x05) & 0xFFFF, // bit 0 = I/O space, bit 2 = bus master
+            );
 
             match d.device_id {
                 soc_qemu_pc::virtio::VIRTIO_DEV_BLK => {
@@ -1447,6 +1778,17 @@ pub extern "C" fn _rust_start() -> ! {
     }
     let _ = writeln!(con, "[boot] VFS initialised (ramfs {} KiB)", microkernel::ramfs::RAMFS_POOL_SIZE / 1024);
 
+    // ── network stack ────────────────────────────────────────
+    net::init();
+    if net::is_active() {
+        let iface = unsafe { &*net::NET_IF.0.get() };
+        let _ = writeln!(con, "[boot] network: {}.{}.{}.{}/24, gw {}.{}.{}.{}",
+            iface.ip[0], iface.ip[1], iface.ip[2], iface.ip[3],
+            iface.gateway[0], iface.gateway[1], iface.gateway[2], iface.gateway[3]);
+    } else {
+        let _ = writeln!(con, "[boot] network: no NIC detected — skipping");
+    }
+
     // ── scheduler + tasks ────────────────────────────────────
     unsafe {
         let sched = &mut *SCHEDULER.0.get();
@@ -1476,6 +1818,15 @@ pub extern "C" fn _rust_start() -> ! {
             sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
         }
 
+        // Network polling task (if NIC is present).
+        if net::is_active() {
+            let sb = NET_POLL_STACK.0.as_ptr() as usize;
+            let st = sb + NET_POLL_STACK.0.len();
+            if let Some(idx) = sched.create_task("net-poll", net::net_poll_task as *const () as usize, st, sb, 1, 0) {
+                sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
+            }
+        }
+
         // Userlib sample tasks.
         #[cfg(feature = "samples")]
         {
@@ -1502,6 +1853,56 @@ pub extern "C" fn _rust_start() -> ! {
             if let Some(idx) = sched.create_task("ipc-rx", samples::ipc_receiver_task as *const () as usize, st, sb, 2, 0) {
                 sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
             }
+
+            // ── Ring 3 user-mode task ────────────────────────────
+            // Create a separate process (pid 1) with its own page tables.
+            {
+                let user_pid = procs.create("user", 0, 1000, 1000).unwrap_or(0);
+
+                // Build per-process page tables.
+                extern "C" { static __pml4: u8; }
+                let boot_pml4 = core::ptr::addr_of!(__pml4) as usize;
+                let kernel_pml4 = &*(boot_pml4 as *const soc_qemu_pc::mm::PageTable);
+                let fa = &mut *FRAME_ALLOC.0.get();
+
+                // The user code is identity-mapped (it lives in the kernel image).
+                // Map the full kernel text + rodata range as user-readable so the
+                // function can execute. We map 0..kernel_end for simplicity.
+                extern "C" { static __kernel_end: u8; }
+                let code_end = &__kernel_end as *const u8 as usize;
+                let code_end_aligned = (code_end + 0xFFF) & !0xFFF;
+
+                // User stack: 16 pages (64 KiB) at USER_STACK_TOP.
+                let stack_pages = 16;
+                if let Some((pml4_phys, _stack_bottom, stack_top)) =
+                    soc_qemu_pc::mm::create_user_address_space(
+                        kernel_pml4, fa, 0, code_end_aligned, stack_pages,
+                    )
+                {
+                    // Store CR3 in the process.
+                    procs.processes[user_pid].cr3 = pml4_phys;
+
+                    // The kernel stack for this task (used for syscall/interrupt entry).
+                    // We use a static buffer (same as other sample tasks).
+                    let ksb = RING3_KSTACK.0.as_ptr() as usize;
+
+                    if let Some(idx) = sched.create_task(
+                        "ring3",
+                        samples::ring3_task as *const () as usize,
+                        stack_top,   // user RSP (in user address space)
+                        ksb,         // kernel stack bottom (for IRQ/syscall entry)
+                        2,
+                        user_pid,
+                    ) {
+                        // Set RFLAGS with IF=1 for interrupts.
+                        sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
+                        // kernel_word != 0 signals Ring 3 task; store CR3.
+                        sched.tasks[idx].context.kernel_word = pml4_phys;
+                        // Stack size = kernel stack size (for set_kernel_stack).
+                        sched.tasks[idx].stack_size = RING3_KSTACK.0.len();
+                    }
+                }
+            }
         }
     }
 
@@ -1513,11 +1914,11 @@ pub extern "C" fn _rust_start() -> ! {
         let count = sched.tasks.iter().filter(|t| t.state != TaskState::Free).count();
         procs.processes[0].thread_count = count;
     }
-    let _ = writeln!(con, "[boot] idle task registered");
-    #[cfg(feature = "shell")]
-    let _ = writeln!(con, "[boot] shell task registered");
-    #[cfg(feature = "samples")]
-    let _ = writeln!(con, "[boot] userlib sample tasks registered (hello, timer, ipc-tx, ipc-rx)");
+    {
+        let sched = unsafe { &*SCHEDULER.0.get() };
+        let count = sched.tasks.iter().filter(|t| t.state != microkernel::task::TaskState::Free).count();
+        let _ = writeln!(con, "[boot] {} tasks registered", count);
+    }
 
     // ── start the scheduler (never returns) ──────────────────
     let _ = writeln!(con, "[boot] starting scheduler — preemptive mode");
@@ -1535,7 +1936,6 @@ pub extern "C" fn _rust_start() -> ! {
     // This prevents spurious NMIs from the q35 chipset before we can handle them.
     #[cfg(target_arch = "x86_64")]
     unsafe { soc_qemu_pc::outb(0x70, 0x80); }
-    let _ = writeln!(con, "[boot] NMI disabled");
 
     // Enable interrupts and start the first task.
     // On x86-64 we don't have the RISC-V `_veer_start_first_task` trick —
@@ -1567,25 +1967,57 @@ pub extern "C" fn _rust_start() -> ! {
 /// Start the first task by constructing an iretq frame and executing iretq.
 /// This never returns.
 ///
-/// All initial tasks run at Ring 0. For a same-privilege iretq (Ring 0 → Ring 0),
-/// the CPU pops only RIP, CS, RFLAGS — it does NOT pop RSP or SS. We therefore
-/// switch to the task's stack manually before building the 3-word iretq frame.
+/// Supports both Ring 0 and Ring 3 tasks. Ring 3 tasks use a full iretq
+/// (CS/SS/RSP/RFLAGS/RIP), while Ring 0 tasks use a simple stack switch + jmp.
 #[cfg(target_arch = "x86_64")]
 unsafe fn _veer_start_first_task_x86(ctx: &arch::TaskContext) -> ! {
     let rip = ctx.rip as u64;
     let task_rsp = ctx.get_sp() as u64;
+    let rflags = ctx.rflags as u64;
+    let is_user = ctx.kernel_word != 0;
 
-    unsafe {
-        core::arch::asm!(
-            // Switch to the task's stack, enable interrupts, jump to entry.
-            // No iretq needed since all tasks run at Ring 0 (same privilege).
-            "mov rsp, {rsp}",
-            "sti",
-            "jmp {entry}",
-            rsp   = in(reg) task_rsp,
-            entry = in(reg) rip,
-            options(noreturn),
-        );
+    if is_user {
+        // Ring 3 start: construct an iretq frame and jump via iretq.
+        // Load the user process's CR3 first.
+        // We need a kernel stack for building the iretq frame.
+        // kernel_word holds the CR3 (PML4 physical address).
+        let cr3 = ctx.kernel_word as u64;
+        unsafe {
+            extern "C" {
+                static _veer_kernel_rsp: u64;
+            }
+            let ksp = _veer_kernel_rsp;
+            core::arch::asm!(
+                "mov cr3, {cr3}",
+                "mov rsp, {ksp}",     // use kernel stack for the iretq frame
+                "push {user_ds}",     // SS
+                "push {user_rsp}",    // RSP
+                "push {rflags}",      // RFLAGS
+                "push {user_cs}",     // CS
+                "push {rip}",         // RIP
+                "iretq",
+                cr3      = in(reg) cr3,
+                ksp      = in(reg) ksp,
+                user_ds  = in(reg) trap::USER_DS as u64,
+                user_rsp = in(reg) task_rsp,
+                rflags   = in(reg) rflags,
+                user_cs  = in(reg) trap::USER_CS as u64,
+                rip      = in(reg) rip,
+                options(noreturn),
+            );
+        }
+    } else {
+        // Ring 0 start: simple stack switch + jmp (same privilege).
+        unsafe {
+            core::arch::asm!(
+                "mov rsp, {rsp}",
+                "sti",
+                "jmp {entry}",
+                rsp   = in(reg) task_rsp,
+                entry = in(reg) rip,
+                options(noreturn),
+            );
+        }
     }
 }
 
