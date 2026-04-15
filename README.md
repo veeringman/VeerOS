@@ -3,7 +3,7 @@
 </div>
 <div align="center">
 
-**The world's first AI-native operating system.**
+*VeerOS*, **AI-native operating system.**
 
 *Goals are kernel primitives. Agents are first-class citizens. The OS understands intent.*
 
