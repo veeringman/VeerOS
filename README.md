@@ -1,6 +1,6 @@
 <!-- LOGO PLACEHOLDER -->
-<div align="center"><img src="./IMG_2008.png" alt="VeerOS Logo" width="120" height="120" align="center"/>
-</div>
+<p align="center"><img src="./IMG_2008.png" alt="VeerOS Logo" width="120" height="120" align="center"/>
+</p>
 <div align="center">
 
 *VeerOS*, **AI-native operating system.**
