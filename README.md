@@ -58,6 +58,7 @@ understand goals:
 | Device management | Intune / JAMF / SCCM | Fabric join = enrollment (0 agents) |
 | WAN connectivity | Tailscale / ZeroTier / VPN | WAN-scale fabric with NAT traversal |
 | Fleet management | Ansible / Terraform / Salt | Unified console + fleet intents |
+| Cross-org integration | API gateways + VPNs + OAuth2 | InterFabric (IFP) — federated invocation |
 
 **VeerOS collapses this entire stack into the kernel.** The OS itself plans,
 schedules, places, monitors, secures, and manages — from a single MCU to a
@@ -137,6 +138,15 @@ over public Internet. Latency-aware routing selects the fastest path. WAN
 partitions handled gracefully — nodes operate independently and sync on
 reconnect.
 **→ Multi-site enterprise, global CDN, remote offices, mobile workforce.**
+
+### Cross-Organization Federation
+Independent VeerOS fabrics communicate via InterFabric Protocol (IFP) — trust-bound,
+identity-driven invocation between organizations. No shared networks, no VPNs,
+no API gateways on either side. `invoke("analytics.process", payload, { target:
+"fabric://partner.analytics.eu" })` — the kernel handles identity federation,
+policy enforcement at both boundaries, and end-to-end encrypted transport.
+Compromise one fabric → revoke trust instantly, channels severed in < 1 second.
+**→ B2B integration, supply chain, multi-cloud, partner ecosystems, coalition ops.**
 
 ---
 
@@ -299,6 +309,13 @@ veeros> memory set deploy.target rpi5-edge-01
   containers. Portable bytecode, memory-safe, capability-constrained. Write
   functions in any language that compiles to WASM (Rust, C, Go, TypeScript).
   Lighter than containers, more portable than native binaries.
+
+- **InterFabric Protocol (VeerLink)** — cross-fabric federation without shared
+  networks, VPNs, or API gateways. Independent fabrics establish cryptographic
+  trust contracts, exchange scoped identity tokens (never raw identities), and
+  invoke functions across organizational boundaries with policy enforcement at
+  both ends. Compromise a peer → revoke trust in < 1 second. An internet of
+  fabrics, not an internet of endpoints.
 
 - **AI as a System Primitive** — autonomous agents, declarative intents, three-tier
   memory engine, and heterogeneous execution fabric are kernel primitives, not

@@ -23,6 +23,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [ ] Developer SDK — high-level Rust SDK, WASM polyglot support, CLI toolchain; incremental migration path from existing infrastructure (Phase 23)
 - [ ] WASM sandbox — portable WebAssembly execution sandbox for lightweight, cross-arch function isolation (Phase 8B)
 - [ ] Function invocation model — `invoke("name.function", payload)` replaces URLs/endpoints; ephemeral, versioned, identity-routed (Phase 20A′)
+- [ ] InterFabric Protocol (IFP) / VeerLink — cross-fabric federation; independent fabrics communicate via trust-bound, identity-driven invocation without shared networks or API gateways (Phase 24)
 
 ## Logical Phase Order (Primitives → Complex)
 _Phases are numbered by historical creation order. Read in this dependency order for logical flow:_
@@ -69,6 +70,9 @@ TIER 8 — Network & Security Appliance
 TIER 9 — Enterprise
   Phase 17  Enterprise Device Management — NEW
   Phase 23  Developer SDK & Adoption Path — NEW
+
+TIER 10 — Inter-Fabric Federation
+  Phase 24  InterFabric Protocol (IFP) / VeerLink — cross-fabric trust, federated invocation, identity federation — NEW
 
 CROSS-CUTTING
   Phase 4   Distribution Profiles (feature flags, per-target defaults, component matrix)
@@ -3028,6 +3032,137 @@ _Incremental adoption — VeerOS runs alongside existing infrastructure, replaci
 - [ ] **Prometheus exporter** — expose VeerOS metrics in Prometheus format on `/metrics` endpoint; existing Grafana dashboards keep working during migration
 - [ ] **OCI container import** — run existing Docker/OCI containers inside VeerOS container isolation (Phase 8B); gradual refactor to WASM/native functions
 - [ ] **Migration playbook** — step-by-step guide: (1) deploy VeerOS edge nodes alongside existing, (2) bridge state/events, (3) migrate functions one by one, (4) cut over networking, (5) decommission old infrastructure
+
+---
+
+## Phase 24 — InterFabric Protocol (IFP) / VeerLink
+_Cross-fabric federation — independent VeerOS fabrics communicate without collapsing isolation or reintroducing gateways. InterFabric is NOT networking; it is federated invocation between trust domains. Each fabric retains its own identity system, policy engine, and execution fabric. Feature-gated: `interfabric`._
+
+_Naming convention: **InterFabric** (architecture concept), **IFP** (wire protocol), **VeerLink** (product layer), **Fabration** (internal codename)._
+
+### 24A — Fabric Identity & Trust Model
+_Each fabric is a cryptographic trust domain with its own root identity. Federation is explicit, never implicit._
+
+- [ ] **Fabric root identity** — each fabric has a unique cryptographic identity: `FabricId { name: "veer.prod.india", public_key: Ed25519+ML-DSA, cert_chain }` — like cluster identity but at federation level
+- [ ] **Fabric URI scheme** — `fabric://veer.prod.india`, `fabric://partner.analytics.eu` — globally unique, human-readable, DNS-independent addressing
+- [ ] **Fabric certificate authority** — each fabric has its own root CA; federation does NOT share CAs; trust established via explicit certificate exchange during federation handshake
+- [ ] **Trust contracts** — `FederationTrust { peer_fabric: FabricId, trust_level: TrustLevel, established: Timestamp, expires: Option<Timestamp>, constraints: PolicySet }` — explicit, bilateral, time-bounded
+- [ ] **Trust levels** — `Untrusted` (no federation), `Verified` (identity verified, policy-controlled), `Trusted` (mutual trust, broader access), `Allied` (deep integration, shared state possible)
+- [ ] **Trust revocation** — instant revocation of federation trust: `SYS_FEDERATION_REVOKE(fabric_id)` → all active channels terminated, pending invocations cancelled, trust entry removed; takes effect in < 1 second across all nodes
+- [ ] **No implicit trust** — even federated fabrics have zero ambient authority; every cross-fabric invocation evaluated against both sender and receiver policy independently
+
+### 24B — Federation Handshake Protocol
+_Step-by-step protocol for establishing inter-fabric trust. Designed for hostile network environments._
+
+- [ ] **Discovery** — fabric entry points advertised via: (1) manual configuration (`federation add fabric://partner.analytics.eu at 203.0.113.1:4433`), (2) DNS SRV records (`_interfabric._quic.partner.analytics.eu`), (3) well-known HTTPS endpoint (`.well-known/interfabric`)
+- [ ] **Handshake step 1: Hello** — initiator sends `IFP_HELLO { fabric_id, public_key, supported_versions, capabilities }` — no secrets exchanged yet
+- [ ] **Handshake step 2: Challenge** — responder verifies initiator's public key against pre-shared trust anchor; sends `IFP_CHALLENGE { nonce, responder_fabric_id, responder_public_key }`
+- [ ] **Handshake step 3: Prove** — initiator signs `{ nonce, initiator_fabric_id, responder_fabric_id, timestamp }` with fabric private key; sends `IFP_PROVE { signature, trust_proposal }`
+- [ ] **Handshake step 4: Accept** — responder verifies signature; evaluates trust proposal against local policy; sends `IFP_ACCEPT { mutual_signature, session_key_material, trust_contract }` — session established
+- [ ] **Session key derivation** — ML-KEM + X25519 hybrid key exchange → per-session ChaCha20-Poly1305 keys; forward secrecy; key rotation every 24h or 1M messages
+- [ ] **Handshake failure modes** — `IFP_REJECT(reason)`: `UntrustedFabric`, `PolicyDenied`, `VersionMismatch`, `CertificateExpired`, `RateLimited` — clear error semantics
+- [ ] **Re-federation** — periodic re-handshake to refresh trust and rotate keys; configurable interval (default 24h); zero-downtime re-keying
+
+### 24C — Identity Federation
+_Cross-fabric identity translation — never expose raw internal identities to external fabrics._
+
+- [ ] **Scoped identity tokens** — per-invocation, short-lived, scoped: `ScopedToken { caller: "frontend.app", fabric: "veer.prod.india", claims: { role: "analytics-client", trust_level: "verified" }, expires: Timestamp, signature }` — signed by source fabric's root key
+- [ ] **Identity translation** — source fabric maps internal identity to federated claims; receiving fabric maps federated claims to local authorization decisions; no shared identity namespace
+- [ ] **Claim format** — compact binary token (CBOR-encoded, not JWT) for wire efficiency: `{ iss: FabricId, sub: CallerId, aud: TargetFabricId, iat: u64, exp: u64, claims: Map<String, Value>, sig: [u8; 64] }`
+- [ ] **Claim verification** — receiving fabric verifies: (1) signature against source fabric's known public key, (2) expiry, (3) audience matches self, (4) claims satisfy local policy — all in kernel, no external token service
+- [ ] **Identity non-leakage** — internal identities (process IDs, thread IDs, internal service names) NEVER cross fabric boundary; only federated claims visible to peers
+- [ ] **Delegation chains** — Fabric A invokes Fabric B which invokes Fabric C: delegation chain tracked in token; each hop adds its identity; final receiver sees full call chain for audit
+- [ ] **Identity caching** — verified fabric public keys cached in persistent memory with TTL; avoid re-verification on every invocation; cache invalidated on trust revocation
+
+### 24D — Cross-Fabric Invocation
+_Federated function invocation — `invoke("analytics.process", payload, { target: "fabric://partner.analytics.eu" })`._
+
+- [ ] **`SYS_INVOKE_REMOTE` (0xE0)** — `invoke("function.name", payload, target_fabric)` → kernel routes through federation layer → scoped identity attached → secure channel → remote fabric evaluates → executes → returns result
+- [ ] **Invocation lifecycle** — `Submitted → PolicyCheck → IdentityScoped → Transmitted → RemoteReceived → RemotePolicyCheck → Executing → Completed/Failed` — full state machine with timeout at each stage
+- [ ] **Synchronous invocation** — request/response; caller blocks (or async-awaits) until remote fabric returns result; timeout configurable per-invocation (default 30s)
+- [ ] **Asynchronous invocation** — fire-and-forget with optional callback: `invoke_async("analytics.ingest", payload, target_fabric, callback: "ingest.complete")` — result delivered via event when ready
+- [ ] **Cross-fabric event bridging** — Fabric A emits structured events → federation bridge → Fabric B consumes as local events; configurable event filters at federation boundary; useful for analytics, async workflows, decoupling
+- [ ] **Batch invocation** — `invoke_batch("analytics.process", payloads[], target_fabric)` — amortize federation overhead for bulk operations; kernel batches into single wire message
+- [ ] **Invocation routing** — source fabric selects nearest gateway node of target fabric based on latency + health; NOT DNS-based; fabric registry maps FabricId → reachable entry nodes
+- [ ] **Fallback modes** — if synchronous path fails: automatic retry → alternate gateway node → degrade to async → queue for later delivery (configurable per policy)
+
+### 24E — Inter-Fabric Policy Engine
+_Each fabric enforces its own policy independently. No implicit trust — even between federated fabrics._
+
+- [ ] **Outbound policy** — source fabric evaluates before sending: `{ allow: true, if: { target.fabric: "partner.analytics.eu", caller.role: "analytics-client", action: "analytics.*" } }` — can we call this external fabric?
+- [ ] **Inbound policy** — receiving fabric evaluates on arrival: `{ allow: true, if: { source.fabric: "veer.prod.india", caller.claims.role: "analytics-client", action: "analytics.process" } }` — do we accept this call?
+- [ ] **Policy DSL** — declarative policy language for inter-fabric rules:
+  ```
+  federation policy "allow-analytics" {
+    when source.fabric == "veer.prod.india"
+    and  caller.role in ["analytics-client", "admin"]
+    and  action matches "analytics.*"
+    then allow
+    audit always
+  }
+  ```
+- [ ] **Policy evaluation order** — deny-by-default; explicit allow rules required; most-specific rule wins; audit trail for every decision
+- [ ] **Rate limiting** — per-fabric, per-function rate limits at federation boundary; distributed quota enforcement; prevents cross-fabric abuse
+- [ ] **Data governance** — payload inspection rules: `{ block_if: payload.contains("PII") }` — prevent sensitive data from crossing fabric boundaries; configurable per trust level
+- [ ] **Policy sync** — bilateral policy negotiation during federation handshake; each side declares what it offers and what it accepts; incompatible policies = federation rejected
+
+### 24F — Shared State & Data Exchange
+_Controlled state sharing between fabrics — from zero sharing to selective replication._
+
+- [ ] **No shared state (default)** — federated fabrics share NOTHING by default; all data exchange is explicit invocation; no ambient state leakage
+- [ ] **Selective state replication** — opt-in: `state share "analytics.results" with fabric://partner.analytics.eu read-only` — specific keys/streams replicated to peer fabric; policy-controlled, audit-logged
+- [ ] **State materialization** — cross-fabric state queries materialized as local read-only copies: `state get "fabric://partner/analytics.results.latest"` → cached locally with TTL; invalidation via federation events
+- [ ] **Cross-fabric streams** — Fabric A produces stream events → federation bridge → Fabric B consumes as local stream; bounded buffer at boundary; backpressure propagated
+- [ ] **Data boundary enforcement** — all shared state tagged with governance metadata: `{ classification: "internal", retention: "30d", jurisdictions: ["IN"] }` — receiving fabric must honor governance constraints
+
+### 24G — Inter-Fabric Routing & Transport
+_Fabric-to-fabric connectivity without reintroducing networking abstractions._
+
+- [ ] **Fabric registry** — `FabricRegistry { fabric_id → [EntryNode { addr, latency, health, capabilities }] }` — maps fabric identities to reachable entry points; gossip-updated within each fabric; manually configured or discovered for external fabrics
+- [ ] **Federation entry nodes** — designated nodes at fabric edge that accept incoming federation connections; identity enforcement at boundary; NOT API gateways — no business logic, only identity + policy + routing
+- [ ] **Latency-aware federation routing** — select entry node with lowest RTT; continuous measurement; failover to alternate entry nodes on degradation
+- [ ] **Relay federation** — Fabric A cannot directly reach Fabric C but can reach Fabric B which can reach C: `A → B(relay) → C` — end-to-end encrypted (B sees only ciphertext); relay trust explicitly configured
+- [ ] **IFP wire format** — extends FabricFrame (Phase 22A) with federation fields: `IFP_Frame { fabric_frame_header, source_fabric: FabricId, target_fabric: FabricId, scoped_token: [u8], payload }` — compatible with intra-fabric protocol
+- [ ] **Transport** — IFP runs over QUIC (Phase 22B); federation sessions multiplexed; 0-RTT for established federations; connection migration supported
+
+### 24H — Cross-Fabric Observability
+_End-to-end visibility across fabric boundaries without exposing internal details._
+
+- [ ] **Cross-fabric trace context** — trace IDs propagated across federation boundary; each fabric adds its own spans; end-to-end latency visible; internal spans NOT exported (only summary)
+- [ ] **Federation events** — `KernelEvent { type: Federation, fabric_id, action, result, latency }` — every cross-fabric invocation emits a structured event; queryable via `events --type federation`
+- [ ] **Cross-fabric metrics** — per-peer-fabric metrics: invocation count, latency (P50/P95/P99), error rate, bytes transferred; exposed via `federation status`
+- [ ] **Federation audit log** — immutable audit trail: every cross-fabric invocation logged with: source fabric, caller identity, target function, policy decision, result, timestamp; tamper-evident (hash-chained)
+- [ ] **Cross-fabric health** — periodic heartbeat between federated fabrics; health status visible in `federation status`; auto-degrade to async mode on latency spike
+
+### 24I — Shell Integration
+- [ ] **`federation` command** — `federation list`, `federation add <fabric_uri> [at <addr>]`, `federation remove <fabric_id>`, `federation status [<fabric_id>]`, `federation trust <fabric_id> <level>`, `federation revoke <fabric_id>`
+- [ ] **`invoke --fabric` flag** — `invoke "analytics.process" --fabric partner.analytics.eu --payload '{"data": "..."}'` — cross-fabric invocation from shell
+- [ ] **`events --fabric-id`** — filter events by source/target fabric: `events --fabric-id partner.analytics.eu --type federation`
+- [ ] **`state --federated`** — `state list --federated` shows shared state; `state share <key> with <fabric>` manages sharing
+
+### 24J — Failure & Security Model
+- [ ] **Fabric compromise response** — if peer fabric is suspected compromised: `federation revoke <fabric_id>` → all channels severed instantly; pending invocations cancelled; queued events purged; trust entry marked `Revoked` with timestamp; event emitted fleet-wide
+- [ ] **Network partition** — federation retries via alternate entry nodes; degrades to async mode; queues outbound invocations (bounded, priority-evicted); resumes on reconnection
+- [ ] **Policy mismatch** — invocation rejected at boundary with clear error: `FederationError::PolicyDenied { reason, policy_id }` — no silent failures
+- [ ] **Replay protection** — per-session monotonic sequence numbers; nonce in every invocation; duplicate detection window (5 min default)
+- [ ] **DDoS protection** — per-fabric rate limits at entry nodes; proof-of-work challenge for new federations; established federations exempt
+
+### 24K — What InterFabric Eliminates
+```
+Traditional Inter-Org Stack          → VeerOS InterFabric (IFP / VeerLink)
+─────────────────────────────────────────────────────────────────────────
+API Gateways (both sides)            → Federation entry nodes (identity only)
+OAuth2 / OIDC token services         → Scoped identity tokens (kernel-signed)
+VPN tunnels between orgs             → IFP over QUIC (identity-based, not network)
+DNS-based service discovery          → Fabric registry (cryptographic identity)
+Shared network / VPC peering         → Zero shared network (invocation only)
+B2B integration middleware           → Direct cross-fabric invocation
+API versioning infrastructure        → Versioned function identity
+Cross-org observability stitching    → Federation trace context propagation
+Trust management / PKI overhead      → Federation handshake + trust contracts
+
+Result: Inter-org communication without API gateways, VPNs, or shared networks.
+```
 
 ---
 

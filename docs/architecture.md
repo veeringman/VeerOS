@@ -218,6 +218,7 @@ VeerOS provides a **clean, modern OS architecture** that combines:
 - QUIC-native fabric protocol — binary, zero-copy, multiplexed, with decentralized scheduling
 - WASM sandbox — portable WebAssembly execution alongside MicroVMs and containers
 - Unified console for fleet-wide management from any node
+- InterFabric Protocol (IFP / VeerLink) — cross-fabric federation with scoped identity, bilateral policy, and zero shared networks
 - Developer SDK + migration path from existing infrastructure
 - Long-term scalability from 320 KB MCUs to cloud GPU clusters
 
@@ -241,16 +242,21 @@ platform collapse into one.
 | **Events > Logs** | String logs, separate metrics/traces | Typed, structured kernel events — one primitive |
 | **Fabric > Infrastructure** | K8s + mesh + gateway + obs stack | One unified execution + state + policy fabric |
 | **State > Services** | Stateful services wrapping DBs | Stateless compute + persistent State Fabric |
+| **Federation > Exposure** | API gateways + VPNs + OAuth2 | InterFabric — trust-bound federated invocation |
 
 ```
 Traditional Stack:
   App → Services → Containers → K8s → Mesh → Gateway → Observability
 
-VeerOS:
+VeerOS (single fabric):
   Code → Fabric → Execution
                → State
                → Policy
                → Events
+
+VeerOS (multi-fabric):
+  Fabric A → InterFabric (IFP) → Fabric B
+             (trust + identity + policy at boundary)
 ```
 
 ---
@@ -721,6 +727,79 @@ Message types: Invoke | StateOp | Event | Gossip | Console | Control
 
 ---
 
+## InterFabric Architecture (IFP / VeerLink)
+
+InterFabric is NOT networking — it is **federated invocation between trust
+domains**. Independent VeerOS fabrics communicate without collapsing isolation
+or reintroducing gateways.
+
+### Mental Model
+
+```
+Old World:
+  Org A → API Gateway → Internet → API Gateway → Org B
+
+VeerOS World:
+  Fabric A → Federation Layer → Fabric B
+  (identity + policy at boundary, no gateways)
+```
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Fabric A (fabric://veer.prod.india)                            │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ Execution + State + Policy + Events (internal)           │   │
+│  └────────────────────────┬─────────────────────────────────┘   │
+│                           │                                     │
+│  ┌────────────────────────▼─────────────────────────────────┐   │
+│  │ Federation Layer                                          │   │
+│  │ • Outbound policy evaluation (can we call them?)          │   │
+│  │ • Scoped identity token generation (never raw IDs)        │   │
+│  │ • Trust contract enforcement                              │   │
+│  └────────────────────────┬─────────────────────────────────┘   │
+└───────────────────────────┼─────────────────────────────────────┘
+                            │ IFP over QUIC (mTLS, PQC-hybrid)
+┌───────────────────────────┼─────────────────────────────────────┐
+│  ┌────────────────────────▼─────────────────────────────────┐   │
+│  │ Federation Layer                                          │   │
+│  │ • Inbound policy evaluation (do we accept this?)          │   │
+│  │ • Scoped token verification (signed claims only)          │   │
+│  │ • Audit logging (immutable, hash-chained)                 │   │
+│  └────────────────────────┬─────────────────────────────────┘   │
+│                           │                                     │
+│  ┌────────────────────────▼─────────────────────────────────┐   │
+│  │ Execution + State + Policy + Events (internal)           │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│  Fabric B (fabric://partner.analytics.eu)                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Properties
+
+- **Cryptographic fabric identity** — `fabric://name` URI scheme; Ed25519+ML-DSA
+  root keypair per fabric; trust established via explicit handshake, never implicit
+- **Scoped identity tokens** — per-invocation, short-lived, CBOR-encoded;
+  internal identities (PIDs, service names) never cross the boundary
+- **Bilateral policy enforcement** — both fabrics independently evaluate every
+  invocation; deny-by-default; no ambient authority even between allied fabrics
+- **Trust levels** — `Untrusted → Verified → Trusted → Allied` — progressive
+  trust with increasing access; revocable instantly (< 1 second)
+- **Cross-fabric invocation** — `invoke("analytics.process", payload, { target:
+  "fabric://partner" })` — synchronous, async, or event bridging
+- **Selective state sharing** — opt-in replication of specific keys/streams;
+  governed by data classification and jurisdiction constraints
+- **Cross-fabric observability** — trace context propagated across boundary
+  (internal spans redacted); federation audit log immutable and hash-chained
+
+### Isolation Guarantees
+
+Even with federation: no shared runtime, no shared memory, no shared network,
+no implicit trust. Only: signed requests, verified execution, audited flows.
+
+---
+
 ## What VeerOS Replaces
 
 ```
@@ -745,9 +824,12 @@ CrowdStrike / Trellix (EDR)         Kernel syscall-level EDR
 Zscaler / Cloudflare (ZTNA)         Kernel ZTNA — continuous auth
 Intune / JAMF / SCCM (MDM)          Fabric enrollment + fleet management
 Tailscale / ZeroTier (WAN VPN)       WAN-scale fabric with NAT traversal + QUIC
+B2B API gateways (both sides)        InterFabric — federated invocation (IFP)
+OAuth2 / OIDC token exchange         Scoped identity tokens (kernel-signed)
+VPC peering / shared networks         Zero shared network (invocation only)
 ```
 
-**Total infrastructure components eliminated:** ~30 → kernel primitives.
+**Total infrastructure components eliminated:** ~35 → kernel primitives.
 
 ---
 
