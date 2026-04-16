@@ -12,8 +12,7 @@ use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
 use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES,
-            SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT,
-            AGENTS, INTENTS, MEMORY_ENGINE, FABRIC, INTENT_SCHED};
+            SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Trap frame — matches the ISR stub push order
@@ -347,19 +346,6 @@ impl IdtEntry {
             _reserved: 0,
         }
     }
-
-    /// Create an interrupt gate entry with DPL=3 (callable from Ring 3 via `int`).
-    fn new_user(handler: u64) -> Self {
-        Self {
-            offset_lo: handler as u16,
-            selector: 0x08, // kernel CS
-            ist: 0,
-            type_attr: 0xEE, // P=1, DPL=11, type=1110 (interrupt gate)
-            offset_mid: (handler >> 16) as u16,
-            offset_hi: (handler >> 32) as u32,
-            _reserved: 0,
-        }
-    }
 }
 
 /// IDTR value (packed pointer + limit).
@@ -387,12 +373,7 @@ pub fn load_idt() {
         for i in 0..IDT_ENTRIES {
             let handler = *_veer_isr_table.as_ptr().add(i);
             if handler != 0 {
-                if i == 0x80 {
-                    // Syscall vector must be DPL=3 so Ring 3 code can `int 0x80`.
-                    IDT[i] = IdtEntry::new_user(handler);
-                } else {
-                    IDT[i] = IdtEntry::new(handler);
-                }
+                IDT[i] = IdtEntry::new(handler);
             }
         }
 
@@ -692,48 +673,18 @@ unsafe fn save_frame_to_context(frame: &TrapFrame, ctx: &mut TaskContext) {
 ///   rax..r15 (15 × 8 = 120)                       ← GPRs from context
 ///
 /// `task_rsp`: the saved RSP of the task. After IRETQ this becomes the new RSP.
-///
-/// Uses `kernel_word` to determine Ring 0 vs Ring 3 CS/SS.
 #[cfg(target_arch = "x86_64")]
-unsafe fn build_task_frame(ctx: &TaskContext, task_rsp: usize) -> *mut TrapFrame {
-    // For Ring 3 tasks, the frame must be built on the *kernel* stack
-    // (not the user stack), because the ISR common stub uses RSP from
-    // the frame pointer returned here. We store the user RSP inside the
-    // frame's rsp field so that iretq restores it.
-    //
-    // For Ring 0 tasks, we build the frame at the bottom of the task's
-    // own stack (which IS the kernel stack).
-    let is_user = ctx.kernel_word != 0;
-    let frame_rsp = if is_user {
-        // Use the kernel stack top for this task. The caller sets
-        // _veer_kernel_rsp to the kernel stack top, so we can use that.
-        unsafe {
-            extern "C" {
-                static _veer_kernel_rsp: u64;
-            }
-            _veer_kernel_rsp as usize
-        }
-    } else {
-        task_rsp
-    };
-
+unsafe fn build_ring0_frame(ctx: &TaskContext, task_rsp: usize) -> *mut TrapFrame {
     // Full TrapFrame = 176 bytes (22 × u64).
-    let frame_ptr = (frame_rsp - 176) as *mut TrapFrame;
+    let frame_ptr = (task_rsp - 176) as *mut TrapFrame;
     let f = unsafe { &mut *frame_ptr };
 
     // IRETQ frame (all 5 words — mandatory in 64-bit mode).
     f.rip    = ctx.rip     as u64;
+    f.cs     = KERNEL_CS   as u64;
     f.rflags = ctx.rflags  as u64;
-
-    if is_user {
-        f.cs     = USER_CS   as u64;
-        f.ss     = USER_DS   as u64;
-        f.rsp    = task_rsp  as u64;  // user RSP — iretq restores this
-    } else {
-        f.cs     = KERNEL_CS as u64;
-        f.ss     = KERNEL_DS as u64;
-        f.rsp    = task_rsp  as u64;  // RSP after IRETQ
-    }
+    f.rsp    = task_rsp    as u64;  // RSP after IRETQ
+    f.ss     = KERNEL_DS   as u64;  // SS for kernel
 
     // ISR bookkeeping fields.
     f.vector     = 0;
@@ -790,39 +741,6 @@ unsafe fn restore_context_to_frame(ctx: &TaskContext, frame: &mut TrapFrame) {
         frame.ss = USER_DS as u64;
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Address space switching
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Switch CR3 to the address space of the task at index `task_idx`.
-///
-/// Looks up the task's `process_id` → `Process.cr3`. If `cr3 != 0`, loads
-/// that PML4 into CR3. If `cr3 == 0`, loads the boot PML4 (kernel identity map).
-#[cfg(target_arch = "x86_64")]
-fn switch_cr3_for_task(sched: &Scheduler, task_idx: usize) {
-    let pid = sched.tasks[task_idx].process_id;
-    let processes = unsafe { &*crate::PROCESSES.0.get() };
-    let cr3 = if pid < microkernel::process::MAX_PROCESSES {
-        processes.processes[pid].cr3
-    } else {
-        0
-    };
-
-    if cr3 != 0 {
-        soc_qemu_pc::mm::load_cr3(cr3);
-    } else {
-        // Kernel / legacy task — use the boot PML4.
-        extern "C" {
-            static __pml4: u8;
-        }
-        let boot_pml4 = core::ptr::addr_of!(__pml4) as usize;
-        soc_qemu_pc::mm::load_cr3(boot_pml4);
-    }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn switch_cr3_for_task(_sched: &Scheduler, _task_idx: usize) {}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Vector constants
@@ -909,14 +827,13 @@ unsafe fn handle_timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
         let next_ctx = &sched.tasks[next].context;
         let next_rsp = next_ctx.gpr[4]; // saved RSP for the next task
 
-        // Switch address space if the next task has a per-process page table.
-        switch_cr3_for_task(sched, next);
+        // Build a Ring-0 interrupt frame on the next task's own stack.
+        // isr_common will do `mov rsp, rax` with this pointer, then pop
+        // all GPRs, skip error+vector, and iretq into the next task.
+        let new_frame = unsafe { build_ring0_frame(next_ctx, next_rsp) };
 
         // Keep _veer_kernel_rsp pointing at the new task's stack top.
         set_kernel_stack((sched.tasks[next].stack_bottom + sched.tasks[next].stack_size) as u64);
-
-        // Build an interrupt frame (Ring 0 or Ring 3 depending on kernel_word).
-        let new_frame = unsafe { build_task_frame(next_ctx, next_rsp) };
 
         return new_frame;
     }
@@ -973,11 +890,6 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
     let input = unsafe { &mut *INPUT.0.get() };
     let drivers = unsafe { &mut *DRIVERS.0.get() };
     let audit = unsafe { &mut *AUDIT.0.get() };
-    let agents = unsafe { &mut *AGENTS.0.get() };
-    let intents = unsafe { &mut *INTENTS.0.get() };
-    let memory = unsafe { &mut *MEMORY_ENGINE.0.get() };
-    let fabric = unsafe { &mut *FABRIC.0.get() };
-    let intent_sched = unsafe { &mut *INTENT_SCHED.0.get() };
 
     // Get a pointer to the current task's saved context for dispatch.
     let ctx_ptr = &mut sched.tasks[sched.current].context as *mut TaskContext;
@@ -1001,11 +913,6 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
             input,
             drivers,
             audit,
-            agents,
-            intents,
-            memory,
-            fabric,
-            intent_sched,
             crate::console_write_byte,
             crate::console_read_byte,
         )
@@ -1020,8 +927,8 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
             frame
         }
         SyscallAction::Reschedule | SyscallAction::TaskExited => {
-            // Build a proper frame on the next task's own stack so
-            // that isr_common iretq restores the correct state.
+            // Build a proper Ring-0 frame on the next task's own stack so
+            // that isr_common iretq restores the correct RSP.
             let next = if let Some(n) = sched.pick_next() {
                 use microkernel::task::TaskState;
                 sched.current = n;
@@ -1032,9 +939,8 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
             };
             let next_ctx = &sched.tasks[next].context;
             let next_rsp = next_ctx.gpr[4];
-            switch_cr3_for_task(sched, next);
             set_kernel_stack((sched.tasks[next].stack_bottom + sched.tasks[next].stack_size) as u64);
-            unsafe { build_task_frame(next_ctx, next_rsp) }
+            unsafe { build_ring0_frame(next_ctx, next_rsp) }
         }
     }
 }
@@ -1080,8 +986,6 @@ unsafe fn handle_page_fault(frame: *mut TrapFrame) -> *mut TrapFrame {
         if let Some(next) = sched.pick_next() {
             sched.current = next;
             sched.tasks[next].state = microkernel::task::TaskState::Running;
-            switch_cr3_for_task(sched, next);
-            set_kernel_stack((sched.tasks[next].stack_bottom + sched.tasks[next].stack_size) as u64);
             let f_mut = unsafe { &mut *frame };
             unsafe { restore_context_to_frame(&sched.tasks[next].context, f_mut); }
         }

@@ -1,8 +1,10 @@
-<!-- LOGO PLACEHOLDER -->
-![](./IMG_2008.png){ width="120" }
 <div align="center">
 
-*VeerOS*, **AI-native operating system.**
+<img src="./IMG_2008.png" alt="VeerOS Logo" width="280" />
+
+<h1 style="margin-top: 0;">VeerOS</h1>
+
+**The world's first AI-native operating system.**
 
 *Goals are kernel primitives. Agents are first-class citizens. The OS understands intent.*
 

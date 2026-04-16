@@ -5,13 +5,65 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 ## V1 Scope
 - [ ] Bootable microkernel on ESP32 RISC-V (C3/C6/H2) and Xtensa (S3)
 - [ ] Multi-architecture support — ARM64 (RPi family, QEMU/KVM), x86-64 (QEMU/KVM), RISC-V 32/64
-- [ ] Distribution variants via Rust feature flags — from `dist-minimal` (bare MCU) to `dist-cloud` (full cluster); see Phase 4 for complete catalog
+- [ ] Distribution variants via Rust feature flags — from `dist-minimal` (bare MCU) to `dist-cloud` (full cluster); see Phase 8 for complete catalog
 - [ ] Configurable single-user / multi-user system (feature-gated)
 - [ ] Security-first architecture — capability-based access, isolation domains, PQC-ready crypto, extensible security model
 - [ ] AI-native OS — inference engine, NL shell, autonomous agents, on-device and cloud AI as first-class primitives
 - [ ] Distributed OS — multiple VeerOS nodes form a single coherent system (cluster membership, distributed scheduler, shared VFS)
 - [ ] Cloud-native platform — built-in orchestration, service mesh, service discovery, rolling deployments, observability
 - [ ] Network appliance mode — firewall, packet filtering, NAT, VPN gateway, traffic shaping as a distribution profile (`dist-firewall`)
+- [ ] ZeroServices architecture — services as kernel objects, kernel-native routing + mTLS + load balancing, eliminates API gateways entirely (Phase 20)
+- [ ] Enterprise security — kernel-native NAC (replaces ClearPass/Aruba), EDR (replaces Trellix/CrowdStrike), ZTNA (replaces Zscaler) — all built into the kernel, not bolted on (Phase 16)
+- [ ] Enterprise device management — fabric-native enrollment, compliance engine, fleet OTA, replaces Intune/JAMF/SCCM (Phase 17)
+- [ ] WAN-scale fabric — fabric nodes communicate over public Internet with PQC-hybrid encryption, NAT traversal, relay mesh (Phase 18)
+- [ ] Unified console abstraction — single management plane spanning ESP32 → RPi → x86-64 clusters, cross-node shell, distributed logs (Phase 19)
+
+## Logical Phase Order (Primitives → Complex)
+_Phases are numbered by historical creation order. Read in this dependency order for logical flow:_
+
+```
+TIER 0 — Hardware Foundations
+  Phase 1   Foundation (Complete)
+  Phase 2   ESP32-C6 Bring-up (Complete)
+
+TIER 1 — Kernel Primitives
+  Phase 3   Runtime & Services
+  Phase 6   Process Model Overhaul (6A–6J: arch abstraction, process/threads, memory, sync, channels, async, sockets, VFS, users)
+
+TIER 2 — Hardware Targets
+  Phase 7   Multi-Architecture (ARM64, RISC-V 64, x86-64, Xtensa, all BSPs, WiFi/BLE/802.15.4)
+
+TIER 3 — Security Foundations
+  Phase 8   Security Architecture (8A–8J: capabilities, isolation, crypto, secure boot, TLS/SSH, audit, firewall, hardware security, policy)
+
+TIER 4 — Heterogeneous Compute
+  Phase 8K  Unified Accelerator Interface (UAI: GPU/FPGA/QPU/NPU)
+  Phase 9   Quantum CoProcessor Support
+
+TIER 5 — Intelligence
+  Phase 10  AI as First-Class OS Citizen (inference, NL shell, agents, vision, voice, RAG)
+  Phase 14  AI-Native Execution Kernel (agents, intents, memory engine, fabric, scheduler) — Implemented
+
+TIER 6 — Distributed Systems
+  Phase 11  Distributed OS / Cluster (membership, consensus, distributed scheduler/IPC/VFS)
+  Phase 15  Distributed Fabric, Zero Trust & ZKP Security
+  Phase 18  WAN-Scale Fabric (NAT traversal, Internet-scale mesh, WAN-aware scheduling) — NEW
+  Phase 19  Unified Console Abstraction (cross-node shell, distributed logs, fleet ops) — NEW
+
+TIER 7 — Platform Services
+  Phase 20  ZeroServices Architecture & API Gateway Elimination — NEW
+  Phase 12  Cloud Platform (orchestration, observability, auto-scaling, multi-tenancy)
+
+TIER 8 — Network & Security Appliance
+  Phase 13  Network Appliance / Firewall OS
+  Phase 16  Enterprise Security — NAC + EDR + ZTNA — NEW
+
+TIER 9 — Enterprise
+  Phase 17  Enterprise Device Management — NEW
+
+CROSS-CUTTING
+  Phase 4   Distribution Profiles (feature flags, per-target defaults, component matrix)
+```
 
 ## Phase 1 — Foundation (Complete)
 - [x] Initialize Rust workspace with modular crates
@@ -2466,6 +2518,362 @@ _The Intent Scheduler places agents on the best node — including remote nodes.
 - [ ] **New syscalls** — `SYS_NODE_ID` (0xE0), `SYS_PEER_COUNT` (0xE1), `SYS_MESH_SEND` (0xE2), `SYS_MESH_RECV` (0xE3), `SYS_AGENT_SNAPSHOT` (0xE4), `SYS_AGENT_RESTORE` (0xE5), `SYS_ZKP_PROVE` (0xE6), `SYS_ZKP_VERIFY` (0xE7)
 - [ ] **ProcessCaps** — `FABRIC_ADMIN` (bit 23), `FABRIC_MIGRATE` (bit 24), `ZKP` (bit 25)
 - [ ] **All 5 kernel targets** — static instances + dispatch wiring for new subsystems
+
+---
+
+## Phase 16 — Enterprise Security: Kernel-Native NAC + EDR + ZTNA
+_The kernel IS the security appliance. No agents, no sidecars, no bolt-on products. Every syscall, every packet, every authentication event is visible to the kernel — making it the only entity that can truly enforce Zero Trust. Replaces ClearPass/Aruba (NAC), Trellix/CrowdStrike (EDR), and Zscaler/Cloudflare (ZTNA) with kernel primitives. Feature-gated: `sec-nac`, `sec-edr`, `sec-ztna`._
+
+### 16A — Network Access Control (replaces ClearPass / Aruba / ISE)
+_Every device must prove identity and posture before touching the network. The kernel enforces this at the packet level — no separate appliance needed._
+
+- [ ] **802.1X authenticator** — kernel-native EAP authenticator on wired/wireless interfaces; supports EAP-TLS (certificate), EAP-TTLS, PEAP; integrates with Phase 6I user identity + Phase 8C crypto
+- [ ] **RADIUS client** — lightweight RADIUS protocol client for external AAA server integration; PAP, CHAP, MS-CHAPv2; retransmit + failover
+- [ ] **Device posture assessment** — at fabric join time, every node evaluates peers: firmware version, security features enabled (PQC, secure boot, encryption), compliance flags; non-compliant nodes quarantined
+- [ ] **Network segmentation via capabilities** — replace VLANs with capability-based segmentation: `NetworkNamespace(ns_id)` + `NetworkInterface(nic_id)` capabilities determine which networks a process/device can access
+- [ ] **Certificate-based device authentication** — each VeerOS node has a device certificate (Ed25519 + ML-DSA hybrid, Phase 8C); presented during 802.1X or fabric join; no MAC-address-based trust
+- [ ] **Guest / quarantine network** — non-compliant or unknown devices routed to isolated network namespace; limited access (captive portal, remediation server only)
+- [ ] **MAC Authentication Bypass (MAB)** — fallback for legacy devices without 802.1X supplicant; MAC allow-list with audit logging; flagged as `TrustLevel::Legacy`
+- [ ] **Dynamic authorization (CoA)** — RADIUS Change-of-Authorization support; re-evaluate access mid-session on policy change or posture change
+- [ ] **NAC policy profiles** — `nac-open` (allow all, audit only), `nac-posture` (check posture, quarantine non-compliant), `nac-strict` (802.1X required, no exceptions), `nac-zero-trust` (continuous re-auth)
+- [ ] **Shell `nac` commands** — `nac status`, `nac clients`, `nac policy set <profile>`, `nac quarantine <node>`, `nac allow <node>`
+- [ ] **Integration with ZTNA (16C)** — NAC posture feeds into ZTNA access decisions; device health is a continuous access condition
+
+### 16B — Endpoint Detection & Response (replaces Trellix / CrowdStrike / Defender)
+_The kernel is the sensor. No userspace agent can see what the kernel sees. Every syscall, every IPC message, every memory access, every packet — observed at the source of truth._
+
+- [ ] **Syscall behavior monitoring** — per-process syscall frequency histogram + sequence tracking; updated on every syscall dispatch; zero overhead (counter array in `Process` struct)
+- [ ] **Behavioral baseline learning** — during first N minutes (configurable), learn normal syscall/IPC/memory patterns per process; store as compact profile in persistent memory (Phase 14C)
+- [ ] **Anomaly detection engine** — compare real-time behavior against learned baseline; scoring: `ThreatScore = Σ(deviation × weight)` per dimension (syscall freq, IPC targets, memory access, network); threshold-triggered alert
+- [ ] **Detection rules** — declarative rule definitions: `if process.syscall_rate(SYS_OPEN) > 100/s AND process.net_connections > 10 THEN alert(high)` — compiled to efficient kernel checks
+- [ ] **Automated response actions** — configurable per-threat-level:
+  - `Low` → audit log entry, alert to console
+  - `Medium` → restrict capabilities (drop network, restrict IPC), alert
+  - `High` → isolate process in sandbox domain (Phase 8B), revoke all non-essential capabilities
+  - `Critical` → kill process, snapshot state for forensics, alert fleet
+- [ ] **Capability revocation on detection** — immediate `SYS_CAP_REVOKE` cascade for compromised process; prevents lateral movement before human response
+- [ ] **IOC (Indicator of Compromise) matching** — maintain hash table of known-bad: file hashes (SHA-256), network indicators (IP/domain), syscall sequences; compare on file open, network connect, process spawn
+- [ ] **Forensic snapshot** — on high/critical detection, capture: process memory regions, open file descriptors, capability set, recent syscall history (last 256), IPC connections, network sockets; stored to persistent memory or SD
+- [ ] **Threat intelligence feed integration** — periodic IOC list update via fabric sync or HTTPS fetch; capability-gated (`SEC_ADMIN`)
+- [ ] **Cross-node correlation** — fabric-wide anomaly correlation: if same anomaly pattern appears on multiple nodes simultaneously → elevated fleet-wide alert; uses episodic memory (Phase 14C) for cross-node event sharing
+- [ ] **EDR telemetry export** — structured security event export (JSON/CBOR) via syslog, MQTT, or HTTPS to external SIEM; rate-limited to prevent bandwidth exhaustion
+- [ ] **Shell `edr` commands** — `edr status`, `edr threats`, `edr baseline <process>`, `edr rules list`, `edr quarantine <pid>`, `edr forensic <pid>`
+- [ ] **Integration with audit log (Phase 8F)** — all EDR events recorded as `AuditEvent::ThreatDetected`, `AuditEvent::ThreatResponse`, `AuditEvent::BaselineDeviation`
+
+### 16C — Zero Trust Network Access (replaces Zscaler / Cloudflare ZTNA / BeyondCorp)
+_No implicit trust — ever. Not on the local network, not on the fabric, not between processes on the same node. Every connection is authenticated, authorized, and continuously verified. The kernel enforces this without any proxy or gateway._
+
+- [ ] **Per-flow identity verification** — every new connection (TCP, IPC, fabric channel) carries a cryptographic identity assertion: `(node_cert, user_token, device_posture, timestamp, signature)`
+- [ ] **Identity assertion protocol** — first bytes of any connection carry a compact identity frame (< 128 bytes); kernel validates before passing data to application; rejected connections never reach userspace
+- [ ] **Continuous authentication** — connections re-verified periodically (configurable: 1 min – 1 hour); posture change mid-session triggers re-evaluation; revoke on failure
+- [ ] **Context-aware access policies** — access decisions based on multi-factor context:
+  - **Identity:** who (user + device certificate)
+  - **Posture:** device health (firmware version, secure boot, encryption status, baseline compliance)
+  - **Location:** network zone (local/rack/datacenter/wan), IP range, geographic region
+  - **Time:** access windows (business hours only, maintenance windows)
+  - **Behavior:** current threat score from EDR (16B), recent anomaly count
+- [ ] **Micro-segmentation as side effect** — capabilities (Phase 8A) naturally enforce least-privilege access; ZTNA adds *continuous* verification on top; no separate policy engine needed
+- [ ] **ZTNA policy rules** — `ZtnaRule { subject: IdentityMatch, resource: ServiceMatch, conditions: [ContextCondition], effect: Allow|Deny|Challenge }`; evaluated on every connection attempt
+- [ ] **Step-up authentication** — for sensitive resources, require additional verification: re-enter password, hardware token, biometric challenge (via connected device)
+- [ ] **Session tokens** — kernel-issued, time-bounded, cryptographically signed session tokens; bound to (user, device, node); non-transferable
+- [ ] **Policy decision caching** — cache recent allow decisions for (identity, resource) pairs; invalidate on posture change; reduces per-request overhead to near-zero for repeated access patterns
+- [ ] **ZTNA fabric integration** — every fabric peer authenticated via mutual PQC-TLS (Phase 15B); ZTNA layer adds *authorization* on top of authenticated channels
+- [ ] **No implicit LAN trust** — devices on the same physical network get NO implicit access; every connection verified identically whether source is local switch or Internet
+- [ ] **Shell `ztna` commands** — `ztna status`, `ztna policy list/add/remove`, `ztna sessions`, `ztna deny <identity>`, `ztna audit`
+- [ ] **ZTNA metrics** — connections allowed/denied/challenged per service, per identity; latency of policy evaluation; cache hit rate
+
+### 16D — Enterprise Security Integration Matrix
+_How the three pillars work together — each reinforces the others._
+
+```
+                        NAC (16A)   EDR (16B)   ZTNA (16C)
+                        ─────────   ─────────   ──────────
+Device identity           ✓                        ✓
+Device posture            ✓            ✓           ✓
+Network segmentation      ✓                        ✓
+Threat detection                       ✓
+Automated response                     ✓           ✓
+Continuous monitoring     ✓            ✓           ✓
+Per-flow authorization                              ✓
+Behavioral analysis                    ✓           ✓
+IOC matching                           ✓
+Forensics                              ✓
+Audit trail               ✓            ✓           ✓
+
+Replaces:
+  ClearPass / Aruba ISE / Cisco ISE    →  Phase 16A (NAC)
+  Trellix / CrowdStrike / Defender     →  Phase 16B (EDR)
+  Zscaler / Cloudflare ZTNA / Prisma   →  Phase 16C (ZTNA)
+  Forescout / NAC appliances           →  Phase 16A + 16C
+  Tanium / endpoint visibility         →  Phase 16B (kernel = sensor)
+```
+
+### 16E — Distribution Profile Integration
+- [ ] **`sec-nac` feature** — enables 802.1X authenticator, RADIUS client, posture assessment; auto-enabled in `dist-cloud`, `dist-firewall`
+- [ ] **`sec-edr` feature** — enables behavioral monitoring, anomaly detection, automated response; auto-enabled in `dist-full`, `dist-cloud`, `dist-firewall`, `dist-ai`
+- [ ] **`sec-ztna` feature** — enables per-flow identity verification, context-aware policies, continuous auth; auto-enabled in `dist-cloud`, `dist-cluster`
+- [ ] **`dist-firewall` default** — all three (`sec-nac` + `sec-edr` + `sec-ztna`); VeerOS-as-security-appliance replaces dedicated NAC/EDR/ZTNA products
+- [ ] **`dist-minimal` / `dist-rt`** — none enabled by default (no overhead); opt-in via feature flags
+- [ ] **`dist-edge` / `dist-gateway`** — `sec-edr` + `sec-ztna` enabled; NAC optional (depends on network role)
+
+---
+
+## Phase 17 — Enterprise Device Management (replaces Intune / JAMF / SCCM)
+_Fabric join IS device enrollment. The OS manages itself and its fleet — no MDM server, no agent, no cloud dependency for basic operations. Replaces Microsoft Intune, JAMF Pro, SCCM, and Workspace ONE with kernel-native fleet management. Feature-gated: `device-mgmt`._
+
+### 17A — Device Enrollment & Identity
+_Every VeerOS node is self-describing. Joining the fabric automatically enrolls the device into the management plane._
+
+- [ ] **Fabric join = MDM enrollment** — `cluster join` (Phase 11A) automatically registers device in fleet inventory; no separate enrollment flow; one operation replaces: MDM enroll + certificate provisioning + inventory scan + compliance check
+- [ ] **Device certificate provisioning** — on first boot, generate Ed25519 + ML-DSA hybrid device identity keypair (Phase 8C); on fabric join, request signed device certificate from fleet CA (leader node or designated CA); cert stored in kernel keystore
+- [ ] **Hardware attestation** — device proves firmware integrity via measurement registers (Phase 8D): TPM PCR values (x86-64), eFuse state (ESP32), boot measurements (ARM64); attestation report sent during enrollment
+- [ ] **Device inventory record** — auto-populated at enrollment: `DeviceRecord { node_id, arch, soc, firmware_version, capabilities, memory_total, storage_total, security_features, enrollment_timestamp, last_seen, compliance_status }`
+- [ ] **Device groups & tags** — organize devices: `group:sensors`, `group:gateways`, `tag:floor-3`, `tag:production`; used for targeted policy application and fleet operations
+- [ ] **Auto-discovery enrollment** — mDNS-discovered devices on trusted networks auto-enrolled with `TrustLevel::Verified` after mutual authentication (Phase 15B); unknown networks require manual approval
+- [ ] **Enrollment profiles** — pre-configured enrollment templates: `profile-iot-sensor` (minimal, single-user, locked-down), `profile-gateway` (NAC + firewall), `profile-workstation` (multi-user, full security), `profile-cloud-node` (cluster + ZTNA)
+
+### 17B — Policy & Compliance Engine
+_Declarative compliance rules — the kernel evaluates device state against policy and auto-remediates._
+
+- [ ] **Compliance rules** — `ComplianceRule { id, name, check: ComplianceCheck, action: RemediationAction, severity: Critical|High|Medium|Low }`
+- [ ] **Compliance checks** — built-in check types:
+  - `MinFirmwareVersion(version)` — reject devices running old firmware
+  - `SecureBootEnabled` — require secure boot chain (Phase 8D)
+  - `EncryptionEnabled` — require flash encryption (ESP32) or disk encryption (x86-64)
+  - `PqcCryptoEnabled` — require PQC-hybrid crypto stack active
+  - `PasswordPolicyMet` — minimum password length/complexity (Phase 6I)
+  - `FirewallEnabled` — packet filter active with deny-default policy
+  - `MaxIdleTime(seconds)` — auto-lock after inactivity
+  - `AllowedApps(list)` — only permitted process images may run
+  - `RequiredSecurityTier(tier)` — minimum `sec-*` feature set enabled
+- [ ] **Configuration profiles** — named bundles of settings applied to devices: network config (SSID, static IP, DNS), security policies, feature flags, resource limits, shell customization
+- [ ] **Profile assignment** — assign profiles to individual devices, groups, or tags; priority ordering (device-specific > group > fleet-default)
+- [ ] **Continuous compliance monitoring** — kernel evaluates compliance rules every N ticks (configurable, default 60s); status updated in `DeviceRecord.compliance_status`
+- [ ] **Auto-remediation** — on policy violation:
+  - `Low` → log warning, notify console
+  - `Medium` → apply corrective configuration automatically (e.g., enable firewall)
+  - `High` → restrict capabilities, quarantine from fabric until remediated
+  - `Critical` → isolate from network, alert fleet, require manual intervention
+- [ ] **Drift detection** — compare current device state against last-applied profile; detect unauthorized changes; auto-correct or alert
+- [ ] **Compliance event audit** — all compliance checks, violations, and remediations logged to security audit (Phase 8F): `AuditEvent::ComplianceCheck`, `ComplianceViolation`, `ComplianceRemediation`
+
+### 17C — Fleet Operations
+_Operate the entire fleet from any console using declarative intents._
+
+- [ ] **OTA firmware updates** — push signed firmware images to devices over fabric; A/B partitioning (write to inactive slot, verify, switch, rollback on failure); integrates with Phase 8D secure boot + rollback protection
+- [ ] **Staged rollouts** — `update --staged canary:2 → 10% → 50% → 100%`; monitor health between stages; auto-rollback if error rate exceeds threshold
+- [ ] **Remote wipe** — `device wipe <node>` — securely erase all user data, keys, and configuration; reset to factory firmware; requires `DEVICE_ADMIN` capability + confirmation
+- [ ] **Remote lock / unlock** — `device lock <node>` — disable shell access, restrict to heartbeat-only; `device unlock` restores normal operation
+- [ ] **Health attestation** — periodic challenge-response: fleet CA challenges device to prove current boot measurements + compliance state; non-responsive or failed devices flagged
+- [ ] **Fleet-wide intents** — `intent submit "enforce security-baseline across fleet"` → intent engine (Phase 14B) decomposes to per-device compliance enforcement agents across fabric
+- [ ] **Patch state tracking** — per-device firmware version + last update timestamp + pending updates; fleet-wide patch coverage dashboard
+- [ ] **Device lifecycle** — `device provision` → `device deploy` → `device monitor` → `device decommission` → `device wipe`; state machine per device
+- [ ] **Bulk operations** — `device group:sensors update firmware v2.1.0` — apply operation to all devices in a group
+
+### 17D — Shell Integration
+- [ ] **`device` command** — `device list`, `device info <node>`, `device comply <node>`, `device update <node>`, `device lock/unlock <node>`, `device wipe <node>`, `device group <op>`, `device tag <op>`
+- [ ] **`fleet` command** — `fleet status` (compliance summary), `fleet update` (staged rollout), `fleet policy set <profile>`, `fleet audit` (recent compliance events)
+- [ ] **`compliance` command** — `compliance status` (per-device), `compliance rules list`, `compliance rules add <rule>`, `compliance check <node>`, `compliance report`
+
+### 17E — What Device Management Eliminates
+```
+Traditional MDM Stack           → VeerOS Device Management
+─────────────────────────────────────────────────────────────
+Microsoft Intune                → Phase 17 (fabric-native)
+JAMF Pro                        → Phase 17 (no macOS bias)
+SCCM / ConfigMgr               → Phase 17 (no Windows dependency)
+VMware Workspace ONE            → Phase 17 + Phase 20 (ZeroServices)
+MobileIron / Ivanti             → Phase 17 (kernel-native)
+MDM enrollment server           → Fabric join (one operation)
+Certificate authority server    → Fleet CA on leader node
+Compliance scanner agent        → Kernel compliance engine (no agent)
+Patch management server         → Fabric OTA with A/B partitioning
+```
+
+---
+
+## Phase 18 — WAN-Scale Fabric
+_Extend the execution fabric beyond LAN to span the public Internet. Nodes behind NAT, across continents, on cellular networks — all part of one coherent fabric with the same security guarantees. Feature-gated: `fabric-wan`._
+
+### 18A — NAT Traversal
+_Most real-world devices are behind NAT. The fabric must punch through._
+
+- [ ] **STUN client** — discover public IP:port via STUN server (self-hosted or well-known); cache mapping with TTL refresh
+- [ ] **STUN server** — any fabric node with a public IP can serve as STUN reflector for peers; auto-elected based on `FabricNode.locality_zone == Global`
+- [ ] **UDP hole punching** — WireGuard-style coordinated UDP NAT traversal: both peers send initial packets to each other's STUN-discovered endpoints simultaneously
+- [ ] **TURN relay fallback** — for symmetric NAT (double-NAT, CGNAT) where hole punching fails: relay data through a fabric node with public connectivity; encrypted end-to-end (relay sees only ciphertext)
+- [ ] **ICE-like candidate negotiation** — gather candidates: host IP, STUN-mapped IP, TURN relay; try in priority order (host → STUN → TURN); select fastest working path
+- [ ] **Connection state persistence** — cache successful NAT traversal state in persistent memory (Phase 14C); on reconnect, try cached endpoint first before full discovery
+- [ ] **Cellular/mobile support** — handle IP address changes (cellular handoff, roaming); reconnect with session resumption (TLS 1.3 PSK tickets, Phase 8E)
+
+### 18B — WAN Mesh Overlay
+_Encrypted tunnels over public Internet forming a virtual mesh. Every link PQC-hybrid encrypted._
+
+- [ ] **Encrypted tunnel establishment** — on WAN peer discovery, establish ChaCha20-Poly1305 tunnel (WireGuard-compatible Noise IK handshake with ML-KEM hybrid KEM for PQC, Phase 8C)
+- [ ] **Automatic tunnel lifecycle** — tunnels created on demand when fabric peers are WAN-separated; torn down after idle timeout (configurable, default 30 min); re-established on next message
+- [ ] **Multi-hop routing** — if direct tunnel fails (NAT/firewall blocks), route through intermediate fabric nodes; greedy geographic routing based on locality zone
+- [ ] **Latency-based path selection** — continuously measure RTT per WAN link; route messages via lowest-latency path; failover to alternate paths on degradation
+- [ ] **Bandwidth-aware routing** — estimate available bandwidth per WAN link (via packet timing); avoid routing heavy payloads (agent migration, memory sync bulk) through constrained links (cellular, satellite)
+- [ ] **Graceful degradation** — nodes operate independently during WAN partition; queue outbound fabric messages (bounded, with priority eviction); sync on reconnection
+- [ ] **WAN interface abstraction** — `WanTransport` trait over: TCP (reliable), UDP (low-latency), WebSocket (firewall-friendly), QUIC (future); auto-select based on network environment
+
+### 18C — WAN-Aware Fabric Scheduling
+_The intent scheduler understands WAN characteristics — latency, bandwidth, cost — when placing agents._
+
+- [ ] **Per-link metrics** — fabric heartbeats measure and record: RTT (ms), jitter, packet loss rate, estimated bandwidth; stored in `FabricNode` peer metadata
+- [ ] **WAN placement constraints** — `PlacementConstraint::MaxRttMs(50)` — reject nodes with RTT above threshold for latency-sensitive agents; `PreferLocal` — prefer same-zone nodes
+- [ ] **Data locality optimization** — prefer placing agents on nodes that already have required data (avoid WAN data transfer); `PlacementConstraint::RequireData(key)` checks persistent memory locality
+- [ ] **Cross-region replication policies** — configureable per `MemoryScope`: `Global` entries replicated to all WAN peers (higher bandwidth cost); `Local` stays on-LAN; `Agent` follows agent migration
+- [ ] **Bandwidth budgets** — per-WAN-link bandwidth allocation; intent scheduler accounts for agent data transfer needs before placement; prevents bandwidth starvation
+- [ ] **Cost-aware scheduling** — WAN links may have metered bandwidth (cellular, cloud egress); fabric scheduler considers cost-per-byte; prefer local compute for cost-sensitive workloads
+- [ ] **Tiered sync frequency** — high-bandwidth LAN peers sync every heartbeat (1s); WAN peers sync at reduced frequency (10s–60s) to conserve bandwidth; configurable per-link
+
+### 18D — WAN Security
+_WAN links face adversarial networks. Security is non-negotiable._
+
+- [ ] **All WAN traffic PQC-hybrid encrypted** — no exceptions; downgrade to classical-only rejected; fabric nodes without PQC capability cannot join WAN mesh
+- [ ] **Certificate pinning** — WAN peers validate each other's certificates against known fabric CA; pin on first successful connection; alert on certificate change (TOFU model for initial join)
+- [ ] **DDoS mitigation at fabric edge** — rate-limit inbound tunnel establishment requests per source IP; SYN cookie equivalent for fabric handshake; connection limits per peer
+- [ ] **Rate limiting per WAN peer** — per-peer message rate cap (prevents compromised node from flooding); configurable per trust level
+- [ ] **Geographic access policies** — optional: restrict fabric membership by IP geolocation, ASN, or configured allow-list; prevents unauthorized foreign node joins
+- [ ] **WAN firewall integration** — WAN tunnel traffic passes through packet filter (Phase 13A) like any other interface; per-tunnel firewall rules
+- [ ] **Fabric split detection** — detect WAN partition vs node failure; quorum-based (majority partition continues as authoritative; minority enters read-only); auto-heal with consistency reconciliation on rejoin
+
+---
+
+## Phase 19 — Unified Console Abstraction
+_One management plane for the entire fleet — from a single ESP32 sensor to a thousand-node cluster. Any node's shell can manage any other node. Distributed logs, fleet-wide commands, and cross-node diagnostics without any central controller. Feature-gated: `console-fabric`._
+
+### 19A — Cross-Node Shell
+_`attach` to any fabric node and get a remote shell. Or broadcast commands to the entire fleet._
+
+- [ ] **`attach <node>` command** — open a remote shell session on any fabric node; terminal I/O tunneled over encrypted fabric channel; shell prompt shows remote node: `user@remote-node>`
+- [ ] **`detach` command** — return to local shell; remote session persists (background) until explicitly closed or timeout
+- [ ] **`broadcast <cmd>` command** — execute command on all fabric nodes; aggregate output with `[node-name]` prefix per line; wait for all responses or timeout
+- [ ] **`select <group> <cmd>` command** — execute on node group: `select group:sensors "sysinfo"` — runs on all nodes tagged `group:sensors`; output aggregated
+- [ ] **Fabric-aware tab completion** — complete remote node names, remote file paths, remote process names; metadata fetched via lightweight fabric queries
+- [ ] **Session multiplexing** — maintain multiple `attach` sessions simultaneously; `sessions list`, `sessions switch <id>`, `sessions close <id>`
+- [ ] **Console transport** — remote shell data carried as `FabricMsg::ConsoleData` over encrypted fabric channel; flow control + backpressure
+- [ ] **Latency compensation** — for WAN-attached nodes, buffer keystrokes and send in batches; echo prediction; configurable `console.wan_mode` setting
+
+### 19B — Distributed Logs & Observability
+_See the entire fleet's kernel logs, processes, and resources from any console._
+
+- [ ] **`dmesg --fabric`** — kernel log messages from all fabric nodes, time-correlated by fabric clock; merge-sorted by timestamp; filter by node with `--node <name>`
+- [ ] **`top --fabric`** — cluster-wide resource view: per-node CPU, memory, task count, network I/O; auto-refresh; highlight overloaded nodes
+- [ ] **`ps --fabric`** — all processes across all nodes with `[node-name]` prefix; sortable by node, CPU, memory; `kill --node <name> <pid>`
+- [ ] **`uptime --fabric`** — uptime, load average, and health status for all nodes; highlight degraded/offline
+- [ ] **Log correlation** — cross-reference events by intent ID, agent ID, or timestamp range; `logs --intent <id>` shows related events across all nodes that participated
+- [ ] **Real-time event stream** — `events --fabric --follow` — live stream of fabric events (join, leave, agent spawn, intent submit, threat detected) fleet-wide
+- [ ] **Distributed `auditlog`** — `auditlog --fabric` — security audit events from all nodes, merged and sortable; essential for security investigations
+- [ ] **Log export** — `logs export --format json --since 1h` — export aggregated logs to file or network endpoint (syslog, MQTT, HTTP)
+
+### 19C — Fleet Operations from Console
+_Declarative, intent-driven fleet management from the shell._
+
+- [ ] **`intent submit <goal> across <group>`** — fleet-wide intent execution: `intent submit "update firmware to v2.1" across group:edge-nodes` → intent engine decomposes across fabric
+- [ ] **`fw --fabric add ...`** — deploy firewall rules fleet-wide: `fw --fabric add INPUT -p tcp --dport 22 -j ACCEPT` → applies to all nodes (or filtered by group)
+- [ ] **`update --fabric --staged`** — coordinated firmware update with staging: canary → percentage → full; monitor health between stages
+- [ ] **`compliance --fabric status`** — fleet compliance dashboard: per-node compliance score, violations, pending remediations
+- [ ] **`diag <node>`** — remote diagnostics: connectivity test (ping fabric + WAN), resource usage, recent errors, security status, compliance state
+- [ ] **`snapshot --fabric`** — capture fleet-wide state snapshot: node list, resource usage, running tasks, compliance status, active intents; save to file for analysis
+
+### 19D — Console Federation
+_No single point of failure — any node can be the management console._
+
+- [ ] **Peer-to-peer management** — any node with shell access can manage any other node; no designated "management server"; distributed by design
+- [ ] **Console session roaming** — start a fleet operation on node A, continue monitoring from node B; session state (attach sessions, log filters, intent tracking) synced via fabric
+- [ ] **Console audit trail** — every remote command logged with: who (user), from where (source node), to where (target node/group), what (command), when (timestamp); immutable log in security audit (Phase 8F)
+- [ ] **Role-based console access** — `ConsoleRole` enum: `Admin` (full fleet ops), `Operator` (view + restart + update), `Viewer` (read-only logs + status); enforced by capabilities
+- [ ] **Console bandwidth management** — for constrained WAN links, console traffic deprioritized vs operational fabric traffic; configurable QoS class for management data
+
+---
+
+## Phase 20 — ZeroServices Architecture & API Gateway Elimination
+_Services are kernel objects. Not containers, not processes with sidecars. The kernel provides service identity, routing, mTLS, load balancing, and observability natively. This eliminates the entire service mesh + API gateway stack. Feature-gated: `zero-svc`._
+
+### 20A — ZeroServices Model
+_The fundamental shift: services are first-class kernel primitives, not userspace infrastructure._
+
+- [ ] **Service as kernel object** — `KernelService { id, name, owner_process, capability_set, health, version, endpoints, metrics }` — managed by kernel, not by a container runtime
+- [ ] **Service identity = capability token** — each service has a unique `ServiceCapability(svc_id)` token; all access requires presenting valid capability; no ambient authority
+- [ ] **Kernel-native routing** — service-to-service calls dispatched by kernel: caller invokes `SYS_SVC_CALL(name, msg)` → kernel resolves name → routes to healthy instance → delivers response; zero sidecar, zero proxy
+- [ ] **Built-in mTLS** — all service-to-service communication encrypted with per-service session keys (Phase 8E); kernel auto-provisions and rotates certificates; zero configuration
+- [ ] **Built-in load balancing** — kernel distributes requests across service instances using configurable strategy; no external LB needed
+- [ ] **Built-in observability** — kernel records per-service metrics (request count, latency histogram, error rate, active connections) in ring buffer; queryable via `SYS_SVC_METRICS`; no Prometheus sidecar needed
+- [ ] **Service lifecycle** — `register → healthy → serving → draining → deregistered`; health checks and lifecycle managed by kernel; restart policy per-service
+- [ ] **Intent-driven service management** — `intent submit "deploy service payments with 3 replicas"` → intent engine (Phase 14B) handles placement, scaling, health monitoring
+
+### 20B — Service Registration & Discovery
+_Services announce themselves to the kernel. Discovery is a syscall, not a DNS query._
+
+- [ ] **`SYS_SVC_REGISTER` (0xD0)** — register a service: name, version, capabilities required, health check endpoint; returns service handle; capability-gated
+- [ ] **`SYS_SVC_DEREGISTER` (0xD1)** — graceful deregistration with drain period (serve in-flight requests, reject new)
+- [ ] **`SYS_SVC_DISCOVER` (0xD2)** — find services by name, capability, version constraint; returns list of healthy endpoints; `discover("payments", version >= "2.0")`
+- [ ] **Gossip-replicated service registry** — service registrations propagated across fabric nodes via gossip (Phase 11A/15E); discovery works for local AND remote services transparently
+- [ ] **Health-integrated discovery** — only healthy service instances returned by `SYS_SVC_DISCOVER`; unhealthy instances auto-removed from registry after failed health checks
+- [ ] **Version-aware routing** — multiple versions of the same service can coexist; traffic split by policy: canary (5% to v2, 95% to v1), blue-green (instant switch), header-based (test version via header)
+- [ ] **Service dependency tracking** — kernel tracks which services call which; dependency graph queryable for debugging and impact analysis
+
+### 20C — Kernel-Native Load Balancing & Resilience
+_The kernel IS the load balancer, circuit breaker, and retry engine._
+
+- [ ] **Load balancing strategies** — per-service configurable: `RoundRobin`, `LeastConnections`, `WeightedRandom`, `LatencyBased`, `ConsistentHash(key)`; default: `LeastConnections`
+- [ ] **Circuit breaker** — per-service failure tracking: open circuit after N failures in window → fast-fail for configurable period → half-open probe → close on success; prevents cascade failures
+- [ ] **Retry with backoff** — automatic retry on transient failures: configurable max retries, initial delay, backoff multiplier, max delay; jitter to prevent thundering herd
+- [ ] **Timeout enforcement** — per-service and per-request timeout at kernel level; caller gets `ETIMEDOUT` without guessing; no hung connections
+- [ ] **Bulkhead isolation** — per-service connection limits; prevent one service's load from starving others; configurable max concurrent requests
+- [ ] **Graceful degradation** — if all instances of a service are unhealthy, return cached response (if available) or clear error (not hang); configurable fallback per-service
+
+### 20D — API Gateway Elimination
+_External clients connect directly to fabric edge nodes. The kernel handles auth, rate limiting, and routing — no gateway tier._
+
+- [ ] **`SYS_SVC_EXPOSE` (0xD3)** — expose an internal service on a public port with access policy: `expose("payments", port=443, auth=ZTNA, rate_limit=1000/s)` — single syscall replaces entire API gateway
+- [ ] **External authentication** — fabric edge nodes (public-facing) validate external client identity: mTLS client certificates, JWT verification (RS256/Ed25519), API key validation, OAuth2 token introspection — all kernel-native
+- [ ] **Rate limiting** — per-client, per-service, per-API-key token bucket rate limiter enforced at kernel level; `429 Too Many Requests` response; configurable burst
+- [ ] **Request routing** — external request hits fabric edge → kernel resolves service name from Host/path/SNI → routes to healthy instances across fabric; no reverse proxy needed
+- [ ] **Protocol translation** — kernel-level protocol bridge: HTTP → kernel IPC (for simple services), gRPC → kernel channels (for streaming), WebSocket → kernel channels (for real-time)
+- [ ] **TLS termination at edge** — fabric edge nodes terminate external TLS (Phase 8E); forward to internal services over kernel IPC or fabric mTLS; ACME/Let's Encrypt auto-renewal
+- [ ] **CORS handling** — configurable Cross-Origin headers per exposed service; no application code changes needed
+- [ ] **Response caching** — kernel-level response cache for idempotent GET requests; configurable TTL per-service; cache invalidation via service notification
+- [ ] **Intent-driven exposure** — `intent submit "expose service payments on port 443 with rate-limit 1000/s and JWT auth"` → intent engine configures everything
+
+### 20E — ZeroServices Observability
+_Every service call is measured by the kernel — no instrumentation needed._
+
+- [ ] **Per-service metrics** — kernel automatically records for every service: request count, latency (P50/P95/P99), error count, error rate, active connections, bytes transferred; queryable via `SYS_SVC_METRICS` (0xD5)
+- [ ] **Distributed tracing** — kernel auto-injects trace context (W3C Trace Context) into service-to-service calls; span collection without any application code
+- [ ] **Service dependency map** — kernel builds real-time service call graph from observed traffic; `svc graph` shell command shows dependencies
+- [ ] **Health dashboard** — `svc status` shows all services: healthy instances, request rate, error rate, latency; `svc status --fabric` for fleet-wide view
+- [ ] **Alerting** — threshold-based alerts: `if payments.error_rate > 0.05 for 5m → alert`; delivered via console, fabric event, or webhook
+
+### 20F — Shell Integration
+- [ ] **`svc` command** — `svc list`, `svc register <name>`, `svc discover <name>`, `svc status [--fabric]`, `svc expose <name> <port>`, `svc graph`, `svc metrics <name>`, `svc health <name>`
+- [ ] **`intent submit` integration** — `intent submit "deploy service X with 3 replicas and expose on port 443"` → full lifecycle managed by intent engine
+
+### 20G — What ZeroServices Eliminates
+```
+Traditional Stack                → VeerOS ZeroServices
+─────────────────────────────────────────────────────────────
+Kubernetes Pods + Deployments    → Kernel service objects
+Docker / containerd runtime      → Kernel service lifecycle
+Istio / Linkerd sidecar proxies  → Kernel-native mTLS + routing
+Envoy data plane                 → Kernel IPC + fabric transport
+Consul / CoreDNS service disc.  → Gossip-replicated service registry
+Kong / Nginx / Envoy API GW     → ZTNA edge + kernel rate limiting
+APISIX / Traefik ingress        → SYS_SVC_EXPOSE syscall
+Prometheus + Grafana metrics     → Kernel ring buffer metrics
+Jaeger / Zipkin tracing          → Kernel auto-injected trace context
+cert-manager TLS provisioning    → Kernel keystore + auto-rotation
+etcd / Consul config store       → Fabric-replicated persistent memory
+Kubernetes Service + Endpoints   → Kernel service + health integration
+PodDisruptionBudget / HPA        → Kernel circuit breaker + intent scaling
+Service account + RBAC           → Capability-based service identity
+
+Total components eliminated: ~15 infrastructure services → 0 sidecars, 0 proxies, 0 gateways
+```
+
+---
 
 ## Session Log
 - 2026-02-26: Bootstrapped workspace and crate architecture, documented design, and enabled distribution feature model.
