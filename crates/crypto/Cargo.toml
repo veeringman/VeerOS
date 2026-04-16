@@ -14,9 +14,12 @@ sha256   = []            # SHA-256 hash (FIPS 180-4)
 chacha20 = []            # ChaCha20-Poly1305 AEAD (RFC 8439) + ChaCha20-DRBG RNG
 blake3   = []            # BLAKE3 hash (future)
 
+# Hash extensions
+sha512   = []            # SHA-512 hash (FIPS 180-4) — needed by Ed25519
+
 # Classical asymmetric (Phase 1)
-x25519  = []             # X25519 ECDH key exchange (future)
-ed25519 = []             # Ed25519 signatures (future)
+x25519  = ["sha256"]     # X25519 ECDH key exchange
+ed25519 = ["sha512"]     # Ed25519 signatures
 
 # Post-quantum asymmetric — NIST FIPS 203/204 (Phase 2+)
 ml-kem  = []             # ML-KEM-768 (Kyber) key encapsulation (future)

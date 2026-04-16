@@ -42,10 +42,18 @@
 
 #[cfg(feature = "sha256")]
 pub mod sha256;
+#[cfg(feature = "sha512")]
+pub mod sha512;
 #[cfg(feature = "chacha20")]
 pub mod chacha20;
 #[cfg(feature = "chacha20")]
 pub mod rng;
+#[cfg(any(feature = "x25519", feature = "ed25519"))]
+pub mod curve25519;
+#[cfg(feature = "x25519")]
+pub mod x25519;
+#[cfg(feature = "ed25519")]
+pub mod ed25519;
 #[cfg(feature = "hybrid")]
 pub mod hybrid;
 

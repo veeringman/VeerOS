@@ -91,12 +91,14 @@ name = "kernel-qemu-pc"
 version = "0.1.0"
 dependencies = [
  "arch",
+ "crypto",
  "microkernel",
  "net",
  "panic-halt",
  "shell",
  "smoltcp",
  "soc-qemu-pc",
+ "ssh",
  "userlib",
 ]
 
@@ -222,6 +224,14 @@ name = "soc-raspi5"
 version = "0.1.0"
 dependencies = [
  "arch",
+]
+
+[[package]]
+name = "ssh"
+version = "0.1.0"
+dependencies = [
+ "arch",
+ "crypto",
 ]
 
 [[package]]

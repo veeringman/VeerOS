@@ -15,6 +15,9 @@ use core::fmt::Write;
 
 use arch::NetworkDevice;
 use net::{NetStack, NetStorage};
+
+// Re-export TcpSerial from the net crate so main.rs can use it via `net::TcpSerial`.
+pub use net::TcpSerial;
 use smoltcp::iface::SocketSet;
 use smoltcp::socket::tcp::Socket as TcpSocket;
 use smoltcp::socket::udp::{Socket as UdpSocket, PacketBuffer, PacketMetadata};
@@ -118,14 +121,14 @@ pub static NET_IF: NetIfCell = NetIfCell(UnsafeCell::new(NetInterface::empty()))
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// smoltcp socket-set storage (static, no heap).
-/// We support 4 sockets: 2 TCP + 2 UDP.
-const MAX_SMOL_SOCKETS: usize = 4;
+/// We support 5 sockets: 2 TCP (primary + SSH) + 1 UDP + 2 spare.
+const MAX_SMOL_SOCKETS: usize = 5;
 
 // Compile-time sanity: make sure the SocketStorage array can't silently
 // overflow into neighbouring statics.
 const _: () = {
     let sz = core::mem::size_of::<[smoltcp::iface::SocketStorage<'static>; MAX_SMOL_SOCKETS]>();
-    if sz > 16384 {
+    if sz > 32768 {
         panic!("SOCKET_SET_BUF too large");
     }
 };
@@ -139,6 +142,7 @@ const _: () = {
 struct SmolSocketBuf([smoltcp::iface::SocketStorage<'static>; MAX_SMOL_SOCKETS]);
 
 static mut SOCKET_SET_BUF: SmolSocketBuf = SmolSocketBuf([
+    smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
@@ -173,6 +177,21 @@ static mut UDP_TX_DATA: [u8; UDP_TX_BUF_SIZE] = [0u8; UDP_TX_BUF_SIZE];
 
 /// UDP socket handle (stored after creation).
 static mut UDP_HANDLE: Option<smoltcp::iface::SocketHandle> = None;
+
+/// SSH TCP socket buffers (separate from the primary TCP socket in NetStack).
+#[cfg(feature = "ssh")]
+const SSH_TCP_RX_BUF_SIZE: usize = 4096;
+#[cfg(feature = "ssh")]
+const SSH_TCP_TX_BUF_SIZE: usize = 4096;
+
+#[cfg(feature = "ssh")]
+static mut SSH_TCP_RX_BUF: [u8; SSH_TCP_RX_BUF_SIZE] = [0u8; SSH_TCP_RX_BUF_SIZE];
+#[cfg(feature = "ssh")]
+static mut SSH_TCP_TX_BUF: [u8; SSH_TCP_TX_BUF_SIZE] = [0u8; SSH_TCP_TX_BUF_SIZE];
+
+/// SSH TCP socket handle.
+#[cfg(feature = "ssh")]
+pub static mut SSH_TCP_HANDLE: Option<smoltcp::iface::SocketHandle> = None;
 
 /// Whether the network stack has been initialised.
 static mut NET_INIT: bool = false;
@@ -255,6 +274,20 @@ pub fn init() {
         UDP_HANDLE = Some(handle);
     }
 
+    // Add a TCP socket for the SSH server (port 2222).
+    #[cfg(feature = "ssh")]
+    {
+        let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
+        unsafe {
+            use smoltcp::socket::tcp::SocketBuffer;
+            let rx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_TCP_RX_BUF))[..]);
+            let tx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_TCP_TX_BUF))[..]);
+            let ssh_socket = TcpSocket::new(rx_buf, tx_buf);
+            let handle = sockets.add(ssh_socket);
+            SSH_TCP_HANDLE = Some(handle);
+        }
+    }
+
     // Mark interface up.
     iface.link = LinkState::Up;
     unsafe { NET_INIT = true; }
@@ -301,6 +334,47 @@ pub fn net_poll_task() -> ! {
         }
         #[cfg(not(target_arch = "x86_64"))]
         core::hint::spin_loop();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSH helpers — poll, listen, connect for the SSH TCP socket
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Poll function for the SSH TCP socket — called from TcpSerial while
+/// waiting for data.
+#[cfg(feature = "ssh")]
+pub fn ssh_poll() {
+    let ticks = unsafe { (*crate::SCHEDULER.0.get()).ticks };
+    poll(ticks);
+}
+
+/// Start listening on the SSH TCP socket.
+#[cfg(feature = "ssh")]
+pub fn ssh_listen(port: u16) {
+    unsafe {
+        if let Some(handle) = SSH_TCP_HANDLE {
+            let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
+            let socket = sockets.get_mut::<TcpSocket>(handle);
+            if socket.is_open() {
+                socket.abort();
+            }
+            socket.listen(port).ok();
+        }
+    }
+}
+
+/// Check if a client is connected to the SSH TCP socket.
+#[cfg(feature = "ssh")]
+pub fn ssh_is_connected() -> bool {
+    unsafe {
+        if let Some(handle) = SSH_TCP_HANDLE {
+            let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
+            let socket = sockets.get::<TcpSocket>(handle);
+            socket.is_active()
+        } else {
+            false
+        }
     }
 }
 

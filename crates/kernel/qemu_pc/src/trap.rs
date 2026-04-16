@@ -12,7 +12,8 @@ use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
 use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES,
-            SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT};
+            SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT,
+            AGENTS, INTENTS, MEMORY_ENGINE, FABRIC, INTENT_SCHED};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Trap frame — matches the ISR stub push order
@@ -890,6 +891,11 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
     let input = unsafe { &mut *INPUT.0.get() };
     let drivers = unsafe { &mut *DRIVERS.0.get() };
     let audit = unsafe { &mut *AUDIT.0.get() };
+    let agents = unsafe { &mut *AGENTS.0.get() };
+    let intents = unsafe { &mut *INTENTS.0.get() };
+    let memory = unsafe { &mut *MEMORY_ENGINE.0.get() };
+    let fabric = unsafe { &mut *FABRIC.0.get() };
+    let intent_sched = unsafe { &mut *INTENT_SCHED.0.get() };
 
     // Get a pointer to the current task's saved context for dispatch.
     let ctx_ptr = &mut sched.tasks[sched.current].context as *mut TaskContext;
@@ -913,6 +919,11 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
             input,
             drivers,
             audit,
+            agents,
+            intents,
+            memory,
+            fabric,
+            intent_sched,
             crate::console_write_byte,
             crate::console_read_byte,
         )

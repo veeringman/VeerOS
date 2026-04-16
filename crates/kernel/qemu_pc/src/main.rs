@@ -415,6 +415,13 @@ static RING3_KSTACK: Ring3KernelStack = Ring3KernelStack([0u8; 8192]);
 struct NetStack([u8; 8192]);
 static NET_POLL_STACK: NetStack = NetStack([0u8; 8192]);
 
+// SSH task stack (32 KiB — SSH needs room for crypto, protocol buffers)
+#[cfg(feature = "ssh")]
+#[repr(align(16))]
+struct SshStack([u8; 32768]);
+#[cfg(feature = "ssh")]
+static SSH_STACK: SshStack = SshStack([0u8; 32768]);
+
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
     let serial = default_serial();
@@ -499,6 +506,219 @@ fn shell_task() -> ! {
 
     let _ = writeln!(con, "VeerOS halted \u{2014} powering off.");
     qemu_poweroff();
+}
+
+// ---------------------------------------------------------------------------
+// SSH server task (listens on port 2222, encrypted remote shell)
+// ---------------------------------------------------------------------------
+
+#[cfg(all(feature = "ssh", feature = "shell"))]
+const SSH_PORT: u16 = 2222;
+
+/// Ed25519 host key seed (32 bytes). In production this should be
+/// generated once and persisted; for now we use a fixed test seed.
+#[cfg(all(feature = "ssh", feature = "shell"))]
+const SSH_HOST_SEED: [u8; 32] = [
+    0x56, 0x65, 0x65, 0x72, 0x4f, 0x53, 0x2d, 0x48,
+    0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79, 0x53, 0x65,
+    0x65, 0x64, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+    0x36, 0x37, 0x38, 0x39, 0x41, 0x42, 0x43, 0x44,
+];
+
+/// FNV-1a hash of the accepted SSH password. Default: "veeros".
+#[cfg(all(feature = "ssh", feature = "shell"))]
+const SSH_PASSWORD_HASH: u32 = ssh::auth::fnv1a(b"veeros");
+
+#[cfg(all(feature = "ssh", feature = "shell"))]
+fn ssh_task() -> ! {
+    use net::TcpSerial;
+
+    let serial = default_serial();
+    let mut con = Console::new(serial);
+
+    let _ = writeln!(con, "[ssh] task started, computing host key...");
+
+    // Start listening IMMEDIATELY so TCP connections don't get RST.
+    net::ssh_listen(SSH_PORT);
+
+    // Compute the Ed25519 host public key from the seed.
+    let host_pubkey = crypto::ed25519::ed25519_public_key(&SSH_HOST_SEED);
+
+    let _ = writeln!(con, "[ssh] SSH server ready on port {}", SSH_PORT);
+
+    loop {
+        // Re-listen after each session.
+        net::ssh_listen(SSH_PORT);
+
+        // Poll until a client connects.
+        loop {
+            net::ssh_poll();
+            if net::ssh_is_connected() {
+                break;
+            }
+            // Yield to other tasks.
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                core::arch::asm!("int 0x80", in("rax") 0x00usize, options(nostack, preserves_flags));
+            }
+        }
+
+        let _ = writeln!(con, "[ssh] client connected");
+
+        // Create a TcpSerial over the SSH TCP socket.
+        let tcp_serial = unsafe {
+            let handle = net::SSH_TCP_HANDLE.unwrap();
+            let socket_set_ptr = (*net::SMOL_SOCKETS.0.get()).as_mut().unwrap()
+                as *mut smoltcp::iface::SocketSet<'static>;
+            TcpSerial::new(handle, socket_set_ptr, net::ssh_poll)
+        };
+
+        // Run the SSH handshake.
+        let config = ssh::server::SshServerConfig {
+            host_seed: SSH_HOST_SEED,
+            host_pubkey,
+            password_hash: SSH_PASSWORD_HASH,
+        };
+
+        // Create a simple RNG seeded from the tick counter.
+        let ticks = unsafe { (*SCHEDULER.0.get()).ticks };
+        let mut seed = [0u8; 32];
+        let tb = ticks.to_le_bytes();
+        seed[..8].copy_from_slice(&tb);
+        seed[8..16].copy_from_slice(&tb);
+        seed[16..24].copy_from_slice(&tb);
+        seed[24..32].copy_from_slice(&tb);
+        let mut rng = crypto::rng::ChaChaRng::from_seed(seed);
+
+        match ssh::server::run_ssh_handshake(&tcp_serial, &config, &mut rng) {
+            Some(mut bridge) => {
+                let _ = writeln!(con, "[ssh] handshake succeeded — starting shell");
+
+                // Save the bridge pointer for cleanup after the shell exits.
+                let bridge_ptr = &mut bridge as *mut ssh::server::SshShellBridge;
+
+                // Create an SshSerial adapter that the shell can use.
+                let ssh_serial = SshSerial {
+                    bridge: bridge_ptr,
+                    tcp: &tcp_serial,
+                };
+
+                let mut ssh_con = Console::new(ssh_serial);
+                let env = ShellEnv {
+                    version: VERSION,
+                    platform: "QEMU PC (x86-64) [SSH]",
+                    scheduler: "minimal",
+                    get_uptime_ticks: Some(get_uptime_ticks),
+                    get_task_list: Some(write_task_list),
+                    get_mem_info: Some(write_mem_info),
+                    get_driver_list: Some(write_driver_list),
+                    wifi_cmd: None,
+                    bt_cmd: None,
+                    zigbee_cmd: None,
+                    get_current_user: Some(get_current_user),
+                    get_user_list: Some(write_user_list),
+                    vfs_list_dir: Some(vfs_list_dir),
+                    vfs_read_file: Some(vfs_read_file),
+                    vfs_write_file: Some(vfs_write_file),
+                    vfs_mkdir: Some(vfs_mkdir),
+                    vfs_stat: Some(vfs_stat),
+                    vfs_unlink: Some(vfs_unlink),
+                    vfs_rename: Some(vfs_rename),
+                    vfs_getcwd: Some(vfs_getcwd),
+                    vfs_chdir: Some(vfs_chdir),
+                    vfs_tree: Some(vfs_tree),
+                    vfs_touch: Some(vfs_touch),
+                    mount_list: Some(mount_list),
+                    mount_fs: Some(do_mount),
+                    umount_fs: Some(do_umount),
+                    lsblk: Some(lsblk_info),
+                    input_status: Some(input_status),
+                    usb_list: None,
+                    ble_hid_list: None,
+                    gpio_cmd: None,
+                    i2c_cmd: None,
+                    spi_cmd: None,
+                    hw_info: Some(hw_info),
+                    get_temp_millic: None,
+                    dmesg: Some(dmesg_info),
+                    reboot: Some(do_reboot),
+                    shutdown: Some(do_shutdown),
+                    caps_cmd: Some(caps_command),
+                    auditlog_cmd: Some(auditlog_command),
+                    ifconfig_cmd: Some(ifconfig_callback),
+                    ping_cmd: Some(ping_callback),
+                    netstat_cmd: Some(netstat_callback),
+                    #[cfg(feature = "multi-user")]
+                    login: Some(do_login),
+                    #[cfg(not(feature = "multi-user"))]
+                    login: None,
+                    #[cfg(feature = "multi-user")]
+                    logout: Some(do_logout),
+                    #[cfg(not(feature = "multi-user"))]
+                    logout: None,
+                    #[cfg(feature = "multi-user")]
+                    change_password: Some(do_change_password),
+                    #[cfg(not(feature = "multi-user"))]
+                    change_password: None,
+                    #[cfg(feature = "multi-user")]
+                    add_user: Some(do_add_user),
+                    #[cfg(not(feature = "multi-user"))]
+                    add_user: None,
+                    #[cfg(feature = "multi-user")]
+                    remove_user: Some(do_remove_user),
+                    #[cfg(not(feature = "multi-user"))]
+                    remove_user: None,
+                    get_agent_list: None,
+                    agent_cmd: None,
+                    get_intent_list: None,
+                    intent_cmd: None,
+                    memory_cmd: None,
+                    get_fabric_status: None,
+                    peers_cmd: None,
+                    mesh_cmd: None,
+                    zkp_cmd: None,
+                };
+                let mut sh = Shell::new(env);
+                sh.run(&mut ssh_con);
+
+                // Clean up SSH channel.
+                let br = unsafe { &mut *bridge_ptr };
+                br.close_channel(&tcp_serial);
+                let _ = writeln!(con, "[ssh] session ended");
+            }
+            None => {
+                let _ = writeln!(con, "[ssh] handshake failed");
+            }
+        }
+    }
+}
+
+/// Adapter that implements `Serial` over an SSH channel.
+///
+/// This bridges the SSH encrypted channel to the VeerOS `Serial` trait
+/// so the shell can run transparently over SSH.
+#[cfg(all(feature = "ssh", feature = "shell"))]
+struct SshSerial<'a> {
+    bridge: *mut ssh::server::SshShellBridge,
+    tcp: &'a net::TcpSerial,
+}
+
+#[cfg(all(feature = "ssh", feature = "shell"))]
+impl Serial for SshSerial<'_> {
+    fn write_byte(&self, byte: u8) {
+        let bridge = unsafe { &mut *self.bridge };
+        bridge.write_byte_to(self.tcp, byte);
+    }
+
+    fn read_byte(&self) -> u8 {
+        let bridge = unsafe { &mut *self.bridge };
+        bridge.read_byte_from(self.tcp)
+    }
+
+    fn has_data(&self) -> bool {
+        let bridge = unsafe { &*self.bridge };
+        bridge.is_open()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1823,6 +2043,16 @@ pub extern "C" fn _rust_start() -> ! {
             let sb = NET_POLL_STACK.0.as_ptr() as usize;
             let st = sb + NET_POLL_STACK.0.len();
             if let Some(idx) = sched.create_task("net-poll", net::net_poll_task as *const () as usize, st, sb, 1, 0) {
+                sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
+            }
+        }
+
+        // SSH server task (if NIC is present and SSH feature enabled).
+        #[cfg(all(feature = "ssh", feature = "shell"))]
+        if net::is_active() {
+            let sb = SSH_STACK.0.as_ptr() as usize;
+            let st = sb + SSH_STACK.0.len();
+            if let Some(idx) = sched.create_task("ssh", ssh_task as *const () as usize, st, sb, 1, 0) {
                 sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
             }
         }

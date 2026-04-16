@@ -7,13 +7,14 @@ edition.workspace = true
 default = ["dist-app"]
 
 dist-minimal = ["microkernel/dist-minimal"]
-dist-app     = ["microkernel/dist-app", "shell", "userlib", "samples"]
+dist-app     = ["microkernel/dist-app", "shell", "ssh", "userlib", "samples"]
 dist-rt      = ["microkernel/dist-rt"]
 dist-xrt     = ["microkernel/dist-xrt", "accel"]
 dist-full    = ["dist-app", "dist-xrt"]
 
 accel      = ["microkernel/accel"]
 shell      = ["dep:shell"]
+ssh        = ["dep:ssh", "dep:crypto"]
 userlib    = ["dep:userlib"]
 samples    = ["userlib"]
 multi-user = ["microkernel/multi-user", "shell/multi-user"]
@@ -25,5 +26,7 @@ soc-qemu-pc = { path = "../../soc/qemu_pc" }
 net = { path = "../../net" }
 smoltcp = { workspace = true }
 shell = { path = "../../shell", optional = true }
+ssh = { path = "../../ssh", optional = true }
+crypto = { path = "../../crypto", features = ["sha256", "sha512", "chacha20", "x25519", "ed25519"], optional = true }
 userlib = { path = "../../userlib", optional = true }
 panic-halt = "1.0"

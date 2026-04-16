@@ -1,0 +1,12 @@
+[package]
+name = "ssh"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Minimal SSH-2 server for VeerOS — no_std, no_alloc"
+
+[dependencies]
+arch = { path = "../arch" }
+crypto = { path = "../crypto", features = ["sha256", "sha512", "chacha20", "x25519", "ed25519"] }
