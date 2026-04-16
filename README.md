@@ -1,5 +1,7 @@
 <!-- LOGO PLACEHOLDER -->
-<p align="center"><img src="./IMG_2008.png" alt="VeerOS Logo" width="120" height="120" align="center"/>
+<p align="center">
+  ![](./IMG_2008.png){ width="120" }
+  <img src="./IMG_2008.png" alt="VeerOS Logo" width="120" height="120" align="center"/>
 </p>
 <div align="center">
 
