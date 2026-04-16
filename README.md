@@ -1,6 +1,6 @@
 <!-- LOGO PLACEHOLDER -->
 <p align="center">
-  ![](./IMG_2008.png){ width="120" }
+  !(./IMG_2008.png){ width="120" }
 </p>
 <div align="center">
 
