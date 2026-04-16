@@ -17,6 +17,12 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [ ] Enterprise device management — fabric-native enrollment, compliance engine, fleet OTA, replaces Intune/JAMF/SCCM (Phase 17)
 - [ ] WAN-scale fabric — fabric nodes communicate over public Internet with PQC-hybrid encryption, NAT traversal, relay mesh (Phase 18)
 - [ ] Unified console abstraction — single management plane spanning ESP32 → RPi → x86-64 clusters, cross-node shell, distributed logs (Phase 19)
+- [ ] Structured event system — typed kernel events replace string logs; multi-sink fanout (serial/VGA/network/storage); events as THE observability primitive (Phase 19E)
+- [ ] State Fabric — distributed data plane with KV, streams, objects; locality-aware replication, CRDTs, offline tolerance; replaces Redis/Kafka/etcd (Phase 21)
+- [ ] Fabric protocol — binary QUIC-native wire protocol; zero-copy forwarding; decentralized peer-coordinated scheduling (Phase 22)
+- [ ] Developer SDK — high-level Rust SDK, WASM polyglot support, CLI toolchain; incremental migration path from existing infrastructure (Phase 23)
+- [ ] WASM sandbox — portable WebAssembly execution sandbox for lightweight, cross-arch function isolation (Phase 8B)
+- [ ] Function invocation model — `invoke("name.function", payload)` replaces URLs/endpoints; ephemeral, versioned, identity-routed (Phase 20A′)
 
 ## Logical Phase Order (Primitives → Complex)
 _Phases are numbered by historical creation order. Read in this dependency order for logical flow:_
@@ -48,10 +54,12 @@ TIER 6 — Distributed Systems
   Phase 11  Distributed OS / Cluster (membership, consensus, distributed scheduler/IPC/VFS)
   Phase 15  Distributed Fabric, Zero Trust & ZKP Security
   Phase 18  WAN-Scale Fabric (NAT traversal, Internet-scale mesh, WAN-aware scheduling) — NEW
-  Phase 19  Unified Console Abstraction (cross-node shell, distributed logs, fleet ops) — NEW
+  Phase 19  Unified Console Abstraction (cross-node shell, distributed logs, fleet ops, structured events) — NEW
+  Phase 21  State Fabric — distributed data plane (KV, streams, objects, CRDTs) — NEW
+  Phase 22  Fabric Protocol & Transport — binary QUIC-native wire protocol, decentralized scheduling — NEW
 
 TIER 7 — Platform Services
-  Phase 20  ZeroServices Architecture & API Gateway Elimination — NEW
+  Phase 20  ZeroServices Architecture & API Gateway Elimination (+ function invocation model) — NEW
   Phase 12  Cloud Platform (orchestration, observability, auto-scaling, multi-tenancy)
 
 TIER 8 — Network & Security Appliance
@@ -60,6 +68,7 @@ TIER 8 — Network & Security Appliance
 
 TIER 9 — Enterprise
   Phase 17  Enterprise Device Management — NEW
+  Phase 23  Developer SDK & Adoption Path — NEW
 
 CROSS-CUTTING
   Phase 4   Distribution Profiles (feature flags, per-target defaults, component matrix)
@@ -1272,6 +1281,18 @@ _Hierarchical isolation levels — from lightweight sandboxes on ESP32 to hardwa
 - [ ] **Device passthrough** — grant a MicroVM direct access to a physical MMIO / PCIe device (e.g., NVMe, GPU, NIC); IOMMU/SMMU protection
 - [ ] **Lightweight VMM** — < 10K lines; no BIOS emulation; direct kernel boot into guest; VeerOS-on-VeerOS nesting
 - [ ] **Live migration (cluster)** — snapshot MicroVM state → transfer to another cluster node → resume; pre-copy memory migration
+
+#### WASM Sandbox (Portable, Lightweight Execution — All Targets)
+_WebAssembly as a universal execution sandbox: portable bytecode, memory-safe, capability-constrained. Lighter than containers, more portable than MicroVMs._
+
+- [ ] **WASM interpreter** — `no_std` WASM bytecode interpreter in kernel; MVP spec (i32/i64/f32/f64, linear memory, tables); validates modules before execution
+- [ ] **WASM linear memory sandbox** — each WASM module gets a bounded linear memory region; no access to kernel or other modules; memory limits enforced at instantiation
+- [ ] **WASI-like host imports** — WASI-compatible host function interface: `fd_read`, `fd_write`, `clock_time_get`, `random_get`; capability-gated per import
+- [ ] **WASM → fabric execution** — WASM modules as fabric execution units; `invoke("module.function", payload)` dispatched to nearest capable node; lighter than container migration
+- [ ] **WASM module registry** — store compiled WASM modules in persistent memory; version-tagged; deploy fleet-wide via fabric gossip
+- [ ] **WASM AOT compilation (future)** — ahead-of-time compile WASM to native code per-arch at deploy time; JIT on capable targets (x86-64, ARM64); interpret on MCUs
+- [ ] **WASM capability restrictions** — per-module capability ceiling: which syscalls, which fabric nodes, which memory regions; `Domain::Wasm(module_id)` in isolation hierarchy
+- [ ] **WASM + ZeroServices** — WASM modules as ZeroService handlers: `svc register("auth.login", wasm_module_id)` → invocations sandboxed in WASM, routed by kernel
 
 #### Network Namespace Isolation (Router / Gateway / Firewall Profiles)
 - [ ] **`NetNamespace` struct** — isolated network stack instance: own interfaces, routing table, firewall rules, ARP/NDP cache, socket table
@@ -2787,6 +2808,25 @@ _No single point of failure — any node can be the management console._
 - [ ] **Role-based console access** — `ConsoleRole` enum: `Admin` (full fleet ops), `Operator` (view + restart + update), `Viewer` (read-only logs + status); enforced by capabilities
 - [ ] **Console bandwidth management** — for constrained WAN links, console traffic deprioritized vs operational fabric traffic; configurable QoS class for management data
 
+### 19E — Structured Event System (Events > Logs)
+_Every kernel action emits a typed, structured event — not a string log. Events are THE primitive for logs, metrics, traces, and security signals. All console/observability surfaces consume the same event stream._
+
+- [ ] **`KernelEvent` typed primitive** — `KernelEvent { timestamp, node_id, event_type: EventType, source, payload }` — replaces string-based `klog` as the fundamental observability unit
+- [ ] **`EventType` enum** — `Log(level, module, msg)`, `Metric(name, value, tags)`, `Trace(span_id, parent, operation, latency)`, `Security(threat_level, category, detail)`, `Lifecycle(component, state_change)` — every event is typed, not a string
+- [ ] **Event bus** — kernel-internal ring buffer of `KernelEvent`; all subsystems emit events into the bus; zero-allocation for hot-path events (pre-allocated slots)
+- [ ] **Multi-sink fanout** — event bus distributes to multiple sinks simultaneously:
+  - `Serial` — last-resort reliable sink for panic/boot events; priority-filtered (panic > error > info)
+  - `VGA/Framebuffer` — rich local visualization; color-coded by event type
+  - `Network` — fabric-distributed event streaming to remote consoles
+  - `Storage` — persistent event log on SD/NVMe for post-mortem analysis
+  - `Memory` — episodic memory ring buffer (Phase 14C) for AI agent consumption
+- [ ] **Priority-aware delivery** — events have priority levels: `Panic` > `Security` > `Error` > `Metric` > `Debug`; low-priority events dropped under backpressure; panic events guaranteed delivery to all sinks
+- [ ] **Event filtering** — per-sink filter: `{ min_level: Info, event_types: [Log, Security], source_nodes: [node1, node2] }` — subscribers see only what they need
+- [ ] **Real-time streaming** — `events --follow --type trace,security` — live event stream with typed filtering; replaces `dmesg -w` with structured queries
+- [ ] **Event query language** — simple query syntax: `events where type=Security AND threat_level > Medium since 1h` — evaluates against in-memory ring buffer; no external query engine
+- [ ] **Event export** — `events export --format json|cbor --since 1h --to syslog://remote:514` — structured export to external systems; CBOR for bandwidth-constrained links
+- [ ] **Shell `events` command** — `events [--follow] [--type <type>] [--node <name>] [--since <duration>] [--fabric]` — replaces ad-hoc log grep with typed event queries
+
 ---
 
 ## Phase 20 — ZeroServices Architecture & API Gateway Elimination
@@ -2803,6 +2843,18 @@ _The fundamental shift: services are first-class kernel primitives, not userspac
 - [ ] **Built-in observability** — kernel records per-service metrics (request count, latency histogram, error rate, active connections) in ring buffer; queryable via `SYS_SVC_METRICS`; no Prometheus sidecar needed
 - [ ] **Service lifecycle** — `register → healthy → serving → draining → deregistered`; health checks and lifecycle managed by kernel; restart policy per-service
 - [ ] **Intent-driven service management** — `intent submit "deploy service payments with 3 replicas"` → intent engine (Phase 14B) handles placement, scaling, health monitoring
+
+### 20A′ — Function Invocation Model (Invoke > Endpoint)
+_Beyond services to direct function invocation. No URLs, no endpoints — everything is `invoke("name.function", payload)`. Functions are ephemeral, versioned, and placement-independent._
+
+- [ ] **`SYS_INVOKE` (0xD6)** — `invoke("auth.login", payload)` → kernel resolves function → routes to handler (local process, remote node, or WASM sandbox) → returns result; single-call replaces HTTP request lifecycle
+- [ ] **Function registry** — functions registered as named entry points within services or standalone: `register_fn("auth.login", handler_fn)` — discoverable by name across fabric
+- [ ] **Ephemeral execution** — functions execute, return, and release resources; no long-running server processes required; kernel manages handler pool
+- [ ] **Versioned functions** — `invoke("auth.login@v2", payload)` routes to specific version; traffic splitting between versions for canary deploys
+- [ ] **Identity-based routing** — routing decisions based on caller identity + callee name, NOT network addresses; no DNS, no IP-based routing; `NodeId + FunctionId` globally unique
+- [ ] **Event triggers** — functions invoked automatically on events: `on_event("user.created", "email.welcome")` — kernel event bus triggers downstream functions
+- [ ] **Short-lived identity tokens** — per-invocation identity tokens with configurable TTL (default: 30s); auto-rotated; replaces long-lived API keys and service account credentials; goes beyond SPIFFE model
+- [ ] **Distributed quota enforcement** — per-function, per-caller quotas enforced at kernel level across all fabric nodes; gossip-replicated counters; prevents abuse without central rate limiter
 
 ### 20B — Service Registration & Discovery
 _Services announce themselves to the kernel. Discovery is a syscall, not a DNS query._
@@ -2872,6 +2924,110 @@ Service account + RBAC           → Capability-based service identity
 
 Total components eliminated: ~15 infrastructure services → 0 sidecars, 0 proxies, 0 gateways
 ```
+
+---
+
+## Phase 21 — State Fabric (Distributed Data Plane)
+_Global, distributed, service-less state layer. Compute is stateless; state lives in the fabric. Replaces databases, caches, queues, and config stores with a unified kernel-native data plane. Feature-gated: `state-fabric`._
+
+### 21A — State Primitives
+_Three data models — key-value, streams, and objects — all locality-aware and persistent._
+
+- [ ] **Key-value store** — `SYS_STATE_PUT(key, value, opts)` / `SYS_STATE_GET(key)` — distributed KV extending persistent memory (Phase 14C) with strong consistency options; replaces Redis, etcd, Consul KV
+- [ ] **Stream primitive** — `SYS_STATE_STREAM_WRITE(stream, event)` / `SYS_STATE_STREAM_READ(stream, offset)` — append-only distributed event streams; replaces Kafka topics and message queues; bounded or unbounded; consumer groups with offset tracking
+- [ ] **Object store** — `SYS_STATE_OBJ_PUT(key, data, metadata)` / `SYS_STATE_OBJ_GET(key)` — large binary blobs stored across fabric nodes; content-addressed (SHA-256); replaces S3/MinIO for local data
+- [ ] **TTL + eviction** — per-key TTL; LRU eviction when memory budget exceeded; configurable per data class
+- [ ] **Namespaced state** — state keys scoped to service identity: `payments:customer:123` — namespace isolation via capabilities
+- [ ] **Transactions (mini)** — `SYS_STATE_TXN(ops[])` — atomic multi-key operations within a single partition; no cross-partition transactions (keep simple)
+
+### 21B — Replication & Consistency
+_Locality-aware replication with tunable consistency — from strong to eventual._
+
+- [ ] **Consistency levels** — per-operation configurable: `Strong` (linearizable, quorum write/read), `Session` (read-your-writes within session), `Eventual` (AP, fastest), `Causal` (vector-clock ordered)
+- [ ] **CRDT support** — conflict-free replicated data types for eventual consistency: counters (G-Counter, PN-Counter), sets (OR-Set), registers (LWW-Register, MV-Register), maps (OR-Map); automatic merge on partition heal
+- [ ] **Locality-aware placement** — state replicated to nodes based on access patterns: hot keys migrate toward consumers; configurable replication factor (1–N)
+- [ ] **Offline tolerance** — nodes accumulate writes during partition; CRDT-merge on reconnection; no data loss; designed for DIL (disconnected, intermittent, limited) environments
+- [ ] **Anti-entropy protocol** — background Merkle-tree comparison between replicas; detect and repair divergence; configurable sync interval
+- [ ] **Partition-aware operations** — during network partition, `Strong` reads fail fast; `Eventual` reads serve local state; operations tagged with partition context for later reconciliation
+
+### 21C — State Fabric Integration
+- [ ] **Stateless compute + persistent state** — agents and functions read/write state via State Fabric; execution is ephemeral, state survives; clean functional model
+- [ ] **State triggers** — `on_state_change("key_pattern", function)` — state mutations trigger function invocations (Phase 20A′); enables reactive patterns without polling
+- [ ] **State-aware scheduling** — intent scheduler considers state locality when placing agents; co-locate compute with its state to minimize latency
+- [ ] **State migration** — hot state follows workload migration; pre-fetch state to destination node before agent migration; lazy migration for cold keys
+- [ ] **Shell `state` commands** — `state get <key>`, `state put <key> <value>`, `state stream <name> [--follow]`, `state info` (replication status, partition health, key count)
+
+---
+
+## Phase 22 — Fabric Protocol & Transport
+_Binary, zero-copy, QUIC-native protocol for all fabric communication. Every fabric message — invocations, state sync, events, management — uses the same wire protocol. Feature-gated: `fabric-proto`._
+
+### 22A — Wire Protocol
+_Compact binary framing for minimal overhead on constrained links._
+
+- [ ] **Binary envelope** — `FabricFrame { version: u8, msg_type: u8, flags: u16, correlation_id: u32, sender_id: NodeId, payload_len: u32, payload: [u8] }` — fixed 16-byte header + payload; zero-copy parseable
+- [ ] **Message types** — `Invoke` (function call), `InvokeReply`, `StateOp` (KV/stream/object), `StateSync` (replication), `Event` (structured event), `Gossip` (membership/health), `Console` (remote shell), `Control` (management)
+- [ ] **Serialization** — payload serialized as CBOR (Concise Binary Object Representation); self-describing, compact, schema-optional; JSON-compatible for debugging
+- [ ] **Zero-copy forwarding** — intermediate relay nodes forward frames without deserializing payload; only header inspected for routing
+- [ ] **Compression** — optional LZ4 compression for payload > 1 KB; flag in header; transparent to application
+- [ ] **Fragmentation** — large messages fragmented into MTU-sized frames; reassembled at receiver; ordered delivery guarantee within session
+
+### 22B — QUIC Transport
+_QUIC as primary transport — multiplexed, encrypted, NAT-friendly, zero-RTT._
+
+- [ ] **QUIC implementation** — `no_std` QUIC 1.0 (RFC 9000) in kernel; UDP-based; built-in TLS 1.3; connection migration; 0-RTT resumption
+- [ ] **Multiplexed streams** — each message type on its own QUIC stream; no head-of-line blocking between invocations and state sync; priority-based scheduling
+- [ ] **Connection migration** — QUIC connections survive IP address changes (cellular handoff, roaming, VM migration); connection ID-based, not IP-based
+- [ ] **0-RTT resumption** — for known peers, first message sent with 0-RTT; cached session tickets in persistent memory; reduces reconnection latency to zero
+- [ ] **Congestion control** — BBR or CUBIC congestion control per connection; WAN links auto-detected; ECN support
+- [ ] **Transport selection** — `FabricTransport` trait: QUIC (default + preferred), TCP (fallback for QUIC-blocked networks), UDP (raw, for time-critical), WebSocket (firewall-friendly HTTP fallback); auto-negotiated per peer
+
+### 22C — Decentralized Scheduling
+_No central orchestrator — scheduling decisions peer-coordinated via gossip and local autonomy._
+
+- [ ] **Peer-coordinated placement** — each node computes placement scores locally using gossip-derived global view; nodes bid for workloads; highest-scoring node wins; no leader required for placement decisions
+- [ ] **Gossip-based load sharing** — each node periodically advertises: current load, available capacity, capabilities, latency to peers; all nodes maintain approximate global view
+- [ ] **Cost/energy-aware scoring** — placement score includes energy cost (battery level for IoT, power draw for servers) and monetary cost (cloud instance pricing); configurable weight per factor
+- [ ] **Local-first execution** — prefer local execution when constraints allow; remote placement only when local resources insufficient or policy requires it
+- [ ] **Graceful degradation on partition** — during network partition, each partition schedules independently using last-known state; workload redistribution on partition heal
+- [ ] **Scheduling protocol** — `FabricMsg::ScheduleRequest(workload)` → nodes reply with `ScheduleBid(score, constraints_met)` → requester selects winner → `ScheduleAccept(node_id)` — 3-message handshake
+
+---
+
+## Phase 23 — Developer SDK & Adoption Path
+_How developers write applications for VeerOS, and how organizations migrate from existing infrastructure. Feature-gated: `sdk`._
+
+### 23A — Developer SDK
+_High-level SDK for building VeerOS applications — from functions to full distributed systems._
+
+- [ ] **`veeros-sdk` crate** — high-level Rust SDK wrapping syscalls: `veeros::invoke("auth.login", &payload)`, `veeros::state::get("key")`, `veeros::events::emit(event)` — ergonomic API over raw syscalls
+- [ ] **Function definition macro** — `#[veeros::function] fn login(req: LoginRequest) -> LoginResponse { ... }` — generates registration, serialization, capability declarations
+- [ ] **State bindings** — `veeros::state::kv::<T>(key)` typed KV access; `veeros::state::stream::<T>(name)` for event streams; compile-time type safety
+- [ ] **Event emission** — `veeros::event!(Level::Info, "user logged in", user_id = id)` — structured event macro with compile-time type checking; replaces `println!` / `log::info!` patterns
+- [ ] **Service composition** — `veeros::service("payments").version("2.0").replicas(3).expose(443).deploy()` — declarative service definition in code
+- [ ] **Testing harness** — `veeros::test::fabric()` — in-process simulated fabric for unit testing functions without real hardware; mock state, mock events, mock invocations
+- [ ] **CLI toolchain** — `veeros-cli`: `veeros build` (cross-compile), `veeros deploy` (push to fabric), `veeros invoke` (test from host), `veeros logs` (stream events), `veeros status` (fleet health)
+
+### 23B — WASM & Polyglot Support
+_Write VeerOS functions in any language that compiles to WASM._
+
+- [ ] **WASM SDK** — `veeros-wasm` host import bindings: `invoke`, `state_get`, `state_put`, `event_emit`, `identity` — callable from any WASM-capable language
+- [ ] **Rust → WASM** — `cargo build --target wasm32-wasi` + `veeros deploy` — zero-config path from Rust source to running function on fabric
+- [ ] **C/C++ → WASM** — Emscripten / clang WASI target; header file `veeros.h` wrapping host imports
+- [ ] **TinyGo → WASM** — Go functions compiled to WASM via TinyGo; `veeros-go` package wrapping host imports
+- [ ] **AssemblyScript → WASM** — TypeScript-like language compiled to WASM; `@veeros/sdk` npm package
+- [ ] **Module size budgets** — per-target WASM module size limits: ESP32 (64 KB), RPi (1 MB), x86 (10 MB); compile-time validation
+
+### 23C — Migration Path from Existing Systems
+_Incremental adoption — VeerOS runs alongside existing infrastructure, replacing components one at a time._
+
+- [ ] **HTTP ↔ Invoke bridge** — edge proxy translates `POST /api/auth/login` → `invoke("auth.login", body)` — existing clients keep HTTP, VeerOS functions don't need HTTP awareness
+- [ ] **Kubernetes sidecar mode** — VeerOS agent runs as a K8s sidecar; intercepts service-to-service calls; routes via fabric when both endpoints are VeerOS; passthrough otherwise; gradual migration
+- [ ] **State bridge** — `veeros-bridge-redis` reads/writes from both Redis and State Fabric; dual-write during migration; cut over when ready; similar bridges for etcd, PostgreSQL
+- [ ] **Event bridge** — `veeros-bridge-kafka` consumes Kafka topics → emits VeerOS events (and vice versa); enables mixed-infrastructure event pipelines
+- [ ] **Prometheus exporter** — expose VeerOS metrics in Prometheus format on `/metrics` endpoint; existing Grafana dashboards keep working during migration
+- [ ] **OCI container import** — run existing Docker/OCI containers inside VeerOS container isolation (Phase 8B); gradual refactor to WASM/native functions
+- [ ] **Migration playbook** — step-by-step guide: (1) deploy VeerOS edge nodes alongside existing, (2) bridge state/events, (3) migrate functions one by one, (4) cut over networking, (5) decommission old infrastructure
 
 ---
 

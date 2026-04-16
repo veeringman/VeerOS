@@ -208,11 +208,50 @@ VeerOS provides a **clean, modern OS architecture** that combines:
 - Strong abstraction boundaries (arch → soc → kernel → userlib)
 - First-class networking and wireless radio stacks
 - AI-native execution as a kernel primitive, not an afterthought
+- Kernel-native enterprise security (NAC + EDR + ZTNA) — the OS is the security appliance
+- Enterprise device management — fabric join is enrollment, no MDM servers
+- WAN-scale fabric spanning the public Internet with NAT traversal and PQC tunnels
+- ZeroServices — services as kernel objects, eliminating API gateways and service meshes
+- Function invocation model — `invoke("name.function", payload)` replaces URLs and endpoints
+- State Fabric — distributed KV, streams, objects with CRDTs and locality-aware replication
+- Structured event system — typed kernel events replace string logs, metrics, and traces
+- QUIC-native fabric protocol — binary, zero-copy, multiplexed, with decentralized scheduling
+- WASM sandbox — portable WebAssembly execution alongside MicroVMs and containers
+- Unified console for fleet-wide management from any node
+- Developer SDK + migration path from existing infrastructure
 - Long-term scalability from 320 KB MCUs to cloud GPU clusters
 
 This makes VeerOS suitable for **embedded devices, IoT platforms, autonomous
 robotics, satellite systems, telecom infrastructure, medical devices, AI
-pipelines, and tactical edge computing**.
+pipelines, tactical edge computing, enterprise networks, and global-scale
+fleet management**.
+
+---
+
+## Core Design Principles
+
+VeerOS is not better Kubernetes, lighter microservices, or improved serverless.
+It is a **different abstraction boundary** — where OS, infrastructure, and
+platform collapse into one.
+
+| Principle | Traditional | VeerOS |
+|-----------|------------|--------|
+| **Identity > Network** | Trust based on IP, subnet, VPC | Every action tied to cryptographic identity |
+| **Invoke > Endpoint** | URLs, REST, service discovery | Function invocation — `invoke("name.fn", payload)` |
+| **Events > Logs** | String logs, separate metrics/traces | Typed, structured kernel events — one primitive |
+| **Fabric > Infrastructure** | K8s + mesh + gateway + obs stack | One unified execution + state + policy fabric |
+| **State > Services** | Stateful services wrapping DBs | Stateless compute + persistent State Fabric |
+
+```
+Traditional Stack:
+  App → Services → Containers → K8s → Mesh → Gateway → Observability
+
+VeerOS:
+  Code → Fabric → Execution
+               → State
+               → Policy
+               → Events
+```
 
 ---
 
@@ -405,6 +444,281 @@ that agents enforce autonomously. No cloud dependency.
 
 **Distribution profile:** `dist-cluster` + `dist-rt`.
 
+### Enterprise Security & Zero Trust
+
+**Problem:** Enterprise security requires a stack of point products — ClearPass
+for NAC, CrowdStrike for EDR, Zscaler for ZTNA — each with agents, appliances,
+and cloud consoles. The OS doesn't participate in security enforcement.
+
+**VeerOS approach:** The kernel IS the security appliance. 802.1X authentication
+happens at the packet level — no separate RADIUS appliance. EDR operates at
+syscall granularity — every process's behavior profiled against learned baselines,
+anomalies detected and responded to in microseconds. ZTNA evaluates device
+posture, user identity, and request context on every access — not just at tunnel
+establishment. `sec-nac`, `sec-edr`, `sec-ztna` feature flags compose the
+security surface needed for each deployment.
+
+**Distribution profile:** `dist-security` (all three) or individual `sec-*` flags.
+
+### Enterprise Fleet & Device Management
+
+**Problem:** Managing a fleet of devices requires Intune/JAMF/SCCM servers,
+enrollment protocols, compliance scanners, and remote management agents.
+
+**VeerOS approach:** `cluster join` = MDM enrollment. Device presents hardware
+attestation (TPM/eFuse/boot measurements), receives a signed certificate,
+auto-populates inventory record. Compliance rules evaluated continuously in
+kernel — non-compliant devices quarantined or auto-remediated. Configuration
+profiles pushed via fabric gossip. OTA firmware updates, remote wipe, fleet
+queries — all via `intent submit` or `fleet` shell commands.
+
+**Distribution profile:** `dist-fleet`.
+
+### Global-Scale WAN Fabric
+
+**Problem:** Connecting devices across NAT, cellular, and multi-site networks
+requires VPN infrastructure — Tailscale, ZeroTier, or complex IPsec tunnels.
+
+**VeerOS approach:** The execution fabric extends to WAN transparently. STUN
+discovery + UDP hole punching + TURN relay fallback ensure connectivity through
+any NAT topology. All tunnels PQC-hybrid encrypted (ChaCha20-Poly1305 +
+ML-KEM). Latency-aware and bandwidth-aware routing selects optimal paths.
+WAN partitions handled gracefully — nodes operate autonomously and sync on
+reconnection. The intent scheduler is WAN-aware: heavy workloads avoid
+constrained links, latency-sensitive agents stay local.
+
+**Distribution profile:** any profile + `fabric-wan`.
+
+---
+
+## ZeroServices Architecture
+
+VeerOS reimagines microservices as kernel primitives. Instead of deploying
+containers with sidecar proxies, services are kernel objects with built-in
+identity, routing, encryption, observability, and resilience.
+
+### Conceptual Stack
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Application Code (pure business logic)                      │
+│  register("payments") → expose(443) → serve()                │
+├──────────────────────────────────────────────────────────────┤
+│  Kernel — ZeroServices Layer                                 │
+│  ┌───────────┐ ┌────────────┐ ┌────────────┐ ┌───────────┐  │
+│  │  Service   │ │   Service  │ │   Load     │ │  Circuit  │  │
+│  │  Registry  │ │   Router   │ │  Balancer  │ │  Breaker  │  │
+│  │ (gossip-   │ │ (name →    │ │ (per-svc   │ │ (per-svc  │  │
+│  │  replicated│ │  endpoint) │ │  strategy) │ │  state)   │  │
+│  └───────────┘ └────────────┘ └────────────┘ └───────────┘  │
+│  ┌───────────┐ ┌────────────┐ ┌────────────┐ ┌───────────┐  │
+│  │  mTLS     │ │  Rate      │ │  Dist.     │ │  Edge     │  │
+│  │  (auto)   │ │  Limiter   │ │  Tracing   │ │  (ZTNA +  │  │
+│  │           │ │            │ │  (auto)    │ │  expose)  │  │
+│  └───────────┘ └────────────┘ └────────────┘ └───────────┘  │
+├──────────────────────────────────────────────────────────────┤
+│  Kernel — AI-Native + Classic Layer (agents, fabric, IPC)    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Syscall Surface (0xD0–0xD5)
+
+| Nr | Name | Purpose |
+|----|------|---------|
+| 0xD0 | `SYS_SVC_REGISTER` | Register service with name, version, capabilities |
+| 0xD1 | `SYS_SVC_DEREGISTER` | Graceful deregistration with drain |
+| 0xD2 | `SYS_SVC_DISCOVER` | Find services by name/capability/version |
+| 0xD3 | `SYS_SVC_EXPOSE` | Expose service on public port with auth + rate limiting |
+| 0xD4 | `SYS_SVC_CALL` | Service-to-service call (kernel routes + load balances) |
+| 0xD5 | `SYS_SVC_METRICS` | Query per-service metrics (latency, errors, throughput) |
+
+### What ZeroServices Eliminates
+
+```
+Traditional Stack                → VeerOS ZeroServices
+─────────────────────────────────────────────────────────────
+Kubernetes Pods + Deployments    → Kernel service objects
+Docker / containerd runtime      → Kernel service lifecycle
+Istio / Linkerd sidecar proxies  → Kernel-native mTLS + routing
+Envoy data plane                 → Kernel IPC + fabric transport
+Consul / CoreDNS service disc.  → Gossip-replicated service registry
+Kong / Nginx / Envoy API GW     → ZTNA edge + kernel rate limiting
+Prometheus + Grafana metrics     → Kernel ring buffer metrics
+Jaeger / Zipkin tracing          → Kernel auto-injected trace context
+cert-manager TLS provisioning    → Kernel keystore + auto-rotation
+```
+
+**Total: ~15 infrastructure services eliminated → 0 sidecars, 0 proxies, 0 gateways.**
+
+---
+
+## Enterprise Security Architecture
+
+### Kernel-Native Security Stack
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    Unified Security Policy                    │
+│  (capability-based, continuous evaluation, per-request)       │
+├──────────┬──────────────────┬────────────────────────────────┤
+│   NAC    │       EDR        │           ZTNA                 │
+│  802.1X  │  Syscall monitor │  Continuous auth               │
+│  RADIUS  │  Behavior learn  │  Device posture                │
+│  Posture │  Anomaly detect  │  Request-level policy          │
+│  Quarant.│  Auto-response   │  Context-aware access          │
+├──────────┴──────────────────┴────────────────────────────────┤
+│  Kernel — PQC Crypto · Capabilities · Isolation Domains      │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**NAC** — 802.1X authenticator at the packet level; RADIUS client for external
+AAA; device posture assessment on fabric join; capability-based network
+segmentation replaces VLANs; non-compliant devices quarantined automatically.
+
+**EDR** — per-process syscall frequency histograms; behavioral baseline learning;
+real-time anomaly scoring; automated response from audit log to process kill;
+forensic data preserved in episodic memory.
+
+**ZTNA** — every request evaluated against (user identity × device posture ×
+resource sensitivity × network context); continuous re-evaluation, not
+one-time VPN auth; micro-segmented access — each service requires explicit
+capability grant.
+
+---
+
+## Unified Console Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Operator Shell (any node)                                   │
+│  ┌──────────┐ ┌──────────────┐ ┌──────────────────────────┐ │
+│  │ attach   │ │ broadcast    │ │ dmesg/top/ps --fabric    │ │
+│  │ <node>   │ │ <cmd>        │ │ (fleet-wide view)        │ │
+│  └────┬─────┘ └──────┬───────┘ └────────────┬─────────────┘ │
+│       │              │                      │               │
+│  ─────┼──────────────┼──────────────────────┼─── fabric ───│
+│       ▼              ▼                      ▼               │
+│  ┌─────────┐  ┌──────────┐          ┌──────────────┐       │
+│  │ Node A  │  │ Node B   │  ···     │ Node N       │       │
+│  │ shell   │  │ executes │          │ streams logs │       │
+│  └─────────┘  └──────────┘          └──────────────┘       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Any node's shell can manage any other node:
+- `attach <node>` — remote shell session over encrypted fabric channel
+- `broadcast <cmd>` — execute across all nodes, aggregate output
+- `select <group> <cmd>` — target node groups
+- `dmesg --fabric` — time-correlated kernel logs fleet-wide
+- `top --fabric` — cluster-wide CPU/memory/task monitoring
+- `ps --fabric` — all processes across all nodes
+- `auditlog --fabric` — merged security audit trail
+
+---
+
+## Structured Event System (Events > Logs)
+
+VeerOS replaces string-based logging with typed, structured kernel events as
+the fundamental observability primitive.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Kernel Event Bus (ring buffer)                              │
+│  KernelEvent { timestamp, node_id, type, source, payload }  │
+│  Types: Log | Metric | Trace | Security | Lifecycle         │
+├──────────┬───────────┬───────────┬───────────────────────────┤
+│  Serial  │  VGA /    │  Network  │  Storage   │  Memory     │
+│  (panic  │  Display  │  (fabric  │  (SD/NVMe  │  (episodic  │
+│  safe)   │  (rich)   │  stream)  │  persist)  │  for AI)    │
+└──────────┴───────────┴───────────┴───────────┴──────────────┘
+```
+
+Every action emits a typed event:
+```
+{ type: "Trace", operation: "auth.login", latency: 12, status: "ok" }
+{ type: "Security", threat_level: "High", category: "anomaly", pid: 42 }
+{ type: "Metric", name: "cpu.usage", value: 0.73, node: "rpi5-edge" }
+```
+
+- **Multi-sink fanout** — same event delivered to serial (last-resort), display
+  (rich), network (global), and storage (persistent) simultaneously
+- **Priority-aware** — panic events guaranteed delivery; debug events shed under
+  backpressure
+- **Queryable** — `events where type=Security AND threat_level > Medium since 1h`
+
+Replaces: ELK, Prometheus, Jaeger, Datadog, Splunk — with zero instrumentation.
+
+---
+
+## Function Invocation Model (Invoke > Endpoint)
+
+Beyond ZeroServices: everything is a function invocation, not an HTTP endpoint.
+
+```
+Traditional:  Client → DNS → LB → Gateway → Service → DB
+VeerOS:       Client → invoke("auth.login", payload) → result
+```
+
+- **Identity-based routing** — routing by cryptographic caller/callee identity,
+  not IP/DNS/URL. `NodeId + FunctionId` globally unique.
+- **Ephemeral execution** — functions execute, return, release. No long-running
+  server processes required.
+- **Short-lived identity** — per-invocation tokens with configurable TTL (30s
+  default); auto-rotated; replaces long-lived API keys.
+- **Event triggers** — `on_event("user.created", "email.welcome")` — kernel
+  event bus triggers downstream functions automatically.
+- **Versioned** — `invoke("auth.login@v2", payload)` routes to specific version;
+  traffic splitting for canary deploys.
+
+---
+
+## State Fabric (Distributed Data Plane)
+
+Compute is stateless. State lives in the fabric. Replaces databases, caches,
+queues, and config stores.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  State Fabric                                                │
+│  ┌────────────┐  ┌────────────────┐  ┌────────────────────┐ │
+│  │  Key-Value │  │  Streams       │  │  Objects           │ │
+│  │  (→ Redis, │  │  (→ Kafka,     │  │  (→ S3, MinIO)     │ │
+│  │   etcd)    │  │   RabbitMQ)    │  │                    │ │
+│  └────────────┘  └────────────────┘  └────────────────────┘ │
+│  Consistency: Strong | Session | Causal | Eventual           │
+│  Replication: locality-aware, CRDT merge, offline tolerance  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+- **CRDT support** — conflict-free merge on partition heal; counters, sets,
+  registers, maps — no data loss in DIL environments
+- **Locality-aware** — hot keys migrate toward consumers; cold data stays
+  at origin; configurable replication factor
+- **State triggers** — state mutations trigger function invocations; enables
+  reactive patterns without polling
+- **State-aware scheduling** — co-locate compute with its data
+
+---
+
+## Fabric Protocol & Transport
+
+All fabric communication uses one compact binary protocol over QUIC.
+
+```
+FabricFrame (16-byte header + payload):
+┌────────┬──────────┬───────┬──────────────┬──────────┬─────────┐
+│version │ msg_type │ flags │ correlation  │ sender   │ payload │
+│  u8    │   u8     │ u16   │   u32        │ NodeId   │ [u8]    │
+└────────┴──────────┴───────┴──────────────┴──────────┴─────────┘
+Message types: Invoke | StateOp | Event | Gossip | Console | Control
+```
+
+- **QUIC transport** — multiplexed streams, 0-RTT resumption, connection
+  migration across IP changes, built-in TLS 1.3
+- **Zero-copy forwarding** — relay nodes forward without deserializing payload
+- **Decentralized scheduling** — peer-coordinated placement via gossip; no
+  central orchestrator; cost/energy-aware scoring
+
 ---
 
 ## What VeerOS Replaces
@@ -414,15 +728,26 @@ Traditional Cloud Stack              VeerOS Equivalent
 ─────────────────────────             ──────────────────
 Kubernetes / Nomad                    Intent Engine + Intent Scheduler
 etcd / Consul / ZooKeeper            Persistent Memory (in-kernel KV)
-Prometheus / Grafana / OTel          Episodic Memory + monitor agents
-Istio / Envoy service mesh           Fabric + kernel agents
+Redis / Memcached                     State Fabric KV (CRDT-backed)
+Kafka / RabbitMQ / SQS               State Fabric Streams (append-only)
+Prometheus / Grafana / OTel          Structured Event System (typed, not strings)
+ELK / Splunk / Datadog               KernelEvent bus + multi-sink fanout
+Istio / Envoy service mesh           ZeroServices (kernel-native routing + mTLS)
+Kong / Nginx / Traefik API GW        SYS_SVC_EXPOSE (kernel edge)
+REST / gRPC endpoints                invoke("name.function") — identity-routed
+cert-manager / Vault TLS             Kernel keystore + auto-rotation
 Airflow / Temporal / Celery          Intent decomposition → agent DAGs
-Docker multi-arch + QEMU             Native fabric placement
+Docker / containerd runtime          Kernel service lifecycle + WASM sandbox
 PagerDuty / health checks            Kernel heartbeat + auto-replan
 Ansible / Terraform                  Persistent Memory + deploy intents
+ClearPass / Aruba / ISE (NAC)        Kernel 802.1X + posture engine
+CrowdStrike / Trellix (EDR)         Kernel syscall-level EDR
+Zscaler / Cloudflare (ZTNA)         Kernel ZTNA — continuous auth
+Intune / JAMF / SCCM (MDM)          Fabric enrollment + fleet management
+Tailscale / ZeroTier (WAN VPN)       WAN-scale fabric with NAT traversal + QUIC
 ```
 
-**Total lines of code replaced:** millions → ~3,000 lines of kernel Rust.
+**Total infrastructure components eliminated:** ~30 → kernel primitives.
 
 ---
 

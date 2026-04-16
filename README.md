@@ -1,8 +1,10 @@
 <div align="center">
 
-<img src="./IMG_2008.png" alt="VeerOS Logo" width="280" />
+<picture>
+  <img src="./IMG_2008.png" alt="VeerOS Logo" width="280" />
+</picture>
 
-<h1 style="margin-top: 0;">VeerOS</h1>
+# VeerOS
 
 **The world's first AI-native operating system.**
 
@@ -16,9 +18,9 @@
 
 ---
 
-**VeerOS** is a from-scratch operating system written in Rust that makes
-intelligence, security, and coordination intrinsic to the kernel — not layered
-on after the fact.
+**VeerOS** is a from-scratch operating system written in Rust where compute,
+state, security, networking, and observability collapse into a single fabric —
+not layered on after the fact.
 
 Traditional operating systems understand processes, threads, and files. VeerOS
 adds three new kernel primitives: **Intents** (declarative goals), **Agents**
@@ -41,15 +43,25 @@ understand goals:
 | Problem | Today's Stack | VeerOS |
 |---|---|---|
 | Orchestration | Kubernetes (2M+ lines) | `intent submit` (1 syscall) |
-| Service mesh | Istio + Envoy sidecars | Fabric + kernel agents |
-| Observability | Prometheus + Grafana + OTel | Episodic memory (in-kernel ring buffer) |
+| Service mesh | Istio + Envoy sidecars | ZeroServices — kernel-native routing + mTLS |
+| API gateway | Kong / Nginx / Traefik | `SYS_SVC_EXPOSE` (1 syscall) |
+| Service calls | REST endpoints + HTTP | `invoke("name.function", payload)` |
+| Databases / caches / queues | Redis + Kafka + etcd | State Fabric (kernel-native KV + streams) |
+| Observability | Prometheus + Grafana + OTel | Structured events (typed, not string logs) |
 | Config management | etcd / Consul / Vault | Persistent memory (in-kernel KV) |
 | Task scheduling | Airflow / Celery / Temporal | Intent decomposition → agent DAGs |
 | Cross-arch deployment | Docker multi-arch + QEMU | Native fabric placement |
 | Failover / self-healing | Custom health checks + PDBs | Kernel heartbeat + auto-replan |
+| Network access control | ClearPass / Aruba / ISE | Kernel-native 802.1X + posture |
+| Endpoint security | CrowdStrike / Trellix / Defender | Kernel EDR — syscall-level visibility |
+| Zero Trust access | Zscaler / Cloudflare ZTNA | Kernel ZTNA — continuous auth per-request |
+| Device management | Intune / JAMF / SCCM | Fabric join = enrollment (0 agents) |
+| WAN connectivity | Tailscale / ZeroTier / VPN | WAN-scale fabric with NAT traversal |
+| Fleet management | Ansible / Terraform / Salt | Unified console + fleet intents |
 
 **VeerOS collapses this entire stack into the kernel.** The OS itself plans,
-schedules, places, monitors, and learns.
+schedules, places, monitors, secures, and manages — from a single MCU to a
+planet-scale fleet.
 
 ---
 
@@ -100,6 +112,31 @@ range. `intent submit monitor persistent surveillance of sector 7` — the kerne
 decomposes across available assets, re-plans when a drone goes offline, records
 all decisions in episodic memory for after-action review.
 **→ Tactical edge computing, JADC2, unmanned systems C2.**
+
+### Enterprise Security & Zero Trust
+The kernel IS the security appliance. 802.1X authentication, device posture
+assessment, syscall-level EDR, and continuous ZTNA — all enforced at the kernel
+level. No ClearPass, no CrowdStrike agent, no Zscaler tunnel. Every packet,
+every syscall, every authentication event is visible and enforceable at the
+source of truth. Threat detected → process sandboxed in microseconds, not
+minutes.
+**→ Corporate networks, branch offices, regulated industries, government.**
+
+### Enterprise Fleet & Device Management
+Fabric join IS device enrollment. Every VeerOS node self-describes its hardware,
+firmware version, security posture, and compliance status at join time.
+Configuration profiles pushed fleet-wide via a single `intent submit`. OTA
+firmware updates, remote wipe, compliance enforcement — no Intune server, no
+JAMF cloud, no SCCM infrastructure.
+**→ Enterprise IT, managed IoT fleets, retail POS, healthcare devices.**
+
+### Global-Scale WAN Fabric
+Nodes behind NAT, across continents, on cellular networks — all part of one
+coherent fabric. UDP hole punching, TURN relay fallback, PQC-encrypted tunnels
+over public Internet. Latency-aware routing selects the fastest path. WAN
+partitions handled gracefully — nodes operate independently and sync on
+reconnect.
+**→ Multi-site enterprise, global CDN, remote offices, mobile workforce.**
 
 ---
 
@@ -201,17 +238,67 @@ veeros> memory set deploy.target rpi5-edge-01
 
 - **Coherent Multi-Node Fabric** — nodes discover each other, elect leaders,
   share state, and present a single-system illusion. Processes and files
-  migrate transparently.
+  migrate transparently. WAN-scale overlay extends the fabric across the
+  public Internet with NAT traversal, PQC-encrypted tunnels, and latency-aware
+  routing — from LAN to planet-scale.
 
 - **Native Orchestration** — container scheduling, desired-state reconciliation,
   rolling deployments, health-aware placement — without a separate control plane.
 
-- **Built-In Service Mesh** — load balancing, circuit breaking, mTLS, traffic
-  splitting, and observability injected at the kernel socket layer. No sidecars.
+- **ZeroServices Architecture** — services are kernel objects, not containers
+  with sidecars. The kernel provides service identity, mTLS, load balancing,
+  circuit breaking, distributed tracing, and observability natively.
+  `SYS_SVC_EXPOSE` replaces the entire API gateway tier — auth, rate limiting,
+  TLS termination, and routing in a single syscall. Eliminates ~15 infrastructure
+  services (Istio, Envoy, Kong, Consul, cert-manager, etc.) with zero proxies.
 
 - **Packet-Level Network Intelligence** — stateful filtering, NAT, VPN tunnels,
   traffic shaping, and protocol identification as kernel primitives. VeerOS is
   the firewall.
+
+- **Kernel-Native Enterprise Security** — the OS is the security appliance:
+  802.1X network access control (replaces ClearPass/ISE), syscall-level endpoint
+  detection & response (replaces CrowdStrike/Trellix), and continuous Zero Trust
+  network access (replaces Zscaler/Cloudflare ZTNA). Every packet, every syscall,
+  every auth event observed and enforced at the kernel — no agents, no sidecars.
+
+- **Enterprise Device Management** — fabric join IS device enrollment. Hardware
+  attestation, compliance enforcement, configuration profiles, OTA firmware
+  updates, and remote wipe — all kernel-native. Replaces Intune, JAMF, SCCM,
+  and Workspace ONE with zero MDM servers and zero agents.
+
+- **Unified Console** — any node's shell can manage any other node. `attach`
+  to remote nodes, `broadcast` commands fleet-wide, view distributed logs with
+  `dmesg --fabric`, monitor the entire fleet with `top --fabric` — all over
+  encrypted fabric channels. No central controller.
+
+- **Structured Event System** — every kernel action emits a typed, structured
+  event — not a string log. `KernelEvent` replaces logs, metrics, traces, and
+  security signals with one primitive. Multi-sink fanout delivers events to
+  serial, VGA, network, and storage simultaneously with priority-aware filtering.
+  Replaces ELK, Prometheus, and APM tools.
+
+- **Function Invocation Model** — beyond services: `invoke("auth.login", payload)`.
+  No URLs, no endpoints, no long-running servers. Identity-based routing,
+  ephemeral execution, versioned functions, short-lived identity tokens. The
+  kernel resolves, routes, and load-balances — every invocation authenticated
+  by cryptographic identity, not network address.
+
+- **State Fabric** — global, distributed, service-less data plane. Key-value,
+  streams, and objects with locality-aware replication, CRDTs for conflict-free
+  offline operation, and tunable consistency (strong → eventual). Compute is
+  stateless; state lives in the fabric. Replaces Redis, Kafka, and etcd.
+
+- **QUIC-Native Fabric Protocol** — binary, zero-copy wire protocol over QUIC.
+  Multiplexed streams, 0-RTT resumption, connection migration across IP changes.
+  Every fabric message — invocations, state sync, events, management — uses the
+  same compact binary framing. Decentralized peer-coordinated scheduling with
+  cost/energy-aware placement.
+
+- **WASM Sandbox** — WebAssembly execution sandbox alongside MicroVMs and
+  containers. Portable bytecode, memory-safe, capability-constrained. Write
+  functions in any language that compiles to WASM (Rust, C, Go, TypeScript).
+  Lighter than containers, more portable than native binaries.
 
 - **AI as a System Primitive** — autonomous agents, declarative intents, three-tier
   memory engine, and heterogeneous execution fabric are kernel primitives, not
@@ -283,13 +370,15 @@ dist-minimal                    bare scheduler, IPC, memory isolation
 ├── dist-app                    + shell, networking, userlib, samples
 │   ├── dist-ai                 + inference engine, NL shell, NPU backends
 │   ├── dist-cluster            + cluster membership, distributed sched/IPC/VFS
-│   │   └── dist-cloud          + orchestration, service mesh, observability
-│   └── dist-full               all Tier 1 components + priority scheduler
+│   │   ├── dist-cloud          + orchestration, ZeroServices, observability
+│   │   └── dist-fleet          + device management, unified console
+│   └── dist-full               all components + priority scheduler
 ├── dist-rt                     + priority real-time scheduler
 │   └── dist-xrt                + accelerator / GPU / FPGA / QPU (UAI)
 ├── dist-edge                   + edge AI inference, WiFi/BLE, sensor pipeline
 │   └── dist-gateway            + Thread border router, Zigbee, MQTT broker
-└── dist-firewall               + packet filter, NAT, VPN, DPI, traffic shaping
+├── dist-firewall               + packet filter, NAT, VPN, DPI, traffic shaping
+└── dist-security               + NAC + EDR + ZTNA (enterprise security)
 ```
 
 ### Quick Reference
@@ -307,6 +396,8 @@ dist-minimal                    bare scheduler, IPC, memory isolation
 | `dist-cloud` | cluster | Cloud orchestration host | x86-64 KVM, ARM64 KVM |
 | `dist-firewall` | minimal | Router / firewall / VPN gateway | x86-64, ARM64, RPi 4/5 |
 | `dist-gateway` | edge | IoT protocol bridge | RPi 3+, ESP32-S3 |
+| `dist-security` | firewall | Enterprise NAC + EDR + ZTNA | x86-64, ARM64 |
+| `dist-fleet` | cluster | Fleet / device management + console | x86-64, ARM64, RPi 4/5 |
 
 ### Build Examples
 
@@ -329,8 +420,14 @@ cargo build -p kernel-qemu-pc --features dist-ai
 # Cloud cluster node
 cargo build -p kernel-qemu-pc --features dist-cloud
 
+# Enterprise security appliance (NAC + EDR + ZTNA)
+cargo build -p kernel-qemu-pc --features dist-security
+
+# Fleet management node
+cargo build -p kernel-qemu-pc --features dist-fleet
+
 # Mix-and-match — any combination is valid
-cargo build -p kernel-qemu-pc --features dist-firewall,ai
+cargo build -p kernel-qemu-pc --features dist-firewall,ai,sec-ztna
 ```
 
 ➡️ **Full distribution details:** see Phase 4 in [TODO.md](TODO.md)
