@@ -1,5 +1,5 @@
 <!-- LOGO PLACEHOLDER -->
-[![](./IMG_2008.png){ width="120" }]
+![](./IMG_2008.png){ width="120" }
 <div align="center">
 
 *VeerOS*, **AI-native operating system.**
