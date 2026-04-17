@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="./veeros-logo.png" alt="VeerOS Logo" width="240" />
-<img src="./IMG_2012.jpeg" alt="VeerOS Logo" width="240" />
+<img src="./veeros-logo.png" alt="VeerOS Logo" width="210" />
+<img src="./IMG_2012.jpeg" alt="VeerOS Logo" width="210" />
 
 
-**AI-native operating system.**
+**An AI-native operating system, a sinhle fabric from a single MCU to a planet scale fleet **
 
 *Goals are kernel primitives. Agents are first-class citizens. The browser is obsolete. The OS understands intent.*
 
@@ -25,8 +25,7 @@ VeerOS introduces three new kernel primitives: **Intents** (declarative goals),
 **Agents** (autonomous execution units), and an **Execution Fabric**
 (heterogeneous node topology). Compute, state, security, networking, and
 observability collapse into a single fabric — not layered on after the fact.
-Together, they replace entire cloud stacks — Kubernetes, etcd, Prometheus,
-Airflow — with four syscalls.
+Together, they replace entire cloud stacks — with few syscalls.
 
 > **Try it now:**
 > ```bash
