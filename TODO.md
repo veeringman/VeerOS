@@ -24,6 +24,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [ ] WASM sandbox — portable WebAssembly execution sandbox for lightweight, cross-arch function isolation (Phase 8B)
 - [ ] Function invocation model — `invoke("name.function", payload)` replaces URLs/endpoints; ephemeral, versioned, identity-routed (Phase 20A′)
 - [ ] InterFabric Protocol (IFP) / VeerLink — cross-fabric federation; independent fabrics communicate via trust-bound, identity-driven invocation without shared networks or API gateways (Phase 24)
+- [ ] Fabric Client / VeerUX — next-generation UI replacing the browser; fabric-native composable views, semantic navigation, identity-native auth, adaptive rendering from serial to pixel framebuffer, AI-generated interfaces; eliminates URLs, REST, cookies, JS frameworks (Phase 25)
 
 ## Logical Phase Order (Primitives → Complex)
 _Phases are numbered by historical creation order. Read in this dependency order for logical flow:_
@@ -73,6 +74,9 @@ TIER 9 — Enterprise
 
 TIER 10 — Inter-Fabric Federation
   Phase 24  InterFabric Protocol (IFP) / VeerLink — cross-fabric trust, federated invocation, identity federation — NEW
+
+TIER 11 — User Experience
+  Phase 25  Fabric Client / VeerUX — adaptive rendering, composable views, semantic navigation, AI-native UI, dist-desktop — NEW
 
 CROSS-CUTTING
   Phase 4   Distribution Profiles (feature flags, per-target defaults, component matrix)
@@ -607,6 +611,7 @@ dist-minimal                    (bare scheduler, IPC, VM, driver isolation)
 │   ├── dist-ai                 (+ full AI stack, NL shell, NPU backends)
 │   ├── dist-cluster            (+ cluster membership, distributed sched/IPC/VFS)
 │   │   └── dist-cloud          (+ orchestration, service mesh, API gateway, observability)
+│   ├── dist-desktop            (+ Fabric Client, composable views, pixel rendering, window compositor)
 │   └── dist-full               (all Tier 1 components + priority scheduler)
 ├── dist-rt                     (+ priority real-time scheduler)
 │   └── dist-xrt                (+ accelerator/GPU/FPGA/QPU via UAI)
@@ -635,40 +640,46 @@ dist-minimal                    (bare scheduler, IPC, VM, driver isolation)
 | `dist-cloud` | dist-cluster | orchestration, service mesh, API gateway, ingress, observability, auto-scaling | x86-64 KVM, ARM64 KVM |
 | `dist-firewall` | dist-minimal | packet filter, NAT, VPN, DPI, traffic shaping, firewall rules engine | x86-64, ARM64, RPi 4/5 |
 | `dist-gateway` | dist-edge | Thread border router, Zigbee coordinator, MQTT broker, protocol translation | RPi 3+, ESP32-S3 |
+| `dist-desktop` | dist-app | Fabric Client, composable views, pixel rendering, window compositor, AI-native UI | RPi 4/5 (HDMI), x86-64 (VGA/HDMI) |
 
 ### 4C — Component Composition Matrix
 _Which components ship with each profile. ✓ = included, opt = available on capable hardware, — = not included._
 
 ```
-                 dist-   dist-  dist-  dist-  dist-  dist-  dist-    dist-     dist-    dist-      dist-
-                 minimal app    rt     xrt    full   edge   ai       cluster   cloud    firewall   gateway
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Shell              —      ✓      —      —      ✓      —      ✓        ✓         ✓        ✓          —
-Net (TCP/IP)       —      ✓      —      —      ✓      opt    ✓        ✓         ✓        ✓          ✓
-Userlib            —      ✓      —      —      ✓      —      ✓        ✓         ✓        —          —
-Samples            —      ✓      —      —      ✓      —      ✓        —         —        —          —
-WiFi               —      opt    —      —      opt    ✓      opt      opt       —        —          ✓
-BLE                —      opt    —      —      opt    ✓      opt      —         —        —          ✓
-IEEE 802.15.4      —      opt    —      —      opt    opt    —        —         —        —          ✓
-RT scheduler       —      —      ✓      ✓      ✓      —      —        —         —        —          —
-Accelerator/UAI    —      —      —      ✓      —      —      opt      —         —        —          —
-AI inference       —      —      —      —      —      ✓      ✓        —         opt      —          —
-NL shell           —      —      —      —      —      —      ✓        —         opt      —          —
-NPU/GPU offload    —      —      —      —      —      —      ✓        —         opt      —          —
-Cluster membership —      —      —      —      —      —      —        ✓         ✓        —          —
-Distributed sched  —      —      —      —      —      —      —        ✓         ✓        —          —
-Distributed IPC    —      —      —      —      —      —      —        ✓         ✓        —          —
-Shared VFS         —      —      —      —      —      —      —        ✓         ✓        —          —
-Orchestration      —      —      —      —      —      —      —        —         ✓        —          —
-Service mesh       —      —      —      —      —      —      —        —         ✓        —          —
-Packet filter      —      —      —      —      —      —      —        —         ✓        ✓          ✓
-NAT                —      —      —      —      —      —      —        —         —        ✓          ✓
-VPN (WireGuard)    —      —      —      —      —      —      —        —         —        ✓          —
-DPI / IDS          —      —      —      —      —      —      —        —         —        ✓          —
-Traffic shaping    —      —      —      —      —      —      —        —         —        ✓          —
-Thread / Zigbee    —      —      —      —      —      —      —        —         —        —          ✓
-MQTT broker        —      —      —      —      —      —      —        —         —        —          ✓
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                 dist-   dist-  dist-  dist-  dist-  dist-  dist-    dist-     dist-    dist-      dist-     dist-
+                 minimal app    rt     xrt    full   edge   ai       cluster   cloud    firewall   gateway   desktop
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Shell              —      ✓      —      —      ✓      —      ✓        ✓         ✓        ✓          —         ✓
+Net (TCP/IP)       —      ✓      —      —      ✓      opt    ✓        ✓         ✓        ✓          ✓         ✓
+Userlib            —      ✓      —      —      ✓      —      ✓        ✓         ✓        —          —         ✓
+Samples            —      ✓      —      —      ✓      —      ✓        —         —        —          —         ✓
+WiFi               —      opt    —      —      opt    ✓      opt      opt       —        —          ✓         opt
+BLE                —      opt    —      —      opt    ✓      opt      —         —        —          ✓         opt
+IEEE 802.15.4      —      opt    —      —      opt    opt    —        —         —        —          ✓         —
+RT scheduler       —      —      ✓      ✓      ✓      —      —        —         —        —          —         —
+Accelerator/UAI    —      —      —      ✓      —      —      opt      —         —        —          —         opt
+AI inference       —      —      —      —      —      ✓      ✓        —         opt      —          —         opt
+NL shell           —      —      —      —      —      —      ✓        —         opt      —          —         ✓
+NPU/GPU offload    —      —      —      —      —      —      ✓        —         opt      —          —         opt
+Cluster membership —      —      —      —      —      —      —        ✓         ✓        —          —         —
+Distributed sched  —      —      —      —      —      —      —        ✓         ✓        —          —         —
+Distributed IPC    —      —      —      —      —      —      —        ✓         ✓        —          —         —
+Shared VFS         —      —      —      —      —      —      —        ✓         ✓        —          —         —
+Orchestration      —      —      —      —      —      —      —        —         ✓        —          —         —
+Service mesh       —      —      —      —      —      —      —        —         ✓        —          —         —
+Packet filter      —      —      —      —      —      —      —        —         ✓        ✓          ✓         —
+NAT                —      —      —      —      —      —      —        —         —        ✓          ✓         —
+VPN (WireGuard)    —      —      —      —      —      —      —        —         —        ✓          —         —
+DPI / IDS          —      —      —      —      —      —      —        —         —        ✓          —         —
+Traffic shaping    —      —      —      —      —      —      —        —         —        ✓          —         —
+Thread / Zigbee    —      —      —      —      —      —      —        —         —        —          ✓         —
+MQTT broker        —      —      —      —      —      —      —        —         —        —          ✓         —
+FC Text Views      —      —      —      —      —      —      —        —         —        —          —         ✓
+FC Pixel Render    —      —      —      —      —      —      —        —         —        —          —         ✓
+Window Compositor  —      —      —      —      —      —      —        —         —        —          —         ✓
+CVP Runtime        —      —      —      —      —      —      —        —         —        —          —         ✓
+Semantic Nav       —      —      —      —      —      —      —        —         —        —          —         ✓
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ```
 
 ### 4D — Cross-Domain Mappings
@@ -687,6 +698,7 @@ _How distribution profiles map to security tiers, AI features, network features,
   dist-cloud      → sec-base + sec-sandbox + sec-crypto + sec-crypto-pqc + sec-network + sec-hw + sec-verified
   dist-firewall   → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
   dist-gateway    → sec-base + sec-sandbox + sec-crypto + sec-network + sec-hw
+  dist-desktop    → sec-base + sec-sandbox + sec-crypto + sec-hw + sec-verified
 ```
 
 #### AI Tier Defaults
@@ -702,6 +714,7 @@ _How distribution profiles map to security tiers, AI features, network features,
   dist-cloud      → ai-cloud (optional: cloud inference gateway)
   dist-firewall   → (none, opt-in: ai-assisted DPI)
   dist-gateway    → ai (core: edge anomaly detection)
+  dist-desktop    → ai + ai-npu (optional: NL shell, AI-generated views)
 ```
 
 #### Network Feature Defaults
@@ -717,6 +730,7 @@ _How distribution profiles map to security tiers, AI features, network features,
   dist-cloud      → net + net-firewall + cluster-ipc
   dist-firewall   → net + net-firewall + net-nat + net-vpn + net-dpi + net-shape
   dist-gateway    → net + net-firewall + net-nat
+  dist-desktop    → net + net-fabric (State Fabric subscriptions, invoke() routing)
 ```
 
 #### User Model Defaults
@@ -732,6 +746,7 @@ _How distribution profiles map to security tiers, AI features, network features,
   dist-cloud      → multi-user + RBAC + tenant isolation
   dist-firewall   → single-user (serial admin) or multi-user (SSH admin)
   dist-gateway    → single-user
+  dist-desktop    → multi-user (identity-native auth, per-user view sandboxes)
 ```
 
 ### 4E — Per-Target Platform Defaults
@@ -745,11 +760,11 @@ _Recommended default distribution for each hardware target._
   RP2350 (520 KB SRAM)  → dist-minimal (microcontroller class)
   RPi 3 (1 GB)          → dist-app or dist-cluster
   RPi 4 (4/8 GB)        → dist-ai or dist-cluster (Coral TPU: dist-ai)
-  RPi 5 (8 GB)          → dist-ai (Hailo-8, full AI-OS) or dist-full
+  RPi 5 (8 GB)          → dist-ai (Hailo-8, full AI-OS) or dist-desktop (full UX) or dist-full
   QEMU virt (RISC-V)    → dist-app (development/testing)
   QEMU PC (x86-64)      → dist-full or dist-firewall
   x86-64 KVM            → dist-cloud (production cluster/VM)
-  x86-64 bare-metal     → dist-firewall (network appliance)
+  x86-64 bare-metal     → dist-firewall (network appliance) or dist-desktop (workstation)
   ARM64 KVM             → dist-cloud (production cluster/VM)
   ARM64 bare-metal      → dist-cluster or dist-ai
 ```
@@ -799,27 +814,30 @@ cargo build -p kernel-qemu-pc   --features dist-ai                              
 cargo build -p kernel-qemu-pc   --features dist-cluster                         # distributed OS node
 cargo build -p kernel-qemu-pc   --features dist-cloud                           # cloud platform
 cargo build -p kernel-qemu-pc   --features dist-firewall                        # network appliance
+cargo build -p kernel-qemu-pc   --features dist-desktop                         # Fabric Client workstation
+cargo build -p kernel-raspi5    --features dist-desktop                         # RPi5 UX station
 cargo build -p kernel-xiao-esp32c6 --features dist-gateway,wifi,ieee802154      # IoT gateway
 
 # Mix-and-match (any combination valid)
 cargo build -p kernel-qemu-pc   --features dist-minimal,shell                   # minimal + shell only
 cargo build -p kernel-qemu-pc   --features dist-firewall,ai                     # firewall + AI-assisted DPI
+cargo build -p kernel-qemu-pc   --features dist-desktop,ai                      # desktop + AI-generated views
 cargo build -p kernel-qemu-pc   --features dist-cluster,accel                   # cluster + accelerator
 ```
 
 ### 4I — Distribution Implementation Tasks (Planned)
 
 #### Crate + Feature Gate Updates
-- [ ] **`distributions/src/lib.rs` expansion** — add `Distribution::Edge`, `Ai`, `Cluster`, `Cloud`, `Firewall`, `Gateway`, `ExtendedRealTime` variants; update `active_distribution()` priority chain
-- [ ] **Feature composition rules** — profiles are additive: `dist-cloud` = `dist-cluster` + `cloud-orchestrate` + `cloud-mesh` + `cloud-observe`; validate at compile time
-- [ ] **Cross-feature dependency validation** — `dist-cloud` requires `dist-cluster`; `dist-gateway` requires `dist-edge`; `dist-xrt` requires `dist-rt` + `accel`; compile-time errors on invalid combos
+- [ ] **`distributions/src/lib.rs` expansion** — add `Distribution::Edge`, `Ai`, `Cluster`, `Cloud`, `Firewall`, `Gateway`, `ExtendedRealTime`, `Desktop` variants; update `active_distribution()` priority chain
+- [ ] **Feature composition rules** — profiles are additive: `dist-cloud` = `dist-cluster` + `cloud-orchestrate` + `cloud-mesh` + `cloud-observe`; `dist-desktop` = `dist-app` + `fc-views` + `fc-render` + `fc-compositor` + `fc-nav`; validate at compile time
+- [ ] **Cross-feature dependency validation** — `dist-cloud` requires `dist-cluster`; `dist-gateway` requires `dist-edge`; `dist-xrt` requires `dist-rt` + `accel`; `dist-desktop` requires `dist-app` + framebuffer driver; compile-time errors on invalid combos
 - [ ] **Build flag matrix** — `distributions/src/lib.rs` updated with new feature gates; CI matrix covers at least dist-minimal, dist-app, dist-full, dist-firewall, dist-cloud per target
 
 #### Per-Kernel Wiring
 - [ ] **kernel-qemu-virt** — wire new profiles: `dist-edge` (AI + sensor tasks), `dist-cluster` (cluster membership task)
-- [ ] **kernel-qemu-pc** — wire all profiles: primary target for dist-ai, dist-cloud, dist-firewall, dist-cluster
+- [ ] **kernel-qemu-pc** — wire all profiles: primary target for dist-ai, dist-cloud, dist-firewall, dist-cluster, dist-desktop
 - [ ] **kernel-xiao-esp32c6** — wire `dist-edge` (default for ESP32 AI nodes), `dist-gateway` (Thread/Zigbee + MQTT)
-- [ ] **kernel-raspi5** — wire `dist-ai` (NPU + Hailo), `dist-cluster` (distributed node), `dist-full`
+- [ ] **kernel-raspi5** — wire `dist-ai` (NPU + Hailo), `dist-cluster` (distributed node), `dist-desktop` (HDMI UX), `dist-full`
 
 #### Profile-Specific Components (cross-references)
 - [ ] **dist-edge components** — see Phase 10 (AI inference), Phase Z5–Z6 (802.15.4 + Thread + Matter)
@@ -829,6 +847,7 @@ cargo build -p kernel-qemu-pc   --features dist-cluster,accel                   
 - [ ] **dist-firewall components** — see Phase 13 (packet filter, NAT, routing, VPN, DPI, traffic shaping)
 - [ ] **dist-gateway components** — see Phase Z5–Z6 (Thread border router, Zigbee coordinator) + MQTT broker
 - [ ] **dist-xrt components** — see Phase 8K (UAI: accelerator registry, submit/poll/cancel, FPGA bitstream, QPU circuits)
+- [ ] **dist-desktop components** — see Phase 25 (Fabric Client: composable views, semantic nav, pixel render, window compositor, CVP runtime, AI-native UI, multi-device continuity)
 
 ## Phase 7 — Multi-Architecture Targets
 
@@ -3162,6 +3181,349 @@ Cross-org observability stitching    → Federation trace context propagation
 Trust management / PKI overhead      → Federation handshake + trust contracts
 
 Result: Inter-org communication without API gateways, VPNs, or shared networks.
+```
+
+---
+
+## Phase 25 — Fabric Client / VeerUX (Next-Generation User Interface)
+_The browser is dead. VeerOS replaces it with a fabric-native runtime that binds directly to `invoke()`, State Fabric, and identity — no URLs, no REST, no cookies, no origin policy. The Fabric Client is simultaneously an OS shell, application runtime, and composable UI surface. It renders adaptively from serial ASCII to rich pixel framebuffer based on device capabilities. Feature-gated: `fabric-client` (core runtime), `fc-views` (composable views), `fc-render` (pixel rendering), `fc-remote` (remote Fabric Client protocol)._
+
+_Product naming: **VeerUX** (user-facing brand), **Fabric Client** (architecture term), **FC** (code prefix)._
+
+### Why the Browser Dies in VeerOS
+
+The traditional browser exists because the web is built on URLs, HTTP servers, and document fetching. In VeerOS + ZeroServices + State Fabric, **none of those primitives exist**:
+
+```
+Browser World (HTTP era)              VeerOS World (Fabric era)
+────────────────────────              ────────────────────────
+HTML pages                         →  Composable Views bound to functions + state
+URLs (https://app.com/dashboard)   →  view("dashboard", { data: invoke("analytics.summary") })
+REST APIs / fetch()                →  invoke("service.function", payload)
+Cookies / JWT / Sessions           →  Identity-native (hardware-backed keys, capability tokens)
+Request/response polling           →  subscribe("alerts.stream") — real-time by default
+Same-origin policy / CORS          →  Capability-based access — security moves to runtime
+Download JS bundle from server     →  Install signed View Package (verified, sandboxed, local)
+Address bar / hyperlinks           →  navigate("workspace.analytics") — semantic, not location-based
+WebSocket hacks                    →  State Fabric subscriptions — live by design
+PWA offline bolt-on                →  Offline-first by design (CRDT sync, local state cache)
+```
+
+**Result**: Entire classes of web attacks (XSS, CSRF, clickjacking, supply-chain JS attacks) **disappear** because there are no origins, no cookies, no injected scripts, no ambient authority, and no untrusted code execution.
+
+### 25A — Fabric Client Architecture
+_The layered architecture of the Fabric Client — from identity to pixels._
+
+#### Layer 1 — Identity Layer (Built-in, Zero-Config)
+- [ ] **Device + user identity** — hardware-backed Ed25519 + ML-DSA keypair (Phase 8C); no login forms for already-authenticated users; biometric/PIN unlock for screen resume
+- [ ] **Session binding** — Fabric Client session cryptographically bound to (user_id, device_id, node_id); non-transferable; hardware attestation on capable devices (TPM, eFuse, Secure Enclave)
+- [ ] **Identity cache** — authenticated identity persists across view navigations; no per-view re-auth (unlike web's per-origin cookie model); re-auth only on explicit privilege escalation
+- [ ] **Multi-identity support** — switch between user identities without restart; each identity has separate capability set, view history, and state subscriptions
+
+#### Layer 2 — Invocation Engine (replaces HTTP/fetch)
+- [ ] **`fc_invoke(name, payload)` API** — view code calls fabric functions directly; kernel routes to local process, remote node, or WASM sandbox (Phase 20A′); no fetch(), no XMLHttpRequest, no REST
+- [ ] **Streaming invocations** — `fc_invoke_stream("llm.generate", prompt)` returns a channel of tokens; view updates incrementally as tokens arrive; native streaming replaces SSE/WebSocket hacks
+- [ ] **Batch invocations** — `fc_invoke_batch([("user.profile", {}), ("user.notifications", {})])` — parallel fan-out; view receives all results atomically; replaces Promise.all() over HTTP
+- [ ] **Invocation caching** — Fabric Client caches idempotent invocation results locally; cache key = (function_name, payload_hash, version); TTL per function; stale-while-revalidate pattern
+- [ ] **Error propagation** — invocation errors carry structured metadata: `{ code, function, node, retry_after, fallback_result }` — views handle gracefully without generic "500 Internal Server Error"
+
+#### Layer 3 — State Sync Engine (replaces polling/WebSockets)
+- [ ] **`fc_subscribe(key_pattern)` API** — view subscribes to State Fabric keys (Phase 21); updates pushed to view in real-time via kernel event bus; no polling, no WebSocket setup
+- [ ] **Reactive bindings** — state changes automatically trigger view re-render of affected components; fine-grained: only components bound to changed keys re-render (not entire view tree)
+- [ ] **Offline state cache** — subscribed state cached locally in persistent memory (Phase 14C); views render from cache when fabric is unreachable; CRDT merge (Phase 21B) on reconnection
+- [ ] **Optimistic updates** — view applies state change locally immediately, syncs to fabric asynchronously; rollback on conflict; configurable per-key (optimistic vs pessimistic)
+- [ ] **State windowing** — for large datasets, subscribe to a window: `fc_subscribe("logs.*", { limit: 100, offset: "latest" })` — server-side filtering reduces bandwidth
+
+#### Layer 4 — View Runtime (replaces browser rendering engine)
+- [ ] **Adaptive rendering engine** — same view definition renders differently based on output device:
+  - **Serial/SSH** (80×25 text): ASCII art, box-drawing characters, ANSI colors, text tables
+  - **VGA text mode** (80×25/132×50): enhanced text with colors, cursor, simple widgets
+  - **Framebuffer** (640×480+ pixel): bitmap font rendering, rectangles, lines, basic widgets, images
+  - **Remote FC client** (arbitrary): full resolution rendering on connected display device
+- [ ] **Component model** — views composed of typed components: `Text`, `Table`, `List`, `Input`, `Button`, `Chart`, `Gauge`, `Image`, `Container`, `Grid`, `Tabs`, `Modal`
+- [ ] **Layout engine** — flexbox-inspired layout: `Row`, `Column`, `Stack`, `Grid`, `Scroll`; components specify `min_size`, `max_size`, `grow`, `shrink`, `align`; layout computed per render target's dimensions
+- [ ] **Styling** — per-component style: `{ fg, bg, bold, italic, underline, border, padding, margin }` — maps to ANSI codes (text) or pixel drawing (framebuffer); theme system with presets
+- [ ] **Event propagation** — input events (key press, mouse click, touch, scroll) bubble through component tree; components declare `on_key`, `on_click`, `on_submit` handlers
+- [ ] **View lifecycle** — `mount() → render() → update(state_change) → unmount()`; components are stateless functions of (props + fabric state); side effects only via invocations
+- [ ] **`no_std` + `no_alloc` rendering** — view tree and layout computed in fixed-size arenas; suitable for ESP32 (text-only) through x86-64 (full pixel rendering); configurable arena sizes per target
+
+#### Layer 5 — Policy Sandbox (replaces same-origin policy)
+- [ ] **Per-view capability restriction** — each view runs with a subset of the user's capabilities; declared in View Package manifest: `{ requires: ["invoke:analytics.*", "state:read:dashboard.*"], denies: ["invoke:admin.*"] }`
+- [ ] **Invocation allowlist** — view can only `fc_invoke()` functions listed in its manifest; attempts to invoke unlisted functions return `EPERM`; kernel enforces, not runtime
+- [ ] **State access control** — view's `fc_subscribe()` and `fc_state_get()` restricted to declared key patterns; prevents data exfiltration across views
+- [ ] **Input sanitization** — all user input from view components validated by kernel before passing to invocation payload; prevents injection attacks at the boundary
+- [ ] **View isolation** — views from different packages run in separate capability domains (Phase 8B); no ambient cross-view data access; explicit capability grants for inter-view communication
+- [ ] **Resource limits** — per-view: max memory (arena size), max concurrent invocations, max subscriptions, max render rate; prevents single view from starving the system
+
+### 25B — Semantic Navigation (replaces URLs)
+_Navigation is by intent and identity, not by location. No address bar. No links. No 404._
+
+- [ ] **`navigate(target, params)` API** — `navigate("workspace.analytics")`, `navigate("user.profile", {id: 123})`, `navigate("settings.network.wifi")` — semantic, hierarchical, human-readable
+- [ ] **Navigation registry** — views register navigation targets at install time: `register_nav("dashboard.main", view_fn, { icon: "grid", label: "Dashboard" })`; discovered by shell `nav list` and launcher
+- [ ] **Deep navigation** — `navigate("device.node.raspi5.processes")` — navigate across fabric nodes; Fabric Client routes to remote node transparently; displays remote view locally
+- [ ] **Back/forward history** — navigation stack maintained per-session; `nav back`, `nav forward`, `nav history`; stack persists across view switches (not page loads — views are instant)
+- [ ] **Navigation intent resolution** — ambiguous targets resolved by AI: `navigate("show me the network")` → AI intent classifier (Phase 10I) maps to `navigate("dashboard.network.overview")`; confirmation prompt
+- [ ] **Breadcrumb trail** — current navigation path displayed: `Home > Workspace > Analytics > Revenue`; each segment clickable/navigable
+- [ ] **Favorites / pinned views** — `nav pin "dashboard.main"` — quick access to frequently used views; stored in user's persistent memory
+- [ ] **Cross-fabric navigation** — `navigate("fabric://partner.analytics.eu/dashboard.summary")` — federated view access via InterFabric (Phase 24); identity-scoped, policy-checked at boundary
+- [ ] **No 404** — navigation targets are registered or unregistered; unregistered targets return `NavigationError::NotFound { suggestions: [similar_targets] }` with AI-powered suggestions
+
+### 25C — Composable View Packages (CVP)
+_The replacement for web apps. Signed, versioned, sandboxed, locally-executed modules that combine data binding + rendering + interaction._
+
+#### Package Format
+- [ ] **View Package structure** — `{ manifest.toml, view.wasm|view.elf, assets/, theme.toml }` — single archive (.cvp file), content-addressed (SHA-256 hash = package ID)
+- [ ] **Manifest format** — TOML manifest declaring:
+  ```toml
+  [package]
+  name = "analytics-dashboard"
+  version = "2.1.0"
+  author = "fabric://veer.prod.india"
+  description = "Real-time analytics dashboard"
+  min_render_level = "text"  # text | framebuffer | remote
+  
+  [capabilities]
+  invoke = ["analytics.*", "user.getProfile"]
+  state_read = ["analytics.metrics.*", "user.preferences"]
+  state_write = ["user.preferences.dashboard"]
+  
+  [navigation]
+  targets = [
+    { path = "dashboard.analytics", label = "Analytics", icon = "chart" },
+    { path = "dashboard.analytics.detail", label = "Detail View" }
+  ]
+  
+  [resources]
+  max_memory_kb = 256
+  max_subscriptions = 32
+  max_concurrent_invocations = 8
+  ```
+- [ ] **Package signing** — Ed25519 + ML-DSA hybrid signature (Phase 8C) over package hash; signer = author's fabric identity; kernel verifies before installation
+- [ ] **Package verification chain** — optional: multi-signer (author + auditor + fleet admin); configurable trust policy per fleet: `{ require_author: true, require_auditor: false }`
+
+#### Package Lifecycle
+- [ ] **`SYS_VIEW_INSTALL` (0xC0)** — install a CVP: verify signature → check capability budget → register navigation targets → store in VFS `/views/<name>/` → return view handle
+- [ ] **`SYS_VIEW_UNINSTALL` (0xC1)** — remove CVP: deregister navigation targets → revoke capabilities → clean storage → notify active instances to unmount
+- [ ] **`SYS_VIEW_LIST` (0xC2)** — list installed view packages with metadata (name, version, signer, installed_at, last_used)
+- [ ] **`SYS_VIEW_LAUNCH` (0xC3)** — instantiate a view: load WASM/ELF → create view domain (Phase 8B sandbox) → bind capabilities → call mount() → begin rendering
+- [ ] **`SYS_VIEW_NAVIGATE` (0xC4)** — navigate to a registered target; kernel resolves → launches/switches view → passes params
+- [ ] **`SYS_VIEW_SUBSCRIBE` (0xC5)** — subscribe to state fabric key(s) for reactive updates
+- [ ] **`SYS_VIEW_INVOKE` (0xC6)** — capability-checked fabric invocation from within a view
+- [ ] **Version management** — multiple versions coexist; `navigate("dashboard@v2")` for explicit; canary traffic splitting between versions
+- [ ] **Auto-update** — views declare update channel; Fabric Client checks for updates via fabric gossip; auto-install + atomic switch (old version kept as rollback)
+- [ ] **Over-the-fabric distribution** — `view publish "analytics-dashboard.cvp"` → package distributed to fabric nodes via gossip; fleet-wide deployment without a package server
+
+#### View Execution Models
+- [ ] **WASM views** — view logic compiled to WASM (Phase 8B sandbox); polyglot: Rust, C, Go, AssemblyScript → WASM → CVP; most portable, most isolated
+- [ ] **Native views** — view logic compiled to native ELF per-arch; used for system views (settings, diagnostics) that need direct kernel access; capability-restricted
+- [ ] **Hybrid views** — native frame with embedded WASM components; system chrome (title bar, nav) is native; content area runs sandboxed WASM view
+- [ ] **Shell-integrated views** — special views that enhance shell commands: `ls --view` renders file listing as an interactive tree (framebuffer) or formatted table (text); progressive enhancement
+
+### 25D — Progressive Rendering Tiers
+_One view definition, multiple rendering fidelities. The Fabric Client adapts to the display device._
+
+#### Tier 0 — Serial / SSH (Minimum Viable Display)
+- [ ] **ASCII renderer** — component tree → ANSI escape codes; box drawing (┌─┐│└─┘), colors (16 + 256-color), cursor positioning; 80×25 minimum
+- [ ] **Text table renderer** — `Table` component → aligned columns with header, separator, row data; auto-column-width
+- [ ] **Text gauge / progress** — `Gauge` component → `[████████░░] 75%`; `Spinner` → rotating `|/-\`; `Sparkline` → `▁▂▃▅▇▅▃▂`
+- [ ] **Text chart** — `Chart` component → ASCII bar chart, mini line chart using braille characters (⠁⠂⠄⡀⢀)
+- [ ] **Input widgets** — `Input` → readline-style with label; `Select` → arrow-key selection from list; `Checkbox` → `[x]` toggle; `RadioGroup`
+- [ ] **Responsive text layout** — detect terminal size via ANSI `\e[18t` query or `stty`; reflow layout on resize; min-width graceful degradation
+- [ ] **Mouse support (optional)** — xterm mouse reporting (`\e[?1000h`) for click-to-interact on capable terminals; fallback to keyboard-only
+
+#### Tier 1 — VGA/Framebuffer Text Mode
+- [ ] **Enhanced text rendering** — hardware cursor, full 256-color support, bold/blink attributes, larger terminal (132×50 possible)
+- [ ] **Pseudographics** — enhanced box drawing with double-line characters, simple window chrome, shadow effects
+- [ ] **Split pane layout** — divide screen into resizable panes; run multiple views simultaneously (tmux-like)
+
+#### Tier 2 — Pixel Framebuffer (HDMI / LCD)
+- [ ] **Bitmap font rendering** — scalable bitmap fonts (8×16, 12×24, 16×32); anti-aliased rendering on 32bpp framebuffer; Unicode glyph support (Basic Latin + common symbols)
+- [ ] **Geometric primitives** — lines, rectangles, circles, filled/outlined; rounded corners; alpha blending on 32bpp
+- [ ] **Widget rendering** — pixel-perfect buttons, scroll bars, input fields, dropdown menus, tabs, tree views; themed via `theme.toml`
+- [ ] **Image support** — decode and display BMP/PNG images (TinyBMP, minipng decoders); photo thumbnails, icons, logos; scaled to widget bounds
+- [ ] **Double buffering** — off-screen buffer → atomic flip/copy to visible framebuffer; tear-free rendering; dirty-region optimization (redraw only changed areas)
+- [ ] **Window compositor (simple)** — multiple overlapping view windows with z-order; title bar + close/minimize; drag to move; not a full WM — just composited rectangles
+- [ ] **Hardware cursor** — mouse cursor rendered separately from framebuffer on capable hardware; zero-latency pointer movement
+
+#### Tier 3 — Remote Fabric Client
+- [ ] **FC Remote Protocol** — binary protocol for transmitting view component trees and state deltas to a remote rich client; component-level diffing (not pixel streaming)
+- [ ] **Component serialization** — view tree → compact binary representation → encrypted fabric channel → remote client renders natively using platform UI toolkit
+- [ ] **Thin client mode** — remote client renders VeerOS views using native platform widgets (macOS Cocoa, Windows WPF, GTK, web/Canvas); VeerOS sends semantics, client renders pixels
+- [ ] **Adaptive quality** — degrade rendering fidelity over high-latency/low-bandwidth links: reduce update rate, batch state changes, drop non-essential components
+- [ ] **Screen sharing** — `view share <session_id>` — another user can observe (read-only) or collaborate (interactive) on the same view; cursor positions shared in real-time
+
+### 25E — Device-Adaptive UI
+_The Fabric Client detects capabilities and adapts the experience accordingly._
+
+- [ ] **Capability probing** — at init, Fabric Client probes: display type (none/serial/VGA/framebuffer/remote), resolution, color depth, input devices (keyboard/mouse/touch/voice/BLE HID), locale, accessibility needs
+- [ ] **Render tier selection** — auto-select optimal rendering tier based on probed capabilities: serial → Tier 0, VGA → Tier 1, framebuffer → Tier 2, remote client → Tier 3
+- [ ] **Input adaptation** — views respond to available input: keyboard-only (arrow keys + enter), keyboard+mouse (click + scroll), touch (swipe + tap + pinch), voice ("select item 3"), BLE HID gamepad
+- [ ] **Resolution-responsive layout** — views re-layout when resolution changes (window resize, display switch, `attach` to different node); components reflow, overflow → scroll
+- [ ] **Locale-aware rendering** — date/time format, number format, text direction (LTR/RTL stubs), timezone; stored in user preferences (State Fabric)
+- [ ] **Accessibility** — high-contrast mode (auto-detect or user preference), large text mode (2x font scale), screen reader support (component tree → text description for TTS, Phase 10L), keyboard-navigable with visible focus indicators
+
+### 25F — Multi-Device Continuity
+_A view started on one device can be continued on another. The fabric makes the UI location-independent._
+
+- [ ] **View session persistence** — active view's state (navigation path, input values, scroll position, subscriptions) stored in State Fabric under user's identity
+- [ ] **`view push <node>`** — transfer active view to another device's display: `view push raspi5` moves the dashboard from ESP32 serial to RPi5 HDMI; re-renders at target's tier
+- [ ] **`view pull <node>`** — pull a view from remote device to local display; the remote device shows "view transferred to <node>"
+- [ ] **Seamless handoff** — view state synced via State Fabric; target device re-subscribes to same state keys; no data loss during transfer; < 1s transition
+- [ ] **Multi-display** — single user uses multiple displays simultaneously: ESP32 serial for status, RPi5 HDMI for dashboard, laptop remote FC for management; each display shows different views but same identity
+- [ ] **Follow-me views** — mark a view as "follow": it automatically appears on the closest device to the user (requires location context from BLE beacons or proximity sensing)
+
+### 25G — Shell → View Continuum
+_The shell is the simplest view. Views are the richest shell. There is no hard boundary._
+
+- [ ] **Shell as Tier 0 Fabric Client** — the existing VeerOS shell (Phase 3) IS the Fabric Client running in text-only mode; `invoke()` maps to shell callbacks; state subscriptions map to `watch` commands
+- [ ] **`--view` flag on shell commands** — `ps --view` renders process list as an interactive table (sortable columns, highlight selected, kill on enter); `top --view` renders as auto-refreshing dashboard with gauges
+- [ ] **`view` shell command** — `view <target>` navigates to a view: `view dashboard`, `view status.network`, `view settings.wifi`; if no framebuffer, renders as text TUI
+- [ ] **`view list`** — show installed view packages; `view install <path|url>`; `view uninstall <name>`; `view update <name>`
+- [ ] **Shell widgets** — interactive shell components for common patterns: `select "Choose network:" [WiFi1 WiFi2 WiFi3]` → returns selection; `confirm "Delete file?"` → returns bool; `progress "Updating..." 0.75`
+- [ ] **View → shell fallback** — if a view requires framebuffer but only serial is available, gracefully degrade: render key information as text, warn about reduced fidelity
+- [ ] **Inline view embedding** — shell command output can embed mini-views: `sysinfo` shows a brief text dashboard; `netstat --view` shows live-updating connection table
+
+### 25H — AI-Native UI
+_Views can be generated, modified, and operated by AI. Natural language produces visual results._
+
+- [ ] **NL → View generation** — `"show me a dashboard of network traffic"` → AI (Phase 10I) generates a view definition with: Table of connections, traffic gauge, line chart of throughput; renders immediately
+- [ ] **AI view assistance** — `"add a filter for high-latency connections"` while viewing a dashboard → AI modifies the active view: adds input component, subscribes to filtered state key, re-renders
+- [ ] **Conversational view building** — multi-turn: `"show processes"` → table view → `"sort by memory"` → re-sorted → `"highlight anything over 100MB"` → conditional styling applied → `"save this as my-process-view"` → persisted as CVP
+- [ ] **Smart defaults** — AI pre-selects sensible components based on data type: timestamps → timeline chart, proportions → pie/donut gauge, categories → bar chart, metrics → sparkline
+- [ ] **Intent-driven UI** — `intent submit "create a monitoring dashboard for the sensor fleet"` → intent engine (Phase 14B) decomposes: identify metrics → create state subscriptions → generate view → deploy as CVP → navigate to it
+- [ ] **AI accessibility** — voice-operated view navigation for hands-free operation: `"go to the network dashboard"` → navigate; `"read the error count"` → TTS reads value; `"acknowledge all alerts"` → invokes action
+
+### 25I — Built-in System Views
+_Views that ship with VeerOS — the "system apps" that replace traditional system utilities._
+
+- [ ] **Dashboard view** — system overview: CPU/memory gauges, task count, uptime, network status, fabric health; auto-refresh; adapts from text sparklines (serial) to graphical gauges (framebuffer)
+- [ ] **Process manager view** — interactive `top`-equivalent: sortable columns (PID, name, CPU%, MEM, state), real-time update via state subscription, kill/suspend actions, process detail drill-down
+- [ ] **Network monitor view** — interface list, traffic graphs, active connections, firewall rules, DNS cache; live sparklines per interface
+- [ ] **Fabric explorer view** — cluster visualization: node list with health/load/capabilities, topology graph (text: tree layout; pixel: force-directed graph), agent migration flows
+- [ ] **File browser view** — tree navigation of VFS; file preview (text files rendered, hex for binary); mkdir, rename, delete actions; drag-and-drop on capable displays
+- [ ] **Log viewer view** — structured event browser (Phase 19E): filterable by type/level/node/time; auto-scroll with pause; regex search; export
+- [ ] **Settings view** — system configuration: network (WiFi/Ethernet), security (firewall rules, user management), display (theme, font size), AI (model selection, cloud API keys)
+- [ ] **Security dashboard view** — audit log browser, threat score gauges, EDR alerts (Phase 16B), ZTNA session list, compliance status
+- [ ] **Device fleet view** — MDM dashboard (Phase 17): device list, compliance status, firmware versions, staged update progress, health map
+- [ ] **Intent tracker view** — active intents with plan step visualization (DAG), agent states, execution progress; drill-down to individual agent context
+
+### 25J — Fabric Client Developer Experience
+_Tools and APIs for building views._
+
+- [ ] **View SDK** — `veeros-view` crate: component constructors (`Text::new("hello")`, `Table::new(headers, rows)`, `Gauge::new(0.75)`), layout helpers (`Row::new([...])`, `Column::new([...])`), event handlers, state bindings
+- [ ] **View template macro** — `view!` declarative macro:
+  ```rust
+  view! {
+    Column {
+      Text { "System Dashboard" style: bold }
+      Row {
+        Gauge { value: state("cpu.load"), label: "CPU" }
+        Gauge { value: state("mem.used_pct"), label: "Memory" }
+      }
+      Table {
+        headers: ["PID", "Name", "CPU%", "State"]
+        rows: invoke("os.process_list")
+        on_select: |row| navigate("process.detail", { pid: row.pid })
+      }
+    }
+  }
+  ```
+- [ ] **Hot reload** — during development, change view source → recompile WASM → FC detects new version → hot-swap without losing state subscriptions; < 500ms cycle
+- [ ] **View testing framework** — `veeros-view-test` crate: mock fabric state, simulate input events, assert rendered output (snapshot testing for each render tier)
+- [ ] **Component library** — reusable component collection: `DataTable`, `TimeSeriesChart`, `NetworkGraph`, `TreeView`, `Terminal`, `CodeEditor`, `MarkdownRenderer`, `JsonViewer`
+- [ ] **Theme system** — `theme.toml` files; built-in themes: `midnight` (dark), `daylight` (light), `hacker` (green-on-black), `solarized`; user-selectable via settings view
+- [ ] **View debugger** — `view debug` overlays component boundaries, shows state bindings, event flow, render timing; serial and framebuffer modes
+
+### 25K — What the Fabric Client Eliminates
+
+```
+Traditional Stack                     → VeerOS Fabric Client / VeerUX
+─────────────────────────────────────────────────────────────────────────
+Web browser (Chrome, Firefox)         → Fabric Client runtime (kernel-native)
+HTML/CSS/JS rendering engine          → Adaptive component renderer (text → pixel)
+URLs / DNS resolution                 → Semantic navigation (navigate("target"))
+HTTP/REST/GraphQL APIs                → invoke("function", payload)
+Cookies / JWT / OAuth tokens          → Identity-native (hardware-backed keys)
+WebSockets / SSE / polling            → State Fabric subscriptions (real-time default)
+Same-origin policy / CORS             → Capability-based view sandboxing
+npm / CDN / JS bundle download        → Signed View Packages (local, verified)
+React / Vue / Angular frameworks      → Composable View SDK (no_std, no_alloc)
+Electron / Tauri desktop wrappers     → Native pixel rendering (framebuffer)
+Chrome DevTools / React DevTools      → view debug overlay + component inspector
+App Store / Play Store                → Over-the-fabric package distribution
+Progressive Web Apps (PWA)            → Offline-first by design (CRDT state cache)
+Web accessibility tools               → Built-in accessibility (screen reader, high-contrast)
+Responsive web design                 → Device-adaptive rendering (serial → pixel)
+
+Security attacks eliminated:
+  XSS (cross-site scripting)          → No script injection (views are compiled WASM)
+  CSRF (cross-site request forgery)   → No cookies/sessions to forge
+  Clickjacking                        → No iframes, no embed
+  Supply-chain JS attacks             → Signed packages with verified author identity
+  Cookie theft / session hijacking    → Hardware-bound identity tokens
+  Man-in-the-browser                  → No browser extension model
+  DOM-based injection                 → No DOM; typed component tree
+```
+
+### 25L — Distribution Profile Integration
+
+- [ ] **`fc-text` feature** — Tier 0 text-mode Fabric Client (serial/SSH/VGA); included in `dist-app`, `dist-full`, `dist-ai`, `dist-cluster`, `dist-cloud`, `dist-firewall`
+- [ ] **`fc-views` feature** — Composable View Package runtime; included in `dist-full`, `dist-desktop`, `dist-ai`
+- [ ] **`fc-render` feature** — Tier 2 pixel framebuffer rendering; included in `dist-desktop`, `dist-ai` (on capable hardware)
+- [ ] **`fc-remote` feature** — Tier 3 remote Fabric Client protocol; included in `dist-desktop`, `dist-cloud`
+- [ ] **`dist-desktop` profile (NEW)** — full desktop/workstation distribution: `dist-full` + `fc-views` + `fc-render` + `fc-remote` + `ai-nlp`; targets RPi 4/5 (HDMI), x86-64 (VGA/HDMI); adds window compositor, system views, theme engine
+
+```
+                 dist-   dist-  dist-  dist-  dist-  dist-  dist-    dist-     dist-    dist-      dist-       dist-
+                 minimal app    rt     xrt    full   edge   ai       cluster   cloud    firewall   gateway     desktop
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+FC Text (Tier 0)   —      ✓      —      —      ✓      —      ✓        ✓         ✓        ✓          —           ✓
+FC Views (CVP)     —      —      —      —      ✓      —      ✓        —         —        —          —           ✓
+FC Render (Pixel)  —      —      —      —      —      —      opt      —         —        —          —           ✓
+FC Remote (T3)     —      —      —      —      —      —      opt      —         ✓        —          —           ✓
+System Views       —      —      —      —      ✓      —      ✓        ✓         ✓        ✓          —           ✓
+Window Compositor  —      —      —      —      —      —      —        —         —        —          —           ✓
+Theme Engine       —      —      —      —      ✓      —      ✓        —         —        —          —           ✓
+View Packages      —      —      —      —      ✓      —      ✓        —         —        —          —           ✓
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+### 25M — Per-Target UI Capabilities
+_What UI surface each hardware target supports._
+
+```
+  ESP32-C3 (400 KB)     →  Tier 0 only (serial text), no views, no render
+  ESP32-C6 (512 KB)     →  Tier 0 (serial text), optional SPI LCD (Tier 2 limited: 240×320)
+  ESP32-S3 (512 KB+)    →  Tier 0 (serial), Tier 2 (SPI LCD via LCD_CAM: 320×480); touch input
+  RPi Zero 2 W (512 MB) →  Tier 0 (serial), Tier 2 (HDMI framebuffer: 1280×720); limited views
+  RPi 3 (1 GB)          →  Tier 0–2 (HDMI 1080p); basic system views; keyboard+mouse via USB
+  RPi 4 (4/8 GB)        →  Tier 0–3 (dual HDMI 4K); full views + remote FC; compositor candidate
+  RPi 5 (8 GB)          →  Tier 0–3 (dual HDMI 4K); full desktop profile; AI-generated views
+  QEMU virt (RISC-V)    →  Tier 0 (serial); Tier 2 (virtio-gpu future); development/testing
+  QEMU PC (x86-64)      →  Tier 0 (serial+VGA), Tier 1 (VGA text), Tier 2 (VGA framebuffer)
+  x86-64 bare-metal     →  Tier 0–3 (VGA/HDMI/DisplayPort); full desktop; compositor; multi-monitor
+```
+
+### 25N — Fabric Client Roadmap Integration
+
+```
+TIER 0–10 (existing tiers as documented above)
+
+TIER 11 — User Experience
+  Phase 25  Fabric Client / VeerUX — adaptive rendering, composable views, semantic navigation, AI-native UI — NEW
+```
+
+#### Phase Dependencies
+```
+Phase 25A (Identity Layer)      ← Phase 6I (User Identity), Phase 8C (Crypto), Phase 15B (Node Identity)
+Phase 25A (Invocation Engine)   ← Phase 20A′ (Function Invocation), Phase 20 (ZeroServices)
+Phase 25A (State Sync Engine)   ← Phase 21 (State Fabric), Phase 21B (CRDTs)
+Phase 25A (View Runtime)        ← Phase 6J (VFS for view storage), Phase 7D (HID Input), existing Framebuffer Console
+Phase 25A (Policy Sandbox)      ← Phase 8A (Capabilities), Phase 8B (Isolation Domains), Phase 8B WASM Sandbox
+Phase 25C (View Packages)       ← Phase 8B (WASM Sandbox), Phase 8D (Secure Boot / Package Signing)
+Phase 25F (Multi-Device)        ← Phase 21 (State Fabric), Phase 19A (Cross-Node Shell)
+Phase 25H (AI-Native UI)        ← Phase 10I (NL Shell), Phase 14B (Intent Engine), Phase 10L (Voice)
+Phase 25L (dist-desktop)        ← Phase 4 (Distribution Profiles), Phase 7D (USB HID), RPi5 framebuffer
 ```
 
 ---
