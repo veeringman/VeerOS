@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./IMG_2008.png" alt="VeerOS Logo" width="280" />
+<img src="veeros-logo.png" alt="VeerOS Logo" width="280" />
 
 # VeerOS
 
