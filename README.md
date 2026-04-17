@@ -4,7 +4,7 @@
 <img src="./IMG_2012.jpeg" alt="VeerOS Logo" width="210" />
 
 
-**An AI-native operating system, a sinhle fabric from a single MCU to a planet scale fleet **
+**An AI-native operating system - a single fabric for a single MCU to a planet scale fleet**
 
 *Goals are kernel primitives. Agents are first-class citizens. The browser is obsolete. The OS understands intent.*
 
