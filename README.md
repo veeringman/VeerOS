@@ -8,7 +8,7 @@
 
 **The world's first AI-native operating system.**
 
-*Goals are kernel primitives. Agents are first-class citizens. The OS understands intent.*
+*Goals are kernel primitives. Agents are first-class citizens. The browser is obsolete. The OS understands intent.*
 
 [![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](#)
@@ -59,10 +59,11 @@ understand goals:
 | WAN connectivity | Tailscale / ZeroTier / VPN | WAN-scale fabric with NAT traversal |
 | Fleet management | Ansible / Terraform / Salt | Unified console + fleet intents |
 | Cross-org integration | API gateways + VPNs + OAuth2 | InterFabric (IFP) — federated invocation |
+| User interface | Browser + REST + JS frameworks | Fabric Client (VeerUX) — composable, AI-rendered views |
 
 **VeerOS collapses this entire stack into the kernel.** The OS itself plans,
-schedules, places, monitors, secures, and manages — from a single MCU to a
-planet-scale fleet.
+schedules, places, monitors, secures, renders, and manages — from a single MCU
+to a planet-scale fleet.
 
 ---
 
@@ -147,6 +148,15 @@ no API gateways on either side. `invoke("analytics.process", payload, { target:
 policy enforcement at both boundaries, and end-to-end encrypted transport.
 Compromise one fabric → revoke trust instantly, channels severed in < 1 second.
 **→ B2B integration, supply chain, multi-cloud, partner ecosystems, coalition ops.**
+
+### Fabric Client — Beyond the Browser
+No URLs. No REST. No cookies. No JavaScript frameworks. The Fabric Client
+(VeerUX) renders composable views directly from fabric state — semantic
+navigation replaces address bars, identity-native auth replaces login forms,
+and AI generates adaptive interfaces that reshape from a serial terminal to a
+pixel framebuffer. A developer publishes a function; the fabric renders the UI.
+A user navigates by intent, not by URL.
+**→ Desktop workstations, kiosks, dashboards, embedded HMI, field terminals.**
 
 ---
 
@@ -317,6 +327,14 @@ veeros> memory set deploy.target rpi5-edge-01
   both ends. Compromise a peer → revoke trust in < 1 second. An internet of
   fabrics, not an internet of endpoints.
 
+- **Fabric Client (VeerUX)** — the browser is obsolete. Composable views render
+  directly from fabric state — no URLs, no REST, no cookies, no JS frameworks.
+  Semantic navigation replaces address bars; identity-native auth replaces login
+  forms. AI generates adaptive interfaces that reshape from a serial console to a
+  full pixel framebuffer with window compositing. Functions publish their UI
+  contract; the client renders it. `dist-desktop` adds a window compositor and
+  GPU-accelerated rendering.
+
 - **AI as a System Primitive** — autonomous agents, declarative intents, three-tier
   memory engine, and heterogeneous execution fabric are kernel primitives, not
   userspace libraries. The intent scheduler decomposes goals into agent DAGs,
@@ -389,6 +407,7 @@ dist-minimal                    bare scheduler, IPC, memory isolation
 │   ├── dist-cluster            + cluster membership, distributed sched/IPC/VFS
 │   │   ├── dist-cloud          + orchestration, ZeroServices, observability
 │   │   └── dist-fleet          + device management, unified console
+│   ├── dist-desktop            + Fabric Client, composable views, window compositor
 │   └── dist-full               all components + priority scheduler
 ├── dist-rt                     + priority real-time scheduler
 │   └── dist-xrt                + accelerator / GPU / FPGA / QPU (UAI)
@@ -415,6 +434,7 @@ dist-minimal                    bare scheduler, IPC, memory isolation
 | `dist-gateway` | edge | IoT protocol bridge | RPi 3+, ESP32-S3 |
 | `dist-security` | firewall | Enterprise NAC + EDR + ZTNA | x86-64, ARM64 |
 | `dist-fleet` | cluster | Fleet / device management + console | x86-64, ARM64, RPi 4/5 |
+| `dist-desktop` | app | Fabric Client + window compositor | RPi 4/5 (HDMI), x86-64 |
 
 ### Build Examples
 
@@ -443,8 +463,36 @@ cargo build -p kernel-qemu-pc --features dist-security
 # Fleet management node
 cargo build -p kernel-qemu-pc --features dist-fleet
 
+# Desktop with Fabric Client
+cargo build -p kernel-qemu-pc --features dist-desktop
+
 # Mix-and-match — any combination is valid
 cargo build -p kernel-qemu-pc --features dist-firewall,ai,sec-ztna
 ```
 
 ➡️ **Full distribution details:** see Phase 4 in [TODO.md](TODO.md)
+
+---
+
+## Vision
+
+VeerOS is building toward a future where the operating system IS the
+infrastructure — where there is no distinction between kernel, platform,
+security appliance, orchestrator, and user interface.
+
+**Near-term:** A production-quality microkernel running on real hardware across
+four architectures, with AI-native primitives and a coherent distributed fabric.
+
+**Mid-term:** Fabric-scale deployment where heterogeneous nodes — from MCUs to
+GPU servers — form a single operating system. ZeroServices, State Fabric, and
+the function invocation model eliminate the entire middleware tier.
+
+**Long-term:** The Fabric Client replaces the browser. InterFabric Protocol
+connects independent organizations without shared infrastructure. AI generates
+interfaces, decomposes goals, and manages systems autonomously. The OS adapts,
+learns, and operates — from a sensor on a factory floor to a constellation of
+satellites — as one coherent whole.
+
+**The endgame:** no containers, no sidecars, no API gateways, no browsers, no
+cloud consoles, no MDM agents, no VPNs. Just the kernel, the fabric, and
+intent.
