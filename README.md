@@ -1,8 +1,6 @@
 <div align="center">
 
-<picture>
-  <img src="./IMG_2008.png" alt="VeerOS Logo" width="280" />
-</picture>
+<img src="./IMG_2008.png" alt="VeerOS Logo" width="280" />
 
 # VeerOS
 
@@ -18,15 +16,17 @@
 
 ---
 
-**VeerOS** is a from-scratch operating system written in Rust where compute,
-state, security, networking, and observability collapse into a single fabric —
-not layered on after the fact.
+**VeerOS** is a from-scratch Rust operating system that turns devices — from
+microcontrollers to cloud nodes — into one coherent computational surface, with
+intelligence, security, and orchestration built into the kernel by design.
 
-Traditional operating systems understand processes, threads, and files. VeerOS
-adds three new kernel primitives: **Intents** (declarative goals), **Agents**
-(autonomous execution units), and an **Execution Fabric** (heterogeneous node
-topology). Together, they replace entire cloud stacks — Kubernetes, etcd,
-Prometheus, Airflow — with four syscalls.
+Where traditional operating systems understand processes, threads, and files,
+VeerOS introduces three new kernel primitives: **Intents** (declarative goals),
+**Agents** (autonomous execution units), and an **Execution Fabric**
+(heterogeneous node topology). Compute, state, security, networking, and
+observability collapse into a single fabric — not layered on after the fact.
+Together, they replace entire cloud stacks — Kubernetes, etcd, Prometheus,
+Airflow — with four syscalls.
 
 > **Try it now:**
 > ```bash
