@@ -99,6 +99,11 @@ impl<S: Serial> Console<S> {
     pub fn has_data(&self) -> bool {
         self.serial.has_data()
     }
+
+    /// Return a reference to the underlying serial device.
+    pub fn serial(&self) -> &S {
+        &self.serial
+    }
 }
 
 impl<S: Serial> fmt::Write for Console<S> {

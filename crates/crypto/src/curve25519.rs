@@ -74,11 +74,11 @@ impl Fe {
         // 2*p limbs: each limb of p is 0x7ffffffffffff except limb 0 which is p-19+2*19=...
         // Easier: add a large enough multiple of p.
         let mut r = Fe([
-            self.0[0] + 0xfffffffffffda - rhs.0[0], // 2*(2^51 - 19)
-            self.0[1] + 0xffffffffffffe - rhs.0[1], // 2*(2^51)
-            self.0[2] + 0xffffffffffffe - rhs.0[2],
-            self.0[3] + 0xffffffffffffe - rhs.0[3],
-            self.0[4] + 0xffffffffffffe - rhs.0[4],
+            self.0[0].wrapping_add(0xfffffffffffda).wrapping_sub(rhs.0[0]), // 2*(2^51 - 19)
+            self.0[1].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[1]), // 2*(2^51)
+            self.0[2].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[2]),
+            self.0[3].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[3]),
+            self.0[4].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[4]),
         ]);
         r.reduce();
         r

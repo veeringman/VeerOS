@@ -253,6 +253,9 @@ pub fn map_page(
     let pdi = pd_index(virt);
     let pti = pt_index(virt);
 
+    // User-accessible pages need PTE_USER at every level of the hierarchy.
+    let user_bit = flags & PTE_USER;
+
     // Ensure PDPT exists.
     if pml4.entries[pml4i] & PTE_PRESENT == 0 {
         let frame = match alloc.alloc_frame() {
@@ -260,7 +263,9 @@ pub fn map_page(
             None => return false,
         };
         zero_frame(frame);
-        pml4.entries[pml4i] = (frame as u64) | PTE_PRESENT | PTE_WRITABLE;
+        pml4.entries[pml4i] = (frame as u64) | PTE_PRESENT | PTE_WRITABLE | user_bit;
+    } else if user_bit != 0 {
+        pml4.entries[pml4i] |= PTE_USER;
     }
     let pdpt = unsafe { &mut *((pml4.entries[pml4i] & PTE_ADDR_MASK) as *mut PageTable) };
 
@@ -271,7 +276,9 @@ pub fn map_page(
             None => return false,
         };
         zero_frame(frame);
-        pdpt.entries[pdpti] = (frame as u64) | PTE_PRESENT | PTE_WRITABLE;
+        pdpt.entries[pdpti] = (frame as u64) | PTE_PRESENT | PTE_WRITABLE | user_bit;
+    } else if user_bit != 0 {
+        pdpt.entries[pdpti] |= PTE_USER;
     }
     let pd = unsafe { &mut *((pdpt.entries[pdpti] & PTE_ADDR_MASK) as *mut PageTable) };
 
@@ -282,7 +289,9 @@ pub fn map_page(
             None => return false,
         };
         zero_frame(frame);
-        pd.entries[pdi] = (frame as u64) | PTE_PRESENT | PTE_WRITABLE;
+        pd.entries[pdi] = (frame as u64) | PTE_PRESENT | PTE_WRITABLE | user_bit;
+    } else if user_bit != 0 {
+        pd.entries[pdi] |= PTE_USER;
     }
     let pt = unsafe { &mut *((pd.entries[pdi] & PTE_ADDR_MASK) as *mut PageTable) };
 
@@ -584,6 +593,8 @@ pub fn create_user_address_space(
     let pml4 = unsafe { &mut *(pml4_phys as *mut PageTable) };
 
     // Copy kernel mappings: identity map (PML4[0]) + higher-half (PML4[256..512]).
+    // The identity map is needed so that ISR handlers / MMIO remain reachable
+    // when CR3 is set to this address space during ring-3 execution.
     pml4.entries[0] = kernel_pml4.entries[0];
     for i in KERNEL_PML4_INDEX..512 {
         pml4.entries[i] = kernel_pml4.entries[i];

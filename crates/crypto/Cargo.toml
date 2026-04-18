@@ -18,8 +18,8 @@ blake3   = []            # BLAKE3 hash (future)
 sha512   = []            # SHA-512 hash (FIPS 180-4) — needed by Ed25519
 
 # Classical asymmetric (Phase 1)
-x25519  = ["sha256"]     # X25519 ECDH key exchange
-ed25519 = ["sha512"]     # Ed25519 signatures
+x25519  = ["sha256", "dep:curve25519-dalek"]   # X25519 ECDH key exchange
+ed25519 = ["sha512", "dep:ed25519-dalek", "dep:sha2"] # Ed25519 signatures
 
 # Post-quantum asymmetric — NIST FIPS 203/204 (Phase 2+)
 ml-kem  = []             # ML-KEM-768 (Kyber) key encapsulation (future)
@@ -31,3 +31,10 @@ hybrid  = ["sha256"]     # Requires SHA-256 for KDF combiner
 
 # PQC-only mode: classical algorithms dropped (Phase 3 — future)
 pqc-only = []
+
+[dependencies]
+ed25519-dalek = { version = "2.2.0", default-features = false, optional = true }
+curve25519-dalek = { version = "4", default-features = false, optional = true }
+# Force software SHA-2 so the bare-metal x86_64-unknown-none target doesn't hit
+# an LLVM crash from cpufeatures SIMD intrinsics.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"], optional = true }

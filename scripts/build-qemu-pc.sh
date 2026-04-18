@@ -53,3 +53,8 @@ echo "  qemu-system-x86_64 -M q35 -m 256M -display none -serial stdio -cdrom bui
 echo ""
 echo "Run with VGA display (interactive shell):"
 echo "  qemu-system-x86_64 -M q35 -m 256M -cdrom build/veeros.iso"
+echo ""
+echo "Run with networking + SSH port forwarding:"
+echo "  ./scripts/run-qemu-pc.sh"
+echo ""
+echo "SSH is exposed as host port 2222 -> guest 10.0.2.15:2222 by default."

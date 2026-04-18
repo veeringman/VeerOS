@@ -4,7 +4,7 @@
 //! (pty-req, shell, exec). VeerOS supports a single session channel that
 //! bridges to the shell via the `Serial` trait.
 
-use crate::{get_u32, get_string, put_u32, put_string, MAX_PAYLOAD};
+use crate::{get_u32, get_string, put_u32, put_string};
 
 /// Maximum number of simultaneous channels (1 is enough for a shell).
 pub const MAX_CHANNELS: usize = 1;
@@ -39,6 +39,12 @@ pub struct Channel {
     pub tx_max_packet: u32,
     /// Whether a shell has been requested on this channel.
     pub shell_requested: bool,
+    /// Whether an exec command has been requested.
+    pub exec_requested: bool,
+    /// Exec command buffer.
+    pub exec_cmd: [u8; 128],
+    /// Exec command length.
+    pub exec_cmd_len: usize,
     /// Whether a PTY has been allocated.
     pub pty_allocated: bool,
     /// Terminal width / height (from pty-req).
@@ -56,6 +62,9 @@ impl Channel {
             tx_window: 0,
             tx_max_packet: 0,
             shell_requested: false,
+            exec_requested: false,
+            exec_cmd: [0u8; 128],
+            exec_cmd_len: 0,
             pty_allocated: false,
             term_width: 80,
             term_height: 24,
@@ -88,6 +97,29 @@ impl ChannelManager {
                 ch.tx_window = tx_window;
                 ch.tx_max_packet = tx_max_packet;
                 ch.shell_requested = false;
+                ch.exec_requested = false;
+                ch.exec_cmd_len = 0;
+                ch.pty_allocated = false;
+                self.next_id += 1;
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Allocate a channel from the client side (we know the server's channel ID).
+    pub fn alloc_client(&mut self, server_channel_id: u32, tx_window: u32, tx_max_packet: u32) -> Option<usize> {
+        for (i, ch) in self.channels.iter_mut().enumerate() {
+            if ch.state == ChannelState::Free {
+                ch.state = ChannelState::Open;
+                ch.server_id = server_channel_id;
+                ch.client_id = self.next_id;
+                ch.rx_window = INITIAL_WINDOW;
+                ch.tx_window = tx_window;
+                ch.tx_max_packet = tx_max_packet;
+                ch.shell_requested = true;
+                ch.exec_requested = false;
+                ch.exec_cmd_len = 0;
                 ch.pty_allocated = false;
                 self.next_id += 1;
                 return Some(i);
@@ -249,6 +281,25 @@ impl ChannelManager {
             return (reply, 0, shell_ready);
         }
 
+        if req_type == b"exec" {
+            // Parse the command string
+            if off + 4 <= payload.len() {
+                let (cmd, _consumed) = get_string(&payload[off..]);
+                let copy_len = cmd.len().min(128);
+                self.channels[idx].exec_cmd[..copy_len].copy_from_slice(&cmd[..copy_len]);
+                self.channels[idx].exec_cmd_len = copy_len;
+                self.channels[idx].exec_requested = true;
+                self.channels[idx].shell_requested = true; // reuse shell_ready flow
+                shell_ready = true;
+            }
+            if want_reply {
+                reply[0] = 99; // CHANNEL_SUCCESS
+                put_u32(&mut reply[1..], self.channels[idx].client_id);
+                return (reply, 5, shell_ready);
+            }
+            return (reply, 0, shell_ready);
+        }
+
         if req_type == b"env" {
             // Accept but ignore environment variables
             if want_reply {
@@ -280,16 +331,23 @@ impl ChannelManager {
 
     /// Build a CHANNEL_DATA message for sending data to the client.
     /// Returns bytes written into buf.
-    pub fn build_channel_data(&self, chan_idx: usize, data: &[u8], buf: &mut [u8]) -> usize {
-        let ch = &self.channels[chan_idx];
-        if ch.state != ChannelState::Open { return 0; }
+    pub fn build_channel_data(&mut self, chan_idx: usize, data: &[u8], buf: &mut [u8]) -> usize {
+        let ch = &mut self.channels[chan_idx];
+        if ch.state != ChannelState::Open || data.is_empty() { return 0; }
+
+        let max_by_window = ch.tx_window as usize;
+        let max_by_packet = ch.tx_max_packet.min(MAX_CHANNEL_PACKET) as usize;
+        let max_by_buf = buf.len().saturating_sub(9);
+        let chunk_len = data.len().min(max_by_window).min(max_by_packet).min(max_by_buf);
+        if chunk_len == 0 { return 0; }
 
         let mut off = 0;
         buf[off] = 94; // SSH_MSG_CHANNEL_DATA
         off += 1;
         put_u32(&mut buf[off..], ch.client_id);
         off += 4;
-        off += put_string(&mut buf[off..], data);
+        off += put_string(&mut buf[off..], &data[..chunk_len]);
+        ch.tx_window = ch.tx_window.saturating_sub(chunk_len as u32);
         off
     }
 
@@ -350,5 +408,36 @@ impl ChannelManager {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_channel_data_caps_payload_to_peer_limits() {
+        let mut mgr = ChannelManager::new();
+        let idx = mgr.alloc(7, 12, 8).unwrap();
+        let mut buf = [0u8; 64];
+        let data = *b"abcdefghijklmnopqrstuvwxyz";
+
+        let written = mgr.build_channel_data(idx, &data, &mut buf);
+
+        assert_eq!(written, 17);
+        assert_eq!(buf[0], 94);
+        assert_eq!(get_u32(&buf[1..5]), 7);
+        assert_eq!(get_u32(&buf[5..9]), 8);
+        assert_eq!(&buf[9..17], b"abcdefgh");
+        assert_eq!(mgr.channels[idx].tx_window, 4);
+    }
+
+    #[test]
+    fn build_channel_data_returns_zero_when_window_is_exhausted() {
+        let mut mgr = ChannelManager::new();
+        let idx = mgr.alloc(3, 0, 32).unwrap();
+        let mut buf = [0u8; 32];
+
+        assert_eq!(mgr.build_channel_data(idx, b"hello", &mut buf), 0);
     }
 }

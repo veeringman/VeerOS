@@ -206,9 +206,15 @@ cargo run -p veeros-demo
 
 # Build for real hardware
 ./scripts/build-qemu-pc.sh            # x86-64 QEMU
+./scripts/run-qemu-pc.sh              # x86-64 QEMU with virtio-net + SSH forwarding
 ./scripts/build-esp32c6.sh            # RISC-V ESP32-C6
 ./scripts/build-raspi5.sh             # ARM64 Raspberry Pi 5
 ```
+
+For QEMU PC networking, VeerOS uses QEMU user-net with guest SSH on port `2222`.
+Use `./scripts/run-qemu-pc.sh` to attach the required `virtio-net` device and forward host port `2222`
+to the guest SSH service. To allow LAN access from another machine, leave the default
+`HOST_BIND_ADDR=0.0.0.0`; to restrict access to the local host only, run with `HOST_BIND_ADDR=127.0.0.1`.
 
 ### Demo Session
 

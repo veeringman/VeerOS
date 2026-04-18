@@ -12,6 +12,7 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use arch::NetworkDevice;
 use net::{NetStack, NetStorage};
@@ -22,6 +23,8 @@ use smoltcp::iface::SocketSet;
 use smoltcp::socket::tcp::Socket as TcpSocket;
 use smoltcp::socket::udp::{Socket as UdpSocket, PacketBuffer, PacketMetadata};
 use smoltcp::wire::{IpCidr, Ipv4Address, IpAddress, IpEndpoint};
+#[cfg(feature = "dhcp")]
+use smoltcp::socket::dhcpv4;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NetworkDevice adapter for VirtioNet
@@ -121,8 +124,9 @@ pub static NET_IF: NetIfCell = NetIfCell(UnsafeCell::new(NetInterface::empty()))
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// smoltcp socket-set storage (static, no heap).
-/// We support 5 sockets: 2 TCP (primary + SSH) + 1 UDP + 2 spare.
-const MAX_SMOL_SOCKETS: usize = 5;
+/// We support 8 sockets: 2 TCP (primary + SSH server) + 1 TCP (SSH client)
+/// + 1 UDP + 1 DHCP + 3 spare.
+const MAX_SMOL_SOCKETS: usize = 8;
 
 // Compile-time sanity: make sure the SocketStorage array can't silently
 // overflow into neighbouring statics.
@@ -142,6 +146,9 @@ const _: () = {
 struct SmolSocketBuf([smoltcp::iface::SocketStorage<'static>; MAX_SMOL_SOCKETS]);
 
 static mut SOCKET_SET_BUF: SmolSocketBuf = SmolSocketBuf([
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
@@ -193,8 +200,32 @@ static mut SSH_TCP_TX_BUF: [u8; SSH_TCP_TX_BUF_SIZE] = [0u8; SSH_TCP_TX_BUF_SIZE
 #[cfg(feature = "ssh")]
 pub static mut SSH_TCP_HANDLE: Option<smoltcp::iface::SocketHandle> = None;
 
+// ── SSH client (outbound) TCP socket ─────────────────────────────────
+#[cfg(feature = "ssh")]
+const SSH_CLIENT_TCP_RX_BUF_SIZE: usize = 4096;
+#[cfg(feature = "ssh")]
+const SSH_CLIENT_TCP_TX_BUF_SIZE: usize = 4096;
+
+#[cfg(feature = "ssh")]
+static mut SSH_CLIENT_TCP_RX_BUF: [u8; SSH_CLIENT_TCP_RX_BUF_SIZE] = [0u8; SSH_CLIENT_TCP_RX_BUF_SIZE];
+#[cfg(feature = "ssh")]
+static mut SSH_CLIENT_TCP_TX_BUF: [u8; SSH_CLIENT_TCP_TX_BUF_SIZE] = [0u8; SSH_CLIENT_TCP_TX_BUF_SIZE];
+
+/// SSH client (outbound) TCP socket handle.
+#[cfg(feature = "ssh")]
+pub static mut SSH_CLIENT_TCP_HANDLE: Option<smoltcp::iface::SocketHandle> = None;
+
+/// DHCP socket handle (stored after creation).
+#[cfg(feature = "dhcp")]
+static mut DHCP_HANDLE: Option<smoltcp::iface::SocketHandle> = None;
+
+/// Whether DHCP has acquired an address.
+#[cfg(feature = "dhcp")]
+static mut DHCP_CONFIGURED: bool = false;
+
 /// Whether the network stack has been initialised.
 static mut NET_INIT: bool = false;
+static POLL_BUSY: AtomicBool = AtomicBool::new(false);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Initialisation
@@ -243,6 +274,9 @@ pub fn init() {
     unsafe { *SMOL_SOCKETS.0.get() = Some(socket_set); }
 
     // Create the NetStack (smoltcp Interface + primary TCP socket).
+    // Always start with the static IP so TCP is usable immediately.
+    // When the DHCP feature is enabled, the DHCP client runs in parallel
+    // and can update the address if it differs from the default.
     let dev = VirtioNetDev;
     let ip = IpCidr::new(
         IpAddress::v4(DEFAULT_IP[0], DEFAULT_IP[1], DEFAULT_IP[2], DEFAULT_IP[3]),
@@ -282,10 +316,41 @@ pub fn init() {
             use smoltcp::socket::tcp::SocketBuffer;
             let rx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_TCP_RX_BUF))[..]);
             let tx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_TCP_TX_BUF))[..]);
-            let ssh_socket = TcpSocket::new(rx_buf, tx_buf);
+            let mut ssh_socket = TcpSocket::new(rx_buf, tx_buf);
+            ssh_socket.set_nagle_enabled(false);
             let handle = sockets.add(ssh_socket);
             SSH_TCP_HANDLE = Some(handle);
         }
+    }
+
+    // Add a TCP socket for SSH client (outbound connections).
+    #[cfg(feature = "ssh")]
+    {
+        let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
+        unsafe {
+            use smoltcp::socket::tcp::SocketBuffer;
+            let rx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_CLIENT_TCP_RX_BUF))[..]);
+            let tx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_CLIENT_TCP_TX_BUF))[..]);
+            let mut client_socket = TcpSocket::new(rx_buf, tx_buf);
+            client_socket.set_nagle_enabled(false);
+            let handle = sockets.add(client_socket);
+            SSH_CLIENT_TCP_HANDLE = Some(handle);
+        }
+    }
+
+    // Add a DHCPv4 socket to acquire IP from the network.
+    #[cfg(feature = "dhcp")]
+    {
+        let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
+        let dhcp_socket = dhcpv4::Socket::new();
+        let handle = sockets.add(dhcp_socket);
+        unsafe { DHCP_HANDLE = Some(handle); }
+
+        let serial = soc_qemu_pc::default_serial();
+        let mut con = arch::Console::new(serial);
+        let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
+            "[net] DHCP: client started, awaiting lease...\n"
+        ));
     }
 
     // Mark interface up.
@@ -311,14 +376,76 @@ pub fn poll(now_ms: u64) {
         return;
     }
 
+    if POLL_BUSY.swap(true, Ordering::Acquire) {
+        return;
+    }
+
     let stack = unsafe { (*NET_STACK.0.get()).as_mut().unwrap() };
     let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
     stack.poll(sockets, now_ms);
+
+    // Process DHCP events.
+    #[cfg(feature = "dhcp")]
+    unsafe {
+        if let Some(handle) = DHCP_HANDLE {
+            let event = sockets.get_mut::<dhcpv4::Socket>(handle).poll();
+            match event {
+                Some(dhcpv4::Event::Configured(config)) => {
+                    // Extract Copy values before any further borrows.
+                    let address = config.address;
+                    let router = config.router;
+                    let addr = address.address().0;
+                    let prefix = address.prefix_len();
+
+                    stack.apply_ip_config(address, router);
+
+                    // Update NetInterface.
+                    let iface = &mut *NET_IF.0.get();
+                    iface.ip = addr;
+                    let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+                    iface.netmask = mask.to_be_bytes();
+                    if let Some(gw) = router {
+                        iface.gateway = gw.0;
+                    }
+
+                    DHCP_CONFIGURED = true;
+
+                    let serial = soc_qemu_pc::default_serial();
+                    let mut con = arch::Console::new(serial);
+                    let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
+                        "[net] DHCP: acquired {}.{}.{}.{}/{}\n",
+                        addr[0], addr[1], addr[2], addr[3], prefix,
+                    ));
+                    if let Some(gw) = router {
+                        let g = gw.0;
+                        let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
+                            "[net] DHCP: gateway {}.{}.{}.{}\n",
+                            g[0], g[1], g[2], g[3],
+                        ));
+                    }
+                }
+                Some(dhcpv4::Event::Deconfigured) => {
+                    // Don't remove the IP — keep the static default as
+                    // fallback so TCP sockets stay functional.  The next
+                    // Configured event will set the correct address.
+                    DHCP_CONFIGURED = false;
+
+                    let serial = soc_qemu_pc::default_serial();
+                    let mut con = arch::Console::new(serial);
+                    let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
+                        "[net] DHCP: lease expired, waiting for renewal\n"
+                    ));
+                }
+                None => {}
+            }
+        }
+    }
 
     // Update RX/TX counters.
     let iface = unsafe { &mut *NET_IF.0.get() };
     // (smoltcp doesn't expose packet counters directly; we track at driver level)
     let _ = iface;
+    POLL_BUSY.store(false, Ordering::Release);
 }
 
 /// Network polling task — runs as a kernel task, polls the stack every tick.
@@ -374,6 +501,111 @@ pub fn ssh_is_connected() -> bool {
             socket.is_active()
         } else {
             false
+        }
+    }
+}
+
+/// Check if the SSH TCP socket can send payload bytes.
+#[cfg(feature = "ssh")]
+pub fn ssh_can_send() -> bool {
+    unsafe {
+        if let Some(handle) = SSH_TCP_HANDLE {
+            let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
+            let socket = sockets.get::<TcpSocket>(handle);
+            socket.can_send()
+        } else {
+            false
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSH client helpers — outbound TCP connection for the SSH client command
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Connect the SSH client TCP socket to a remote host.
+///
+/// Returns `true` if the connect call was dispatched (SYN sent).
+/// The caller must poll until `ssh_client_is_connected()` returns true.
+#[cfg(feature = "ssh")]
+pub fn ssh_client_connect(ip: [u8; 4], port: u16) -> bool {
+    unsafe {
+        let handle = match SSH_CLIENT_TCP_HANDLE {
+            Some(h) => h,
+            None => return false,
+        };
+
+        let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
+        let socket = sockets.get_mut::<TcpSocket>(handle);
+
+        // Abort any previous connection.
+        if socket.is_open() {
+            socket.abort();
+        }
+
+        let stack = (*NET_STACK.0.get()).as_mut().unwrap();
+        let cx = stack.context();
+
+        let remote = (
+            smoltcp::wire::IpAddress::v4(ip[0], ip[1], ip[2], ip[3]),
+            port,
+        );
+        // Use our IP + ephemeral port as local endpoint.
+        let iface = &*NET_IF.0.get();
+        let local_ip = smoltcp::wire::IpAddress::v4(
+            iface.ip[0], iface.ip[1], iface.ip[2], iface.ip[3],
+        );
+        let local = (local_ip, 44222u16); // ephemeral port
+
+        match socket.connect(cx, remote, local) {
+            Ok(()) => true,
+            Err(_) => false,
+        }
+    }
+}
+
+/// Poll function for SSH client — same as server poll (drives the stack).
+#[cfg(feature = "ssh")]
+pub fn ssh_client_poll() {
+    ssh_poll();
+}
+
+/// Check if the SSH client TCP socket is connected (established).
+#[cfg(feature = "ssh")]
+pub fn ssh_client_is_connected() -> bool {
+    unsafe {
+        if let Some(handle) = SSH_CLIENT_TCP_HANDLE {
+            let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
+            let socket = sockets.get::<TcpSocket>(handle);
+            socket.may_send() && socket.may_recv()
+        } else {
+            false
+        }
+    }
+}
+
+/// Check if the SSH client TCP socket can send.
+#[cfg(feature = "ssh")]
+pub fn ssh_client_can_send() -> bool {
+    unsafe {
+        if let Some(handle) = SSH_CLIENT_TCP_HANDLE {
+            let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
+            let socket = sockets.get::<TcpSocket>(handle);
+            socket.can_send()
+        } else {
+            false
+        }
+    }
+}
+
+/// Disconnect and clean up the SSH client TCP socket.
+#[cfg(feature = "ssh")]
+pub fn ssh_client_disconnect() {
+    unsafe {
+        if let Some(handle) = SSH_CLIENT_TCP_HANDLE {
+            let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
+            let socket = sockets.get_mut::<TcpSocket>(handle);
+            socket.abort();
         }
     }
 }
@@ -434,6 +666,15 @@ pub fn ifconfig_cmd(w: &mut dyn core::fmt::Write) {
         iface.mac[3], iface.mac[4], iface.mac[5]);
     let _ = writeln!(w, "    IPv4:    {}.{}.{}.{}",
         iface.ip[0], iface.ip[1], iface.ip[2], iface.ip[3]);
+    #[cfg(feature = "dhcp")]
+    {
+        let src = if unsafe { DHCP_CONFIGURED } { "dhcp" } else { "pending" };
+        let _ = writeln!(w, "    Source:  {}", src);
+    }
+    #[cfg(not(feature = "dhcp"))]
+    {
+        let _ = writeln!(w, "    Source:  static");
+    }
     let _ = writeln!(w, "    Netmask: {}.{}.{}.{}",
         iface.netmask[0], iface.netmask[1], iface.netmask[2], iface.netmask[3]);
     let _ = writeln!(w, "    Gateway: {}.{}.{}.{}",
@@ -529,7 +770,7 @@ pub fn netstat_cmd(w: &mut dyn core::fmt::Write) {
 }
 
 /// Parse an IPv4 address string like "10.0.2.2" into 4 bytes.
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
     let mut parts = 0usize;
     let mut val = 0u16;

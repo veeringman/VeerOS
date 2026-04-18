@@ -343,6 +343,10 @@ fn shell_task() -> ! {
         shutdown: Some(do_shutdown),
         caps_cmd: None,
         auditlog_cmd: None,
+        ifconfig_cmd: None,
+        ping_cmd: None,
+        netstat_cmd: None,
+        ssh_cmd: None,
         #[cfg(feature = "multi-user")]
         login: Some(do_login),
         #[cfg(not(feature = "multi-user"))]
@@ -363,6 +367,7 @@ fn shell_task() -> ! {
         remove_user: Some(do_remove_user),
         #[cfg(not(feature = "multi-user"))]
         remove_user: None,
+        pre_authenticated: false,
         // AI-native
         get_agent_list: None,
         agent_cmd: None,
@@ -589,6 +594,10 @@ fn net_task() -> ! {
                         shutdown: Some(do_shutdown),
                         caps_cmd: None,
                         auditlog_cmd: None,
+                        ifconfig_cmd: None,
+                        ping_cmd: None,
+                        netstat_cmd: None,
+                        ssh_cmd: None,
                         #[cfg(feature = "multi-user")]
                         login: Some(do_login),
                         #[cfg(not(feature = "multi-user"))]
@@ -609,6 +618,7 @@ fn net_task() -> ! {
                         remove_user: Some(do_remove_user),
                         #[cfg(not(feature = "multi-user"))]
                         remove_user: None,
+                        pre_authenticated: true,
                         // AI-native
                         get_agent_list: None,
                         agent_cmd: None,

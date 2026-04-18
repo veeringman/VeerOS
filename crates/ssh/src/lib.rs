@@ -25,6 +25,7 @@ pub mod kex;
 pub mod auth;
 pub mod channel;
 pub mod server;
+pub mod client;
 
 /// SSH-2 protocol version string.
 pub const VERSION_STRING: &[u8] = b"SSH-2.0-VeerOS_1.0";

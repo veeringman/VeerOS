@@ -13,4 +13,4 @@ build-qemu-pc = "build -p kernel-qemu-pc --target x86_64-unknown-none"
 check-kernel-qemu-pc = "check -p kernel-qemu-pc --target x86_64-unknown-none"
 
 [target.x86_64-unknown-none]
-rustflags = ["-C", "code-model=small", "-C", "relocation-model=static"]
+rustflags = ["-C", "code-model=small", "-C", "relocation-model=static", "--cfg", "curve25519_dalek_backend=\"serial\""]

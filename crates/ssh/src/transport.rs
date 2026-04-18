@@ -6,7 +6,7 @@
 
 use arch::Serial;
 use crypto::Aead;
-use crypto::chacha20::{ChaCha20Poly1305, chacha20_xor};
+use crypto::chacha20::{chacha20_block, chacha20_xor};
 use crypto::zeroize;
 use crate::{MAX_PACKET, MAX_PAYLOAD, get_u32, put_u32};
 
@@ -118,11 +118,12 @@ impl Transport {
         serial: &S,
         payload: &[u8],
     ) {
-        // Padding must be at least 4 bytes, total (payload + padding + 1)
-        // must be multiple of 8 (or cipher block size).
+        // RFC 4253 §6: total of (packet_length‖padding_length‖payload‖padding)
+        // must be a multiple of block_size(8).  That total = 4 + packet_length,
+        // so we align (4 + 1 + payload_len) and derive padding from that.
         let block_size = 8;
-        let min_packet = 1 + payload.len() + 4; // padding_len + payload + min_padding
-        let padding_len = block_size - (min_packet % block_size);
+        let unpadded = 4 + 1 + payload.len(); // include 4-byte length field
+        let padding_len = block_size - (unpadded % block_size);
         let padding_len = if padding_len < 4 { padding_len + block_size } else { padding_len };
         let packet_length = 1 + payload.len() + padding_len;
 
@@ -147,6 +148,25 @@ impl Transport {
 
     // ── Encrypted (chacha20-poly1305@openssh.com) ───────────────────────
 
+    fn openssh_chacha_nonce(seq: u32) -> [u8; 12] {
+        let mut nonce = [0u8; 12];
+        // OpenSSH stores the sequence number as a big-endian u64 IV via
+        // POKE_U64(seqbuf, seqnr), then chacha_ivsetup() loads it as:
+        //   state[14] = U8TO32_LITTLE(seqbuf[0..4])  — always 0 for u32 seq
+        //   state[15] = U8TO32_LITTLE(seqbuf[4..8])  — seq in BE bytes
+        //
+        // Our RFC 8439 chacha20_block maps:
+        //   state[13] = le32(nonce[0..4])
+        //   state[14] = le32(nonce[4..8])
+        //   state[15] = le32(nonce[8..12])
+        //
+        // state[13] maps to DJB counter_hi (0 since we pass counter as arg).
+        // Put the BE seq bytes at nonce[8..12] so le32 produces the same
+        // state[15] value as OpenSSH.
+        nonce[8..12].copy_from_slice(&seq.to_be_bytes());
+        nonce
+    }
+
     fn read_packet_encrypted<S: Serial>(
         &mut self,
         serial: &S,
@@ -159,10 +179,11 @@ impl Transport {
         for i in 0..4 {
             enc_len[i] = serial.read_byte();
         }
+        let orig_enc_len = enc_len;
 
-        // Decrypt length using header key (K_2, nonce = seqno, counter = 0)
-        let mut nonce = [0u8; 12];
-        put_u32(&mut nonce[8..12], self.rx_seq);
+        // OpenSSH chacha20-poly1305 uses the packet sequence number as the
+        // legacy 64-bit ChaCha nonce with counter 0 for the length field.
+        let nonce = Self::openssh_chacha_nonce(self.rx_seq);
         chacha20_xor(&keys.rx_header_key, 0, &nonce, &mut enc_len);
 
         let packet_length = get_u32(&enc_len) as usize;
@@ -182,31 +203,15 @@ impl Transport {
         // AAD = encrypted length bytes (4 bytes).
         // Ciphertext = buf[..packet_length].
         // Tag = buf[packet_length..packet_length+16].
-        let aead = ChaCha20Poly1305::new(&keys.rx_key);
-        let mut verify_buf = [0u8; MAX_PACKET];
-        // Pack: enc_len || ciphertext || tag for AEAD open
-        verify_buf[..4].copy_from_slice(&enc_len);
-
-        // Actually, chacha20-poly1305@openssh.com uses a different scheme:
-        // - K_2 encrypts the 4-byte length field (nonce = seqno, counter = 0)
-        // - K_1 encrypts the payload (nonce = seqno, counter = 0, skip block 0 for poly key)
-        // - Poly1305 key = first 32 bytes of K_1 stream (counter = 0)
-        // - Poly1305 authenticates: encrypted_length (4 bytes) || ciphertext
-        // - Tag is appended after ciphertext
-
         // Generate Poly1305 key from K_1 stream block 0
         let mut poly_key = [0u8; 32];
-        let poly_block = crypto::chacha20::chacha20_block(&keys.rx_key, 0, &nonce);
+        let poly_block = chacha20_block(&keys.rx_key, 0, &nonce);
         poly_key.copy_from_slice(&poly_block[..32]);
 
         // Verify tag
         let tag = &buf[packet_length..packet_length + 16];
-        // Compute Poly1305 over enc_len || ciphertext
         let mut auth_data = [0u8; MAX_PACKET];
-        let mut re_enc_len = enc_len;
-        // Re-encrypt length to get original encrypted form for auth
-        chacha20_xor(&keys.rx_header_key, 0, &nonce, &mut re_enc_len);
-        auth_data[..4].copy_from_slice(&re_enc_len);
+        auth_data[..4].copy_from_slice(&orig_enc_len);
         auth_data[4..4 + packet_length].copy_from_slice(&buf[..packet_length]);
         let auth_len = 4 + packet_length;
 
@@ -245,15 +250,16 @@ impl Transport {
     ) {
         let keys = self.keys.as_ref().unwrap();
 
-        // Compute padding
+        // chacha20-poly1305: the 4-byte length is encrypted separately and
+        // NOT included in the block alignment.  Only the encrypted body
+        // (padding_length‖payload‖padding) = packet_length must be % 8 == 0.
         let block_size = 8;
-        let min_packet = 1 + payload.len() + 4;
-        let padding_len = block_size - (min_packet % block_size);
+        let unpadded = 1 + payload.len();
+        let padding_len = block_size - (unpadded % block_size);
         let padding_len = if padding_len < 4 { padding_len + block_size } else { padding_len };
         let packet_length = 1 + payload.len() + padding_len;
 
-        let mut nonce = [0u8; 12];
-        put_u32(&mut nonce[8..12], self.tx_seq);
+        let nonce = Self::openssh_chacha_nonce(self.tx_seq);
 
         // Build plaintext: padding_len || payload || padding
         let mut plain = [0u8; MAX_PACKET];
@@ -271,7 +277,7 @@ impl Transport {
 
         // Generate Poly1305 key from K_1 block 0
         let mut poly_key = [0u8; 32];
-        let poly_block = crypto::chacha20::chacha20_block(&keys.tx_key, 0, &nonce);
+        let poly_block = chacha20_block(&keys.tx_key, 0, &nonce);
         poly_key.copy_from_slice(&poly_block[..32]);
 
         // Encrypt payload with K_1 (counter starts at 1)
@@ -302,132 +308,169 @@ impl Transport {
 
 /// Compute a Poly1305 MAC using the given one-time key.
 fn poly1305_mac(key: &[u8; 32], data: &[u8], tag: &mut [u8; 16]) {
-    // Clamp r
-    let mut r = [0u32; 5];
-    let t0 = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
-    let t1 = u32::from_le_bytes([key[4], key[5], key[6], key[7]]);
-    let t2 = u32::from_le_bytes([key[8], key[9], key[10], key[11]]);
-    let t3 = u32::from_le_bytes([key[12], key[13], key[14], key[15]]);
+    let le32 = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
 
-    r[0] = t0 & 0x3ffffff;
-    r[1] = ((t0 >> 26) | (t1 << 6)) & 0x3ffff03;
-    r[2] = ((t1 >> 20) | (t2 << 12)) & 0x3ffc0ff;
-    r[3] = ((t2 >> 14) | (t3 << 18)) & 0x3f03fff;
-    r[4] = (t3 >> 8) & 0x00fffff;
+    let mut rb = [0u8; 16];
+    rb.copy_from_slice(&key[..16]);
+    rb[3] &= 0x0f;
+    rb[7] &= 0x0f;
+    rb[11] &= 0x0f;
+    rb[15] &= 0x0f;
+    rb[4] &= 0xfc;
+    rb[8] &= 0xfc;
+    rb[12] &= 0xfc;
 
-    let s0 = u32::from_le_bytes([key[16], key[17], key[18], key[19]]);
-    let s1 = u32::from_le_bytes([key[20], key[21], key[22], key[23]]);
-    let s2 = u32::from_le_bytes([key[24], key[25], key[26], key[27]]);
-    let s3 = u32::from_le_bytes([key[28], key[29], key[30], key[31]]);
+    let t0 = le32(&rb[0..]);
+    let t1 = le32(&rb[4..]);
+    let t2 = le32(&rb[8..]);
+    let t3 = le32(&rb[12..]);
+
+    let r = [
+        t0 & 0x3ff_ffff,
+        ((t0 >> 26) | (t1 << 6)) & 0x3ff_ffff,
+        ((t1 >> 20) | (t2 << 12)) & 0x3ff_ffff,
+        ((t2 >> 14) | (t3 << 18)) & 0x3ff_ffff,
+        t3 >> 8,
+    ];
+    let s = [le32(&key[16..]), le32(&key[20..]), le32(&key[24..]), le32(&key[28..])];
 
     let mut h = [0u32; 5];
-    let mut pos = 0;
-
-    while pos < data.len() {
-        let remaining = data.len() - pos;
-        let chunk = remaining.min(16);
+    let mut off = 0;
+    while off < data.len() {
+        let take = (data.len() - off).min(16);
+        let msg = &data[off..off + take];
         let mut n = [0u8; 17];
-        n[..chunk].copy_from_slice(&data[pos..pos + chunk]);
-        n[chunk] = 1; // hibit
+        n[..take].copy_from_slice(msg);
+        n[take] = 1;
 
-        // h += block
-        let t0 = u32::from_le_bytes([n[0], n[1], n[2], n[3]]);
-        let t1 = u32::from_le_bytes([n[4], n[5], n[6], n[7]]);
-        let t2 = u32::from_le_bytes([n[8], n[9], n[10], n[11]]);
-        let t3 = u32::from_le_bytes([n[12], n[13], n[14], n[15]]);
+        let t0 = le32(&n[0..]);
+        let t1 = le32(&n[4..]);
+        let t2 = le32(&n[8..]);
+        let t3 = le32(&n[12..]);
         let t4 = n[16] as u32;
 
-        h[0] = h[0].wrapping_add(t0 & 0x3ffffff);
-        h[1] = h[1].wrapping_add(((t0 >> 26) | (t1 << 6)) & 0x3ffffff);
-        h[2] = h[2].wrapping_add(((t1 >> 20) | (t2 << 12)) & 0x3ffffff);
-        h[3] = h[3].wrapping_add(((t2 >> 14) | (t3 << 18)) & 0x3ffffff);
+        h[0] = h[0].wrapping_add(t0 & 0x3ff_ffff);
+        h[1] = h[1].wrapping_add(((t0 >> 26) | (t1 << 6)) & 0x3ff_ffff);
+        h[2] = h[2].wrapping_add(((t1 >> 20) | (t2 << 12)) & 0x3ff_ffff);
+        h[3] = h[3].wrapping_add(((t2 >> 14) | (t3 << 18)) & 0x3ff_ffff);
         h[4] = h[4].wrapping_add((t3 >> 8) | (t4 << 24));
 
-        // h *= r (mod 2^130 - 5)
-        let r5 = [r[1] * 5, r[2] * 5, r[3] * 5, r[4] * 5];
+        let (r0, r1, r2, r3, r4) = (
+            r[0] as u64, r[1] as u64, r[2] as u64, r[3] as u64, r[4] as u64,
+        );
+        let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
+        let (h0, h1, h2, h3, h4) = (
+            h[0] as u64, h[1] as u64, h[2] as u64, h[3] as u64, h[4] as u64,
+        );
 
-        let d0 = (h[0] as u64) * (r[0] as u64)
-            + (h[1] as u64) * (r5[3] as u64)
-            + (h[2] as u64) * (r5[2] as u64)
-            + (h[3] as u64) * (r5[1] as u64)
-            + (h[4] as u64) * (r5[0] as u64);
-        let d1 = (h[0] as u64) * (r[1] as u64)
-            + (h[1] as u64) * (r[0] as u64)
-            + (h[2] as u64) * (r5[3] as u64)
-            + (h[3] as u64) * (r5[2] as u64)
-            + (h[4] as u64) * (r5[1] as u64);
-        let d2 = (h[0] as u64) * (r[2] as u64)
-            + (h[1] as u64) * (r[1] as u64)
-            + (h[2] as u64) * (r[0] as u64)
-            + (h[3] as u64) * (r5[3] as u64)
-            + (h[4] as u64) * (r5[2] as u64);
-        let d3 = (h[0] as u64) * (r[3] as u64)
-            + (h[1] as u64) * (r[2] as u64)
-            + (h[2] as u64) * (r[1] as u64)
-            + (h[3] as u64) * (r[0] as u64)
-            + (h[4] as u64) * (r5[3] as u64);
-        let d4 = (h[0] as u64) * (r[4] as u64)
-            + (h[1] as u64) * (r[3] as u64)
-            + (h[2] as u64) * (r[2] as u64)
-            + (h[3] as u64) * (r[1] as u64)
-            + (h[4] as u64) * (r[0] as u64);
+        let d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+        let d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
+        let d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
+        let d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
+        let d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
 
-        let mut c: u32;
-        h[0] = d0 as u32 & 0x3ffffff;
-        c = (d0 >> 26) as u32;
-        let d1 = d1 + c as u64; h[1] = d1 as u32 & 0x3ffffff;
-        c = (d1 >> 26) as u32;
-        let d2 = d2 + c as u64; h[2] = d2 as u32 & 0x3ffffff;
-        c = (d2 >> 26) as u32;
-        let d3 = d3 + c as u64; h[3] = d3 as u32 & 0x3ffffff;
-        c = (d3 >> 26) as u32;
-        let d4 = d4 + c as u64; h[4] = d4 as u32 & 0x3ffffff;
-        c = (d4 >> 26) as u32;
-        h[0] = h[0].wrapping_add(c * 5);
-        c = h[0] >> 26;
-        h[0] &= 0x3ffffff;
-        h[1] = h[1].wrapping_add(c);
+        let c0 = d0 >> 26;
+        let mut h0 = (d0 & 0x3ff_ffff) as u32;
+        let d1 = d1 + c0;
+        let c1 = d1 >> 26;
+        let h1 = (d1 & 0x3ff_ffff) as u32;
+        let d2 = d2 + c1;
+        let c2 = d2 >> 26;
+        let h2 = (d2 & 0x3ff_ffff) as u32;
+        let d3 = d3 + c2;
+        let c3 = d3 >> 26;
+        let h3 = (d3 & 0x3ff_ffff) as u32;
+        let d4 = d4 + c3;
+        let c4 = d4 >> 26;
+        let h4 = (d4 & 0x3ff_ffff) as u32;
 
-        pos += 16;
+        h0 = h0.wrapping_add((c4 as u32) * 5);
+        let carry = h0 >> 26;
+        h0 &= 0x3ff_ffff;
+        let h1 = h1.wrapping_add(carry);
+
+        h = [h0, h1, h2, h3, h4];
+        off += take;
     }
 
-    // Final carry and freeze
-    let mut c: u32;
-    c = h[1] >> 26; h[1] &= 0x3ffffff; h[2] = h[2].wrapping_add(c);
-    c = h[2] >> 26; h[2] &= 0x3ffffff; h[3] = h[3].wrapping_add(c);
-    c = h[3] >> 26; h[3] &= 0x3ffffff; h[4] = h[4].wrapping_add(c);
-    c = h[4] >> 26; h[4] &= 0x3ffffff; h[0] = h[0].wrapping_add(c * 5);
-    c = h[0] >> 26; h[0] &= 0x3ffffff; h[1] = h[1].wrapping_add(c);
+    let mut h0 = h[0];
+    let mut h1 = h[1];
+    let mut h2 = h[2];
+    let mut h3 = h[3];
+    let mut h4 = h[4];
 
-    // Compute h + -p
-    let mut g = [0u32; 5];
-    c = h[0].wrapping_add(5); g[0] = c & 0x3ffffff; c >>= 26;
-    c = h[1].wrapping_add(c); g[1] = c & 0x3ffffff; c >>= 26;
-    c = h[2].wrapping_add(c); g[2] = c & 0x3ffffff; c >>= 26;
-    c = h[3].wrapping_add(c); g[3] = c & 0x3ffffff; c >>= 26;
-    c = h[4].wrapping_add(c).wrapping_sub(1 << 26); g[4] = c & 0x3ffffff;
+    let c = h1 >> 26;
+    h1 &= 0x3ff_ffff;
+    h2 += c;
+    let c = h2 >> 26;
+    h2 &= 0x3ff_ffff;
+    h3 += c;
+    let c = h3 >> 26;
+    h3 &= 0x3ff_ffff;
+    h4 += c;
+    let c = h4 >> 26;
+    h4 &= 0x3ff_ffff;
+    h0 += c * 5;
+    let c = h0 >> 26;
+    h0 &= 0x3ff_ffff;
+    h1 += c;
 
-    // Select h or g
-    let mask = (c >> 31).wrapping_sub(1); // all-ones if g >= 0 (no borrow)
-    for i in 0..5 {
-        h[i] = (h[i] & !mask) | (g[i] & mask);
+    let mut g0 = h0.wrapping_add(5);
+    let c = g0 >> 26;
+    g0 &= 0x3ff_ffff;
+    let mut g1 = h1.wrapping_add(c);
+    let c = g1 >> 26;
+    g1 &= 0x3ff_ffff;
+    let mut g2 = h2.wrapping_add(c);
+    let c = g2 >> 26;
+    g2 &= 0x3ff_ffff;
+    let mut g3 = h3.wrapping_add(c);
+    let c = g3 >> 26;
+    g3 &= 0x3ff_ffff;
+    let g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
+
+    let mask = (g4 >> 31).wrapping_sub(1);
+    h0 = (h0 & !mask) | (g0 & mask);
+    h1 = (h1 & !mask) | (g1 & mask);
+    h2 = (h2 & !mask) | (g2 & mask);
+    h3 = (h3 & !mask) | (g3 & mask);
+    h4 = (h4 & !mask) | (g4 & mask);
+
+    let h_val = (h0 as u128)
+        | ((h1 as u128) << 26)
+        | ((h2 as u128) << 52)
+        | ((h3 as u128) << 78)
+        | ((h4 as u128) << 104);
+    let s_val = (s[0] as u128)
+        | ((s[1] as u128) << 32)
+        | ((s[2] as u128) << 64)
+        | ((s[3] as u128) << 96);
+    let tag_val = h_val.wrapping_add(s_val);
+
+    tag[..8].copy_from_slice(&(tag_val as u64).to_le_bytes());
+    tag[8..].copy_from_slice(&((tag_val >> 64) as u64).to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::poly1305_mac;
+
+    #[test]
+    fn poly1305_rfc8439_vector() {
+        let key = [
+            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33,
+            0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8,
+            0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd,
+            0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b,
+        ];
+        let msg = b"Cryptographic Forum Research Group";
+        let expected = [
+            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6,
+            0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9,
+        ];
+
+        let mut tag = [0u8; 16];
+        poly1305_mac(&key, msg, &mut tag);
+        assert_eq!(tag, expected);
     }
-
-    // h = h + s
-    let mut f: u64;
-    f = h[0] as u64 + s0 as u64; h[0] = f as u32;
-    f = h[1] as u64 + s1 as u64 + (f >> 32); h[1] = f as u32;
-    f = h[2] as u64 + s2 as u64 + (f >> 32); h[2] = f as u32;
-    f = h[3] as u64 + s3 as u64 + (f >> 32); h[3] = f as u32;
-
-    // Output
-    let h0 = ((h[0]) | (h[1] << 26)) as u32;
-    let h1 = ((h[1] >> 6) | (h[2] << 20)) as u32;
-    let h2 = ((h[2] >> 12) | (h[3] << 14)) as u32;
-    let h3 = ((h[3] >> 18) | (h[4] << 8)) as u32;
-
-    tag[0..4].copy_from_slice(&h0.to_le_bytes());
-    tag[4..8].copy_from_slice(&h1.to_le_bytes());
-    tag[8..12].copy_from_slice(&h2.to_le_bytes());
-    tag[12..16].copy_from_slice(&h3.to_le_bytes());
 }

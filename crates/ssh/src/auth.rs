@@ -28,10 +28,13 @@ pub enum AuthResult {
 ///   string    method name ("password" | "none" | "publickey")
 ///   ... method-specific fields
 ///
+/// `password_verify` is called with `(username_bytes, password_bytes)` and
+/// must return `true` to accept.
+///
 /// Returns `(AuthResult, username_len)`. The username is copied into `user_out`.
 pub fn check_userauth(
     payload: &[u8],
-    password_hash: u32,
+    password_verify: fn(&[u8], &[u8]) -> bool,
     user_out: &mut [u8; 64],
 ) -> (AuthResult, usize) {
     if payload.is_empty() || payload[0] != 50 {
@@ -71,9 +74,8 @@ pub fn check_userauth(
         if off + 4 > payload.len() { return (AuthResult::Failure, user_len); }
         let (password, _consumed) = get_string(&payload[off..]);
 
-        // Check password using FNV-1a hash (constant-time-ish)
-        let hash = fnv1a(password);
-        if hash == password_hash {
+        // Verify via caller-supplied callback
+        if password_verify(&user_out[..user_len], password) {
             return (AuthResult::Success, user_len);
         } else {
             return (AuthResult::Failure, user_len);

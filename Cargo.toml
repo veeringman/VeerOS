@@ -38,17 +38,41 @@ repository = "https://github.com/veeringman/VeerOS"
 
 [workspace.dependencies]
 bitflags = "2.6"
-smoltcp = { version = "0.11", default-features = false, features = ["proto-ipv4", "proto-ipv6", "socket-tcp", "medium-ethernet", "medium-ieee802154", "proto-sixlowpan", "socket-udp"] }
+smoltcp = { version = "0.11", default-features = false, features = ["proto-ipv4", "proto-ipv6", "socket-tcp", "medium-ethernet", "medium-ieee802154", "proto-sixlowpan", "socket-udp", "socket-dhcpv4"] }
 
 [profile.dev]
 panic = "abort"
 
 # Crypto must be optimized even in debug — unoptimized field math is 100x slower.
 [profile.dev.package.crypto]
-opt-level = 2
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
 
 [profile.dev.package.ssh]
-opt-level = 2
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.sha2]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.fiat-crypto]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
 
 [profile.release]
 panic = "abort"

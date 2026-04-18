@@ -18,7 +18,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, Ieee802154Address, IpCidr, Ipv4Address};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, Ieee802154Address, IpCidr, Ipv4Address, Ipv4Cidr};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // smoltcp phy adapter — bridges our `NetworkDevice` trait to smoltcp's
@@ -181,6 +181,62 @@ impl<D: NetworkDevice> NetStack<D> {
         }
     }
 
+    /// Create a new network stack without assigning an IP address.
+    ///
+    /// Use this when the IP will be acquired via DHCP. Call
+    /// [`apply_ip_config()`] once the DHCP lease is obtained.
+    pub fn new_dhcp(
+        dev: D,
+        sockets: &mut SocketSet<'_>,
+        storage: &'static mut NetStorage,
+    ) -> Self {
+        let hw_addr = match dev.medium() {
+            NetMedium::Ethernet => {
+                let mac = dev.mac_address();
+                HardwareAddress::Ethernet(EthernetAddress(mac))
+            }
+            NetMedium::Ieee802154 => {
+                let ext = dev.mac_address_ext();
+                HardwareAddress::Ieee802154(Ieee802154Address::Extended(ext))
+            }
+        };
+
+        let config = Config::new(hw_addr);
+        let mut adapter = DeviceAdapter::new(&dev);
+        let iface = Interface::new(config, &mut adapter, Instant::ZERO);
+
+        let rx_buf = SocketBuffer::new(&mut storage.tcp_rx_buf[..]);
+        let tx_buf = SocketBuffer::new(&mut storage.tcp_tx_buf[..]);
+        let tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        let tcp_handle = sockets.add(tcp_socket);
+
+        Self {
+            dev,
+            iface,
+            tcp_handle,
+        }
+    }
+
+    /// Apply an IP configuration (e.g. from DHCP).
+    pub fn apply_ip_config(&mut self, address: Ipv4Cidr, gateway: Option<Ipv4Address>) {
+        self.iface.update_ip_addrs(|addrs| {
+            addrs.clear();
+            let _ = addrs.push(IpCidr::Ipv4(address));
+        });
+        if let Some(gw) = gateway {
+            self.iface.routes_mut().add_default_ipv4_route(gw).ok();
+        }
+    }
+
+    /// Remove IP configuration (e.g. on DHCP deconfigure).
+    pub fn remove_ip_config(&mut self) {
+        self.iface.update_ip_addrs(|addrs| {
+            addrs.clear();
+        });
+        // smoltcp 0.11 doesn't expose a direct remove-route API, but
+        // clearing addresses is sufficient to stop answering.
+    }
+
     /// Start listening for incoming TCP connections on the given port.
     ///
     /// If the socket is still lingering from a previous session it will
@@ -211,6 +267,13 @@ impl<D: NetworkDevice> NetStack<D> {
     pub fn is_connected(&self, sockets: &SocketSet<'_>) -> bool {
         let socket = sockets.get::<TcpSocket>(self.tcp_handle);
         socket.is_active()
+    }
+
+    /// Return a mutable reference to the smoltcp interface context.
+    ///
+    /// Needed for TCP `connect()` calls (outbound connections).
+    pub fn context(&mut self) -> &mut smoltcp::iface::Context {
+        self.iface.context()
     }
 }
 
@@ -261,7 +324,12 @@ impl TcpSerial {
 
 impl Serial for TcpSerial {
     fn write_byte(&self, byte: u8) {
-        loop {
+        self.write_bytes(&[byte]);
+    }
+
+    fn write_bytes(&self, bytes: &[u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
             (self.poll_fn)();
             let sockets = unsafe { &mut *self.sockets };
             let socket = sockets.get_mut::<TcpSocket>(self.handle);
@@ -269,11 +337,19 @@ impl Serial for TcpSerial {
                 return; // connection closed or closing
             }
             if socket.can_send() {
-                let _ = socket.send_slice(&[byte]);
-                return;
+                match socket.send_slice(&bytes[offset..]) {
+                    Ok(sent) if sent > 0 => {
+                        offset += sent;
+                        continue;
+                    }
+                    Ok(_) | Err(_) => {}
+                }
             }
             core::hint::spin_loop();
         }
+
+        // Drive the stack once more so buffered data gets pushed promptly.
+        (self.poll_fn)();
     }
 
     fn read_byte(&self) -> u8 {
@@ -301,5 +377,9 @@ impl Serial for TcpSerial {
         let sockets = unsafe { &mut *self.sockets };
         let socket = sockets.get_mut::<TcpSocket>(self.handle);
         socket.can_recv()
+    }
+
+    fn flush(&self) {
+        (self.poll_fn)();
     }
 }

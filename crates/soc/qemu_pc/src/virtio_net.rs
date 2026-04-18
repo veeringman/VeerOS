@@ -67,6 +67,19 @@ static mut RX_POOL: RxBuffers = RxBuffers {
     bufs: [[0u8; RX_BUF_SIZE]; RX_RING_SIZE],
 };
 
+/// Static TX buffer: header + packet in one contiguous region so the
+/// descriptor address is stable even after the caller's stack frame returns.
+/// QEMU's TAP backend may process TX descriptors asynchronously (via BH),
+/// so pointing descriptors at caller-stack data causes use-after-free.
+#[repr(C, align(16))]
+struct TxBuffer {
+    buf: [u8; NET_HEADER_SIZE + MAX_PACKET_SIZE],
+}
+
+static mut TX_BUF: TxBuffer = TxBuffer {
+    buf: [0u8; NET_HEADER_SIZE + MAX_PACKET_SIZE],
+};
+
 /// A VIRTIO network device.
 pub struct VirtioNet {
     /// I/O base address (from PCI BAR0).
@@ -79,8 +92,6 @@ pub struct VirtioNet {
     pub mac: [u8; 6],
     /// Whether the device is initialized.
     pub active: bool,
-    /// TX header (reused for each packet).
-    tx_header: VirtioNetHeader,
 }
 
 impl VirtioNet {
@@ -91,7 +102,6 @@ impl VirtioNet {
             txq: None,
             mac: [0; 6],
             active: false,
-            tx_header: VirtioNetHeader::EMPTY,
         }
     }
 
@@ -175,6 +185,9 @@ impl VirtioNet {
     ///
     /// `data` — Ethernet frame payload (without VIRTIO header).
     ///
+    /// Copies data into a static TX buffer so the descriptor address remains
+    /// valid even if the backend (TAP) processes the ring asynchronously.
+    ///
     /// Returns `true` on success.
     pub fn send(&mut self, data: &[u8]) -> bool {
         if !self.active || data.len() > MAX_PACKET_SIZE {
@@ -186,45 +199,61 @@ impl VirtioNet {
             None => return false,
         };
 
-        if txq.free_count < 2 {
-            // Try to reclaim used descriptors.
-            while let Some((head, _)) = txq.poll_used() {
-                // Free the 2-descriptor chain.
+        // Reclaim any previously used TX descriptors.
+        while let Some((head, _)) = txq.poll_used() {
+            // Might be a 2-descriptor chain (legacy) or single.
+            let flags = unsafe { (*txq.desc.add(head as usize)).flags };
+            if (flags & VRING_DESC_F_NEXT) != 0 {
                 let next = unsafe { (*txq.desc.add(head as usize)).next };
                 txq.free_desc(next);
-                txq.free_desc(head);
             }
-            if txq.free_count < 2 {
-                return false;
-            }
+            txq.free_desc(head);
+        }
+
+        if txq.free_count < 1 {
+            return false;
         }
 
         let d0 = match txq.alloc_desc() { Some(d) => d, None => return false };
-        let d1 = match txq.alloc_desc() {
-            Some(d) => d,
-            None => { txq.free_desc(d0); return false }
-        };
 
-        // Descriptor 0: VIRTIO net header (device-readable).
-        self.tx_header = VirtioNetHeader::EMPTY;
+        // Copy header + data into the static TX buffer.
+        let total_len = NET_HEADER_SIZE + data.len();
         unsafe {
-            let desc = &mut *txq.desc.add(d0 as usize);
-            desc.addr = &self.tx_header as *const VirtioNetHeader as u64;
-            desc.len = NET_HEADER_SIZE as u32;
-            desc.flags = VRING_DESC_F_NEXT;
-            desc.next = d1;
+            // Zero the header portion.
+            core::ptr::write_bytes(TX_BUF.buf.as_mut_ptr(), 0, NET_HEADER_SIZE);
+            // Copy frame data after the header.
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                TX_BUF.buf.as_mut_ptr().add(NET_HEADER_SIZE),
+                data.len(),
+            );
         }
 
-        // Descriptor 1: packet data (device-readable).
+        // Single descriptor: header + data in one contiguous buffer.
         unsafe {
-            let desc = &mut *txq.desc.add(d1 as usize);
-            desc.addr = data.as_ptr() as u64;
-            desc.len = data.len() as u32;
-            desc.flags = 0; // no more descriptors
+            let desc = &mut *txq.desc.add(d0 as usize);
+            desc.addr = TX_BUF.buf.as_ptr() as u64;
+            desc.len = total_len as u32;
+            desc.flags = 0; // single descriptor, no chain
             desc.next = 0;
         }
 
         txq.submit(d0);
+
+        // Spin-wait for the device to consume the descriptor so the
+        // static TX_BUF is safe to reuse on the next call.
+        let mut spins = 0u32;
+        while txq.poll_used().is_none() {
+            core::hint::spin_loop();
+            spins += 1;
+            if spins > 1_000_000 {
+                // Device stuck — give up.
+                txq.free_desc(d0);
+                return false;
+            }
+        }
+        txq.free_desc(d0);
+
         true
     }
 

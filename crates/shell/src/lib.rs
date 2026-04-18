@@ -124,6 +124,10 @@ pub struct ShellEnv {
     /// Display socket / connection status.
     pub netstat_cmd: Option<fn(&mut dyn core::fmt::Write)>,
 
+    /// Handle `ssh <user@host>` — connect to a remote SSH server.
+    /// Callback receives (args, local_serial) for bi-directional I/O.
+    pub ssh_cmd: Option<fn(&str, &dyn Serial)>,
+
     // ── Multi-user callbacks (only used when `multi-user` feature) ────
     /// Authenticate a user. Returns session token (>0) on success, 0 on failure.
     pub login: Option<fn(&str, &[u8]) -> u32>,
@@ -135,6 +139,9 @@ pub struct ShellEnv {
     pub add_user: Option<fn(&'static str, u16, &[u8]) -> Option<u16>>,
     /// Remove a user by UID. Returns true on success.
     pub remove_user: Option<fn(u16) -> bool>,
+
+    /// If true, skip the login gate (user was already authenticated externally, e.g. SSH).
+    pub pre_authenticated: bool,
 
     // ── AI-Native Execution callbacks ─────────────────────────────
     /// Write active agent list to writer.
@@ -247,6 +254,16 @@ impl Shell {
 
     // ── internal helpers ─────────────────────────────────────────────────
 
+    /// Execute a single command string (used for SSH exec requests).
+    /// Runs the command and returns; does not enter the REPL loop.
+    pub fn run_command<S: Serial>(&mut self, con: &mut Console<S>, cmd: &str) {
+        let bytes = cmd.as_bytes();
+        let len = bytes.len().min(self.ed.buf.len());
+        self.ed.buf[..len].copy_from_slice(&bytes[..len]);
+        self.ed.len = len;
+        let _ = self.execute(con);
+    }
+
     fn print_prompt<S: Serial>(&self, con: &mut Console<S>) {
         if let Some(f) = self.env.get_current_user {
             let (_uid, name) = f();
@@ -353,6 +370,7 @@ impl Shell {
             "ifconfig" | "ipconfig" | "ip" => self.cmd_ifconfig(con),
             "ping" => self.cmd_ping(con, args),
             "netstat" | "ss" => self.cmd_netstat(con),
+            "ssh" => self.cmd_ssh(con, args),
             // ── AI-native commands ───────────────────
             "agents" => self.cmd_agents(con, args),
             "intent" => self.cmd_intent(con, args),
@@ -446,6 +464,7 @@ impl Shell {
         let _ = writeln!(con, "  ifconfig   Network interface configuration");
         let _ = writeln!(con, "  ping       Send network probes to an IP");
         let _ = writeln!(con, "  netstat    Socket / connection status");
+        let _ = writeln!(con, "  ssh        SSH client (ssh user@host[:port])");
         let _ = writeln!(con, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} ai-native \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
         let _ = writeln!(con, "  agents     Agent lifecycle (list/spawn/kill/status)");
         let _ = writeln!(con, "  intent     Intent engine (submit/status/cancel/stats)");
@@ -1225,6 +1244,13 @@ impl Shell {
         }
     }
 
+    fn cmd_ssh<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        match self.env.ssh_cmd {
+            Some(f) => f(args, con.serial()),
+            None => { let _ = writeln!(con, "ssh: not available"); }
+        }
+    }
+
     fn cmd_reboot<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.reboot {
             Some(f) => {
@@ -1466,6 +1492,11 @@ impl Shell {
     /// Present a login prompt. Returns true on successful authentication.
     #[cfg(feature = "multi-user")]
     fn login_gate<S: Serial>(&mut self, con: &mut Console<S>) -> bool {
+        // Skip if user was already authenticated (e.g. via SSH protocol).
+        if self.env.pre_authenticated {
+            return true;
+        }
+
         let login_fn = match self.env.login {
             Some(f) => f,
             None => return true, // No login callback → skip auth.

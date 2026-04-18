@@ -404,10 +404,10 @@ static IPC_TX_STACK: SampleStack = SampleStack([0u8; 16384]);
 static IPC_RX_STACK: SampleStack = SampleStack([0u8; 16384]);
 
 // Kernel stack for Ring 3 user task (used for interrupt/syscall entry).
-#[cfg(feature = "samples")]
+#[cfg(feature = "ring3")]
 #[repr(align(16))]
 struct Ring3KernelStack([u8; 8192]);
-#[cfg(feature = "samples")]
+#[cfg(feature = "ring3")]
 static RING3_KSTACK: Ring3KernelStack = Ring3KernelStack([0u8; 8192]);
 
 // Network polling task stack
@@ -415,12 +415,12 @@ static RING3_KSTACK: Ring3KernelStack = Ring3KernelStack([0u8; 8192]);
 struct NetStack([u8; 8192]);
 static NET_POLL_STACK: NetStack = NetStack([0u8; 8192]);
 
-// SSH task stack (32 KiB — SSH needs room for crypto, protocol buffers)
+// SSH task stack (256 KiB — ed25519-dalek + curve25519-dalek serial backend need deep stack).
 #[cfg(feature = "ssh")]
 #[repr(align(16))]
-struct SshStack([u8; 32768]);
+struct SshStack([u8; 262144]);
 #[cfg(feature = "ssh")]
-static SSH_STACK: SshStack = SshStack([0u8; 32768]);
+static SSH_STACK: SshStack = SshStack([0u8; 262144]);
 
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
@@ -470,6 +470,10 @@ fn shell_task() -> ! {
         ifconfig_cmd: Some(ifconfig_callback),
         ping_cmd: Some(ping_callback),
         netstat_cmd: Some(netstat_callback),
+        #[cfg(feature = "ssh")]
+        ssh_cmd: Some(ssh_client_cmd),
+        #[cfg(not(feature = "ssh"))]
+        ssh_cmd: None,
         #[cfg(feature = "multi-user")]
         login: Some(do_login),
         #[cfg(not(feature = "multi-user"))]
@@ -490,6 +494,7 @@ fn shell_task() -> ! {
         remove_user: Some(do_remove_user),
         #[cfg(not(feature = "multi-user"))]
         remove_user: None,
+        pre_authenticated: false,
         // AI-native
         get_agent_list: None,
         agent_cmd: None,
@@ -525,9 +530,257 @@ const SSH_HOST_SEED: [u8; 32] = [
     0x36, 0x37, 0x38, 0x39, 0x41, 0x42, 0x43, 0x44,
 ];
 
-/// FNV-1a hash of the accepted SSH password. Default: "veeros".
+/// Ed25519 host public key corresponding to `SSH_HOST_SEED`.
 #[cfg(all(feature = "ssh", feature = "shell"))]
-const SSH_PASSWORD_HASH: u32 = ssh::auth::fnv1a(b"veeros");
+const SSH_HOST_PUBKEY: [u8; 32] = [
+    0xe2, 0x91, 0x74, 0x12, 0xbb, 0x3a, 0x6f, 0x7e,
+    0x80, 0x07, 0x28, 0x7f, 0xc4, 0x27, 0x01, 0x65,
+    0xcf, 0x5d, 0x05, 0x61, 0x63, 0xf0, 0x82, 0x4c,
+    0xda, 0x73, 0xdc, 0x70, 0x8d, 0x99, 0x94, 0x3b,
+];
+
+/// Verify SSH password against the UserTable (multi-user) or fallback hash.
+#[cfg(all(feature = "ssh", feature = "shell", feature = "multi-user"))]
+fn ssh_verify_password(user: &[u8], pass: &[u8]) -> bool {
+    let username = match core::str::from_utf8(user) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    unsafe {
+        let users = &mut *USERS.0.get();
+        match users.login(username, pass) {
+            Ok(token) => {
+                if let Some((uid, gid)) = users.session_info(token) {
+                    (*PROCESSES.0.get()).processes[0].uid = uid;
+                    (*PROCESSES.0.get()).processes[0].gid = gid;
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Verify SSH password using FNV-1a hash fallback (no multi-user).
+#[cfg(all(feature = "ssh", feature = "shell", not(feature = "multi-user")))]
+fn ssh_verify_password(user: &[u8], pass: &[u8]) -> bool {
+    let _ = user;
+    ssh::auth::fnv1a(pass) == ssh::auth::fnv1a(b"veeros")
+}
+
+/// SSH client command — called from the shell's `ssh` builtin.
+///
+/// `args` = "user@host" or "user@host -p port"
+/// `local` = the local terminal's Serial (UART or SshSerial).
+#[cfg(all(feature = "ssh", feature = "shell"))]
+fn ssh_client_cmd(args: &str, local: &dyn arch::Serial) {
+    use net::TcpSerial;
+
+    // ── Parse arguments ────────────────────────────────────────────
+    let args = args.trim();
+    if args.is_empty() {
+        local.write_bytes(b"usage: ssh user@host [-p port]\r\n");
+        return;
+    }
+
+    // Split off "-p port" if present.
+    let (user_host, port) = {
+        let mut port = 22u16;
+        let mut uh = args;
+        if let Some(idx) = args.find(" -p ") {
+            uh = &args[..idx];
+            if let Some(p_str) = args.get(idx + 4..) {
+                if let Some(p) = parse_u16(p_str.trim()) {
+                    port = p;
+                }
+            }
+        }
+        (uh, port)
+    };
+
+    // Split user@host.
+    let (username, host) = match user_host.find('@') {
+        Some(i) => (&user_host[..i], &user_host[i + 1..]),
+        None => {
+            local.write_bytes(b"ssh: expected user@host\r\n");
+            return;
+        }
+    };
+
+    // Parse host IP.
+    let ip = match net::parse_ipv4(host) {
+        Some(ip) => ip,
+        None => {
+            local.write_bytes(b"ssh: invalid IPv4 address\r\n");
+            return;
+        }
+    };
+
+    // ── Read password (masked) ─────────────────────────────────────
+    local.write_bytes(b"Password: ");
+    let mut pass_buf = [0u8; 64];
+    let mut pass_len = 0usize;
+    loop {
+        let b = local.read_byte();
+        if b == b'\r' || b == b'\n' {
+            break;
+        }
+        if b == 0x7f || b == 0x08 {
+            // Backspace
+            if pass_len > 0 {
+                pass_len -= 1;
+                local.write_bytes(b"\x08 \x08");
+            }
+            continue;
+        }
+        if b == 0x03 {
+            // Ctrl-C — abort
+            local.write_bytes(b"\r\n");
+            return;
+        }
+        if pass_len < pass_buf.len() {
+            pass_buf[pass_len] = b;
+            pass_len += 1;
+            local.write_bytes(b"*");
+        }
+    }
+    local.write_bytes(b"\r\n");
+
+    // ── Connect TCP ────────────────────────────────────────────────
+    local.write_bytes(b"Connecting to ");
+    write_ip_serial(local, ip);
+    local.write_bytes(b"...\r\n");
+
+    if !net::ssh_client_connect(ip, port) {
+        local.write_bytes(b"ssh: TCP connect failed\r\n");
+        return;
+    }
+
+    // Wait for TCP establishment (up to ~10 seconds).
+    let start = unsafe { (*SCHEDULER.0.get()).ticks };
+    loop {
+        net::ssh_client_poll();
+        if net::ssh_client_is_connected() {
+            break;
+        }
+        let now = unsafe { (*SCHEDULER.0.get()).ticks };
+        if now.wrapping_sub(start) > 10_000 {
+            local.write_bytes(b"ssh: connection timed out\r\n");
+            net::ssh_client_disconnect();
+            return;
+        }
+        core::hint::spin_loop();
+    }
+
+    // ── Create TcpSerial for the client TCP socket ─────────────────
+    let tcp_serial = unsafe {
+        let handle = net::SSH_CLIENT_TCP_HANDLE.unwrap();
+        let socket_set_ptr = (*net::SMOL_SOCKETS.0.get()).as_mut().unwrap()
+            as *mut smoltcp::iface::SocketSet<'static>;
+        TcpSerial::new(handle, socket_set_ptr, net::ssh_client_poll)
+    };
+
+    // ── Run SSH client handshake ───────────────────────────────────
+    let config = ssh::client::SshClientConfig {
+        username: username.as_bytes(),
+        password: &pass_buf[..pass_len],
+    };
+
+    // RNG seeded from tick counter.
+    let ticks = unsafe { (*SCHEDULER.0.get()).ticks };
+    let mut seed = [0u8; 32];
+    let tb = ticks.to_le_bytes();
+    seed[..8].copy_from_slice(&tb);
+    seed[8..16].copy_from_slice(&tb);
+    seed[16..24].copy_from_slice(&tb);
+    seed[24..32].copy_from_slice(&tb);
+    let mut rng = crypto::rng::ChaChaRng::from_seed(seed);
+
+    match ssh::client::run_ssh_client_with_trace(&tcp_serial, &config, &mut rng, |stage| {
+        local.write_bytes(b"[ssh] ");
+        local.write_bytes(stage.as_bytes());
+        local.write_bytes(b"\r\n");
+    }) {
+        Some(mut bridge) => {
+            local.write_bytes(b"Connected. Press Ctrl-] to disconnect.\r\n");
+
+            // ── Interactive bridge loop ────────────────────────────
+            loop {
+                net::ssh_client_poll();
+
+                // Remote → local: drain any buffered decrypted data.
+                if tcp_serial.has_data() {
+                    let b = bridge.read_byte_from(&tcp_serial);
+                    if b == 0x04 {
+                        break;
+                    }
+                    local.write_byte(b);
+                }
+
+                // Local → remote.
+                if local.has_data() {
+                    let b = local.read_byte();
+                    if b == 0x1d {
+                        // Ctrl-] — disconnect.
+                        break;
+                    }
+                    bridge.write_byte_to(&tcp_serial, b);
+                }
+
+                if !bridge.is_open() {
+                    break;
+                }
+
+                core::hint::spin_loop();
+            }
+
+            bridge.close_channel(&tcp_serial);
+            local.write_bytes(b"\r\nConnection closed.\r\n");
+        }
+        None => {
+            local.write_bytes(b"ssh: handshake failed\r\n");
+        }
+    }
+
+    net::ssh_client_disconnect();
+}
+
+/// Write an IPv4 address to a Serial device.
+#[cfg(all(feature = "ssh", feature = "shell"))]
+fn write_ip_serial(serial: &dyn arch::Serial, ip: [u8; 4]) {
+    for (i, &octet) in ip.iter().enumerate() {
+        if i > 0 {
+            serial.write_byte(b'.');
+        }
+        // Convert octet to decimal string.
+        if octet >= 100 {
+            serial.write_byte(b'0' + octet / 100);
+            serial.write_byte(b'0' + (octet / 10) % 10);
+            serial.write_byte(b'0' + octet % 10);
+        } else if octet >= 10 {
+            serial.write_byte(b'0' + octet / 10);
+            serial.write_byte(b'0' + octet % 10);
+        } else {
+            serial.write_byte(b'0' + octet);
+        }
+    }
+}
+
+/// Parse a u16 from a decimal string.
+#[cfg(all(feature = "ssh", feature = "shell"))]
+fn parse_u16(s: &str) -> Option<u16> {
+    let mut val = 0u32;
+    for &b in s.as_bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        val = val * 10 + (b - b'0') as u32;
+        if val > 65535 {
+            return None;
+        }
+    }
+    Some(val as u16)
+}
 
 #[cfg(all(feature = "ssh", feature = "shell"))]
 fn ssh_task() -> ! {
@@ -536,13 +789,14 @@ fn ssh_task() -> ! {
     let serial = default_serial();
     let mut con = Console::new(serial);
 
-    let _ = writeln!(con, "[ssh] task started, computing host key...");
+    let _ = writeln!(con, "[ssh] task started");
+    let _ = writeln!(con, "[ssh] before listen");
 
     // Start listening IMMEDIATELY so TCP connections don't get RST.
     net::ssh_listen(SSH_PORT);
+    let _ = writeln!(con, "[ssh] after listen");
 
-    // Compute the Ed25519 host public key from the seed.
-    let host_pubkey = crypto::ed25519::ed25519_public_key(&SSH_HOST_SEED);
+    let host_pubkey = SSH_HOST_PUBKEY;
 
     let _ = writeln!(con, "[ssh] SSH server ready on port {}", SSH_PORT);
 
@@ -565,6 +819,19 @@ fn ssh_task() -> ! {
 
         let _ = writeln!(con, "[ssh] client connected");
 
+        // Wait until the socket is fully send-ready before protocol I/O.
+        loop {
+            net::ssh_poll();
+            if net::ssh_can_send() {
+                break;
+            }
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                core::arch::asm!("int 0x80", in("rax") 0x00usize, options(nostack, preserves_flags));
+            }
+        }
+        let _ = writeln!(con, "[ssh] socket send-ready");
+
         // Create a TcpSerial over the SSH TCP socket.
         let tcp_serial = unsafe {
             let handle = net::SSH_TCP_HANDLE.unwrap();
@@ -577,7 +844,7 @@ fn ssh_task() -> ! {
         let config = ssh::server::SshServerConfig {
             host_seed: SSH_HOST_SEED,
             host_pubkey,
-            password_hash: SSH_PASSWORD_HASH,
+            password_verify: ssh_verify_password,
         };
 
         // Create a simple RNG seeded from the tick counter.
@@ -590,7 +857,9 @@ fn ssh_task() -> ! {
         seed[24..32].copy_from_slice(&tb);
         let mut rng = crypto::rng::ChaChaRng::from_seed(seed);
 
-        match ssh::server::run_ssh_handshake(&tcp_serial, &config, &mut rng) {
+        match ssh::server::run_ssh_handshake_with_trace(&tcp_serial, &config, &mut rng, |stage| {
+            let _ = writeln!(con, "[ssh] {}", stage);
+        }) {
             Some(mut bridge) => {
                 let _ = writeln!(con, "[ssh] handshake succeeded — starting shell");
 
@@ -648,6 +917,7 @@ fn ssh_task() -> ! {
                     ifconfig_cmd: Some(ifconfig_callback),
                     ping_cmd: Some(ping_callback),
                     netstat_cmd: Some(netstat_callback),
+                    ssh_cmd: Some(ssh_client_cmd),
                     #[cfg(feature = "multi-user")]
                     login: Some(do_login),
                     #[cfg(not(feature = "multi-user"))]
@@ -668,6 +938,7 @@ fn ssh_task() -> ! {
                     remove_user: Some(do_remove_user),
                     #[cfg(not(feature = "multi-user"))]
                     remove_user: None,
+                    pre_authenticated: true,
                     get_agent_list: None,
                     agent_cmd: None,
                     get_intent_list: None,
@@ -679,7 +950,15 @@ fn ssh_task() -> ! {
                     zkp_cmd: None,
                 };
                 let mut sh = Shell::new(env);
-                sh.run(&mut ssh_con);
+
+                // Check if this is an exec request (single command) or interactive shell.
+                if let Some(cmd_bytes) = bridge.exec_command() {
+                    if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
+                        sh.run_command(&mut ssh_con, cmd);
+                    }
+                } else {
+                    sh.run(&mut ssh_con);
+                }
 
                 // Clean up SSH channel.
                 let br = unsafe { &mut *bridge_ptr };
@@ -2014,6 +2293,7 @@ pub extern "C" fn _rust_start() -> ! {
         let sched = &mut *SCHEDULER.0.get();
         let procs = &mut *PROCESSES.0.get();
 
+    // ── scheduler + tasks ────────────────────────────────────
         // Create process 0 (init/kernel process).
         procs.create("init", usize::MAX, 0, 0);
 
@@ -2039,6 +2319,10 @@ pub extern "C" fn _rust_start() -> ! {
         }
 
         // Network polling task (if NIC is present).
+            // When SSH is enabled, the SSH task owns socket polling directly via
+            // TcpSerial/ssh_poll to avoid unsynchronized concurrent access to the
+            // global smoltcp state from multiple kernel tasks.
+            #[cfg(not(feature = "ssh"))]
         if net::is_active() {
             let sb = NET_POLL_STACK.0.as_ptr() as usize;
             let st = sb + NET_POLL_STACK.0.len();
@@ -2085,7 +2369,10 @@ pub extern "C" fn _rust_start() -> ! {
             }
 
             // ── Ring 3 user-mode task ────────────────────────────
-            // Create a separate process (pid 1) with its own page tables.
+            // Disabled by default: the ring 3 context switch
+            // (build_ring0_frame / CR3 switching) is not yet complete.
+            // Enable with `--features ring3` when ready to test.
+            #[cfg(feature = "ring3")]
             {
                 let user_pid = procs.create("user", 0, 1000, 1000).unwrap_or(0);
 

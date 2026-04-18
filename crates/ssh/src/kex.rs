@@ -114,12 +114,12 @@ pub fn build_kexinit(buf: &mut [u8], cookie: &[u8; 16]) -> usize {
 ///
 /// Also computes the exchange hash H and derives session keys.
 ///
-/// Returns (reply_payload_len, transport_keys, exchange_hash).
+/// Returns (reply_payload_len, transport_keys, exchange_hash, shared_secret, server_eph_pk).
 pub fn process_ecdh_init(
     client_eph_pub: &[u8; 32],
     kex_state: &mut KexState,
     config: &KexConfig,
-) -> Option<([u8; MAX_PAYLOAD], usize, TransportKeys, [u8; 32])> {
+) -> Option<([u8; MAX_PAYLOAD], usize, TransportKeys, [u8; 32], [u8; 32], [u8; 32])> {
     // Compute shared secret K = X25519(server_ephemeral_sk, client_ephemeral_pk)
     let shared_secret = match x25519_diffie_hellman(&kex_state.eph_sk, client_eph_pub) {
         Ok(ss) => ss,
@@ -174,7 +174,7 @@ pub fn process_ecdh_init(
     // Derive session keys
     let keys = derive_keys(&shared_secret, &h, &kex_state.session_id);
 
-    Some((reply, off, keys, h))
+    Some((reply, off, keys, h, shared_secret, kex_state.eph_pk))
 }
 
 /// Compute the exchange hash H.
@@ -279,10 +279,10 @@ fn derive_keys(k: &[u8; 32], h: &[u8; 32], session_id: &[u8; 32]) -> TransportKe
 /// K_2 = HASH(K || H || K_1)
 fn derive_key_material(k: &[u8; 32], h: &[u8; 32], label: u8, session_id: &[u8; 32]) -> [u8; 64] {
     let mut result = [0u8; 64];
+    let mut tmp = [0u8; 37];
 
     // First 32 bytes
     let mut hasher = Sha256::new();
-    let mut tmp = [0u8; 36];
     let mpint_len = put_mpint(&mut tmp, k);
     hasher.update(&tmp[..mpint_len]);
     hasher.update(h);
@@ -301,4 +301,86 @@ fn derive_key_material(k: &[u8; 32], h: &[u8; 32], label: u8, session_id: &[u8; 
     result[32..64].copy_from_slice(&d.bytes[..32]);
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crypto::rng::ChaChaRng;
+    use crypto::x25519::x25519_keypair;
+    use self::std::time::Instant;
+
+    fn test_server_config() -> KexConfig {
+        KexConfig {
+            host_seed: [
+                0x56, 0x65, 0x65, 0x72, 0x4f, 0x53, 0x2d, 0x48,
+                0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79, 0x53, 0x65,
+                0x65, 0x64, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+                0x36, 0x37, 0x38, 0x39, 0x41, 0x42, 0x43, 0x44,
+            ],
+            host_pubkey: [
+                0xe2, 0x91, 0x74, 0x12, 0xbb, 0x3a, 0x6f, 0x7e,
+                0x80, 0x07, 0x28, 0x7f, 0xc4, 0x27, 0x01, 0x65,
+                0xcf, 0x5d, 0x05, 0x61, 0x63, 0xf0, 0x82, 0x4c,
+                0xda, 0x73, 0xdc, 0x70, 0x8d, 0x99, 0x94, 0x3b,
+            ],
+        }
+    }
+
+    fn seeded_rng(seed_byte: u8) -> ChaChaRng {
+        ChaChaRng::from_seed([seed_byte; 32])
+    }
+
+    fn build_test_kex_state() -> (KexState, [u8; 32]) {
+        let mut rng = seeded_rng(0x11);
+        let mut kex_state = KexState::new(&mut rng);
+        let mut cookie = [0u8; 16];
+        cookie.copy_from_slice(&[0xA5; 16]);
+
+        let client_version = b"SSH-2.0-OpenSSH_9.6";
+        kex_state.client_version[..client_version.len()].copy_from_slice(client_version);
+        kex_state.client_version_len = client_version.len();
+
+        let client_kex_len = build_kexinit(&mut kex_state.client_kexinit, &cookie);
+        kex_state.client_kexinit_len = client_kex_len;
+
+        let server_kex_len = build_kexinit(&mut kex_state.server_kexinit, &cookie);
+        kex_state.server_kexinit_len = server_kex_len;
+
+        let mut client_rng = seeded_rng(0x22);
+        let (_client_sk, client_pk) = x25519_keypair(&mut client_rng);
+
+        (kex_state, client_pk)
+    }
+
+    #[test]
+    fn process_ecdh_init_produces_reply_and_keys() {
+        let (mut kex_state, client_pk) = build_test_kex_state();
+        let config = test_server_config();
+
+        let result = process_ecdh_init(&client_pk, &mut kex_state, &config)
+            .expect("ecdh init should succeed");
+
+        let (reply, reply_len, keys, exchange_hash, _k, _qs) = result;
+        assert_eq!(reply[0], 31);
+        assert!(reply_len > 100);
+        assert!(exchange_hash.iter().any(|&b| b != 0));
+        assert!(keys.rx_key.iter().any(|&b| b != 0));
+        assert!(keys.tx_key.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn process_ecdh_init_timing_trace() {
+        let (mut kex_state, client_pk) = build_test_kex_state();
+        let config = test_server_config();
+
+        let started = Instant::now();
+        let result = process_ecdh_init(&client_pk, &mut kex_state, &config);
+        let elapsed = started.elapsed();
+
+        assert!(result.is_some());
+        std::println!("process_ecdh_init elapsed: {:?}", elapsed);
+    }
 }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [features]
-default = ["dist-app"]
+default = ["dist-app", "dhcp"]
 
 dist-minimal = ["microkernel/dist-minimal"]
 dist-app     = ["microkernel/dist-app", "shell", "ssh", "userlib", "samples"]
@@ -13,10 +13,12 @@ dist-xrt     = ["microkernel/dist-xrt", "accel"]
 dist-full    = ["dist-app", "dist-xrt"]
 
 accel      = ["microkernel/accel"]
+dhcp       = []
 shell      = ["dep:shell"]
 ssh        = ["dep:ssh", "dep:crypto"]
 userlib    = ["dep:userlib"]
 samples    = ["userlib"]
+ring3      = ["samples"]
 multi-user = ["microkernel/multi-user", "shell/multi-user"]
 
 [dependencies]
