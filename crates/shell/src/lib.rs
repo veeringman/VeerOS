@@ -162,6 +162,10 @@ pub struct ShellEnv {
     pub mesh_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
     /// Handle `zkp <subcommand>` — ZKP proof operations.
     pub zkp_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+
+    /// Handle `hostname [new-name]` — get/set system hostname.
+    /// Callback: fn(args, writer). If args is empty, print current; else set.
+    pub hostname_cmd: Option<fn(&str, &mut dyn core::fmt::Write)>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -265,12 +269,29 @@ impl Shell {
     }
 
     fn print_prompt<S: Serial>(&self, con: &mut Console<S>) {
+        // Read hostname from /etc/hostname via VFS if available.
+        let mut host_buf = [0u8; 64];
+        let mut host_name = "veeros";
+        if let Some(read_fn) = self.env.vfs_read_file {
+            let n = read_fn("/etc/hostname", &mut host_buf);
+            if n > 0 {
+                if let Ok(s) = core::str::from_utf8(&host_buf[..n]) {
+                    let s = s.trim();
+                    if !s.is_empty() {
+                        host_name = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(s.as_ptr(), s.len())) };
+                    }
+                }
+            }
+        }
         if let Some(f) = self.env.get_current_user {
             let (_uid, name) = f();
             con.write_str_raw(name);
-            con.write_str_raw("@veeros> ");
+            con.write_str_raw("@");
+            con.write_str_raw(host_name);
+            con.write_str_raw("> ");
         } else {
-            con.write_str_raw(PROMPT);
+            con.write_str_raw(host_name);
+            con.write_str_raw("> ");
         }
     }
 
@@ -371,6 +392,7 @@ impl Shell {
             "ping" => self.cmd_ping(con, args),
             "netstat" | "ss" => self.cmd_netstat(con),
             "ssh" => self.cmd_ssh(con, args),
+            "hostname" => self.cmd_hostname(con, args),
             // ── AI-native commands ───────────────────
             "agents" => self.cmd_agents(con, args),
             "intent" => self.cmd_intent(con, args),
@@ -465,6 +487,7 @@ impl Shell {
         let _ = writeln!(con, "  ping       Send network probes to an IP");
         let _ = writeln!(con, "  netstat    Socket / connection status");
         let _ = writeln!(con, "  ssh        SSH client (ssh user@host[:port])");
+        let _ = writeln!(con, "  hostname   Get/set system hostname");
         let _ = writeln!(con, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} ai-native \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
         let _ = writeln!(con, "  agents     Agent lifecycle (list/spawn/kill/status)");
         let _ = writeln!(con, "  intent     Intent engine (submit/status/cancel/stats)");
@@ -1248,6 +1271,30 @@ impl Shell {
         match self.env.ssh_cmd {
             Some(f) => f(args, con.serial()),
             None => { let _ = writeln!(con, "ssh: not available"); }
+        }
+    }
+
+    fn cmd_hostname<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        match self.env.hostname_cmd {
+            Some(f) => f(args, con as &mut dyn core::fmt::Write),
+            None => {
+                // Fallback: read /etc/hostname
+                if args.is_empty() {
+                    let mut buf = [0u8; 64];
+                    if let Some(read_fn) = self.env.vfs_read_file {
+                        let n = read_fn("/etc/hostname", &mut buf);
+                        if n > 0 {
+                            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                                let _ = writeln!(con, "{}", s.trim());
+                                return;
+                            }
+                        }
+                    }
+                    let _ = writeln!(con, "veeros");
+                } else {
+                    let _ = writeln!(con, "hostname: cannot set (no callback)");
+                }
+            }
         }
     }
 

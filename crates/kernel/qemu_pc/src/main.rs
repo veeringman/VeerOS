@@ -505,6 +505,7 @@ fn shell_task() -> ! {
         peers_cmd: None,
         mesh_cmd: None,
         zkp_cmd: None,
+        hostname_cmd: Some(hostname_command),
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);
@@ -948,6 +949,7 @@ fn ssh_task() -> ! {
                     peers_cmd: None,
                     mesh_cmd: None,
                     zkp_cmd: None,
+                    hostname_cmd: Some(hostname_command),
                 };
                 let mut sh = Shell::new(env);
 
@@ -1363,7 +1365,26 @@ fn do_mount(device: &str, path: &str) -> bool {
         } else {
             FsType::Fat32
         };
-        mounts.mount(dir, fs_type, device).is_some()
+        let slot = match mounts.mount(dir, fs_type, device) {
+            Some(s) => s,
+            None => return false,
+        };
+        // For FAT32 devices, actually mount the filesystem.
+        if fs_type == FsType::Fat32 && device.starts_with("vda") {
+            let blk = &*VIRTIO_BLK.0.get();
+            if !blk.active {
+                mounts.unmount(dir);
+                return false;
+            }
+            // Detect MBR partition table or raw FAT32.
+            let part_offset = detect_partition_offset();
+            let fat = &mut *FAT32.0.get();
+            if !fat.mount(blk_read_sector, blk_write_sector, part_offset, dir, inodes, slot) {
+                mounts.unmount(dir);
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -1378,8 +1399,58 @@ fn do_umount(path: &str) -> bool {
         if dir == NO_INODE {
             return false;
         }
+        // If FAT32, unmount the filesystem too.
+        let fat = &mut *FAT32.0.get();
+        if fat.mounted && fat.mount_inode == dir {
+            fat.unmount();
+        }
         mounts.unmount(dir)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Block I/O wrappers for FAT32 — bridge virtio-blk to fat32::BlockReadFn
+// ---------------------------------------------------------------------------
+
+/// Read a single sector from virtio-blk.
+fn blk_read_sector(sector: u64, buf: &mut [u8]) -> bool {
+    unsafe {
+        let blk = &mut *VIRTIO_BLK.0.get();
+        blk.read_sectors(sector, buf, 1)
+    }
+}
+
+/// Write a single sector to virtio-blk.
+fn blk_write_sector(sector: u64, buf: &[u8]) -> bool {
+    unsafe {
+        let blk = &mut *VIRTIO_BLK.0.get();
+        blk.write_sectors(sector, buf, 1)
+    }
+}
+
+/// Detect MBR partition table and return the LBA offset of the first
+/// FAT32 partition, or 0 if the disk is raw FAT32 (no MBR).
+fn detect_partition_offset() -> u32 {
+    let mut mbr = [0u8; 512];
+    if !blk_read_sector(0, &mut mbr) {
+        return 0;
+    }
+    // Check MBR signature (0x55AA at offset 510).
+    if mbr[510] != 0x55 || mbr[511] != 0xAA {
+        return 0;
+    }
+    // Scan 4 MBR partition entries (offset 446, 16 bytes each).
+    for i in 0..4 {
+        let off = 446 + i * 16;
+        let ptype = mbr[off + 4];
+        // FAT32 partition types: 0x0B (FAT32 CHS), 0x0C (FAT32 LBA).
+        if ptype == 0x0B || ptype == 0x0C {
+            let lba = u32::from_le_bytes([mbr[off + 8], mbr[off + 9], mbr[off + 10], mbr[off + 11]]);
+            return lba;
+        }
+    }
+    // No FAT32 partition found — try raw (sector 0 may be BPB directly).
+    0
 }
 
 #[cfg(feature = "shell")]
@@ -1425,6 +1496,84 @@ fn netstat_callback(w: &mut dyn core::fmt::Write) {
 }
 
 // ---------------------------------------------------------------------------
+// Hostname command — get/set /etc/hostname
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "shell")]
+fn hostname_command(args: &str, w: &mut dyn core::fmt::Write) {
+    let args = args.trim();
+    unsafe {
+        let inodes = &mut *INODES.0.get();
+        let ramfs = &mut *RAMFS.0.get();
+        if args.is_empty() {
+            // Print current hostname
+            let mut buf = [0u8; 64];
+            let n = read_etc_hostname(inodes, ramfs, &mut buf);
+            if n > 0 {
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    let _ = writeln!(w, "{}", s.trim());
+                } else {
+                    let _ = writeln!(w, "veeros");
+                }
+            } else {
+                let _ = writeln!(w, "veeros");
+            }
+        } else {
+            // Validate hostname: alphanumeric, hyphens, dots, max 63 chars
+            let name = if args.len() > 63 { &args[..63] } else { args };
+            let valid = name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+            if !valid {
+                let _ = writeln!(w, "hostname: invalid name (use alphanumeric, hyphens, dots)");
+                return;
+            }
+            // Write new hostname to /etc/hostname
+            let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc")
+                .unwrap_or(microkernel::vfs::NO_INODE);
+            if etc_id == microkernel::vfs::NO_INODE {
+                let _ = writeln!(w, "hostname: /etc not found");
+                return;
+            }
+            let host_id = inodes.resolve(etc_id, "hostname")
+                .unwrap_or(microkernel::vfs::NO_INODE);
+            if host_id == microkernel::vfs::NO_INODE {
+                // Create it
+                let mut content = [0u8; 64];
+                let len = name.len();
+                content[..len].copy_from_slice(name.as_bytes());
+                content[len] = b'\n';
+                ramfs.create_with_content(inodes, etc_id, "hostname", &content[..len + 1]);
+            } else {
+                // Overwrite existing
+                let mut content = [0u8; 64];
+                let len = name.len();
+                content[..len].copy_from_slice(name.as_bytes());
+                content[len] = b'\n';
+                ramfs.write(inodes, host_id, 0, &content[..len + 1]);
+                // Update inode size to exact length
+                inodes.inodes[host_id as usize].size = (len + 1) as u32;
+            }
+            let _ = writeln!(w, "{}", name);
+        }
+    }
+}
+
+/// Read /etc/hostname into buf, return bytes read.
+#[cfg(feature = "shell")]
+fn read_etc_hostname(inodes: &mut microkernel::vfs::InodeTable, ramfs: &mut microkernel::ramfs::RamFs, buf: &mut [u8]) -> usize {
+    let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc")
+        .unwrap_or(microkernel::vfs::NO_INODE);
+    if etc_id == microkernel::vfs::NO_INODE {
+        return 0;
+    }
+    let host_id = inodes.resolve(etc_id, "hostname")
+        .unwrap_or(microkernel::vfs::NO_INODE);
+    if host_id == microkernel::vfs::NO_INODE {
+        return 0;
+    }
+    ramfs.read(inodes, host_id, 0, buf)
+}
+
+// ---------------------------------------------------------------------------
 // VFS callbacks (injected into the shell via ShellEnv)
 // ---------------------------------------------------------------------------
 
@@ -1432,7 +1581,7 @@ fn netstat_callback(w: &mut dyn core::fmt::Write) {
 fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
     use microkernel::vfs::{InodeKind, NO_INODE};
     unsafe {
-        let inodes = &*INODES.0.get();
+        let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let dir_id = if path == "." {
             Some(cwd)
@@ -1446,6 +1595,14 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
                     let _ = writeln!(w, "ls: '{}': not a directory", path);
                     return;
                 }
+                // Lazy-populate FAT32 subdirectories on first access.
+                if inode.dev_major > 0 && inode.children_head == NO_INODE && inode.data_offset != 0 {
+                    let mount_id = inode.dev_major;
+                    let cluster = inode.data_offset;
+                    let fat = &mut *FAT32.0.get();
+                    fat.populate_dir(inodes, id, cluster, mount_id);
+                }
+                let inode = &inodes.inodes[id as usize];
                 let mut child = inode.children_head;
                 while child != NO_INODE {
                     let c = &inodes.inodes[child as usize];
@@ -1469,12 +1626,17 @@ fn vfs_read_file(path: &str, buf: &mut [u8]) -> usize {
     use microkernel::vfs::{InodeKind, NO_INODE};
     unsafe {
         let inodes = &*INODES.0.get();
-        let ramfs = &*RAMFS.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
         if id == NO_INODE { return 0; }
         let inode = &inodes.inodes[id as usize];
         if inode.kind != InodeKind::File { return 0; }
+        // Route to FAT32 if the file belongs to a FAT32 mount.
+        if inode.dev_major > 0 {
+            let fat = &mut *FAT32.0.get();
+            return fat.read(inodes, id, 0, buf);
+        }
+        let ramfs = &*RAMFS.0.get();
         ramfs.read(inodes, id, 0, buf)
     }
 }
@@ -1484,28 +1646,47 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
     use microkernel::vfs::{InodeKind, NO_INODE};
     unsafe {
         let inodes = &mut *INODES.0.get();
-        let ramfs = &mut *RAMFS.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let mut id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
+
+        // Check if we're writing into a FAT32-mounted directory.
         if id == NO_INODE {
-            if let Some(slash) = path.rfind('/') {
+            // Find parent directory and check if it's FAT32-mounted.
+            let (parent, name) = if let Some(slash) = path.rfind('/') {
                 let parent_path = if slash == 0 { "/" } else { &path[..slash] };
-                let name = &path[slash + 1..];
-                let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-                if parent == NO_INODE || name.is_empty() { return false; }
-                id = match inodes.create_file_in(parent, name) {
+                (inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE), &path[slash + 1..])
+            } else {
+                (cwd, path)
+            };
+            if parent == NO_INODE || name.is_empty() { return false; }
+
+            // If parent is under a FAT32 mount, create file on disk.
+            if inodes.inodes[parent as usize].dev_major > 0 {
+                let fat = &mut *FAT32.0.get();
+                let mount_id = inodes.inodes[parent as usize].dev_major;
+                id = match fat.create_file(inodes, parent, name, mount_id) {
                     Some(i) => i,
                     None => return false,
                 };
             } else {
-                id = match inodes.create_file_in(cwd, path) {
+                id = match inodes.create_file_in(parent, name) {
                     Some(i) => i,
                     None => return false,
                 };
             }
         }
+
         let inode = &inodes.inodes[id as usize];
         if inode.kind != InodeKind::File { return false; }
+
+        // Route to FAT32 if the file belongs to a FAT32 mount.
+        if inode.dev_major > 0 {
+            let fat = &mut *FAT32.0.get();
+            let offset = if append { inode.size } else { 0 };
+            return fat.write(inodes, id, offset, data) > 0;
+        }
+
+        let ramfs = &mut *RAMFS.0.get();
         let offset = if append { inode.size } else { 0 };
         if !append {
             ramfs.truncate(inodes, id, 0);
@@ -2260,6 +2441,7 @@ pub extern "C" fn _rust_start() -> ! {
         let inodes = &mut *INODES.0.get();
         let ramfs = &mut *RAMFS.0.get();
         inodes.init_root();
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "mnt");
         let dev_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/dev").unwrap_or(microkernel::vfs::NO_INODE);
         if dev_id != microkernel::vfs::NO_INODE {
             inodes.create_device_in(dev_id, "null", 0, 0);

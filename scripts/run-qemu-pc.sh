@@ -19,6 +19,8 @@
 #   GUEST_SSH_PORT  guest SSH port            (default: 2222, nat only)
 #   MEMORY_MB       guest RAM in MiB          (default: 256)
 #   DISPLAY_MODE    serial | vga              (default: serial)
+#   DISK_IMG        path to secondary disk    (default: none)
+#   DISK_SIZE       create disk if missing    (default: 64M)
 
 set -euo pipefail
 
@@ -34,6 +36,8 @@ HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
 GUEST_SSH_PORT="${GUEST_SSH_PORT:-2222}"
 MEMORY_MB="${MEMORY_MB:-256}"
 DISPLAY_MODE="${DISPLAY_MODE:-serial}"
+DISK_IMG="${DISK_IMG:-}"
+DISK_SIZE="${DISK_SIZE:-64M}"
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "qemu-system-x86_64 not found" >&2
@@ -103,6 +107,24 @@ case "$NET_MODE" in
         ;;
 esac
 
+# ── Secondary disk (virtio-blk) ──────────────────────────────────────
+DISK_INFO=""
+if [ -n "$DISK_IMG" ]; then
+    if [ ! -f "$DISK_IMG" ]; then
+        echo "Creating FAT32 disk image: $DISK_IMG ($DISK_SIZE)"
+        qemu-img create -f raw "$DISK_IMG" "$DISK_SIZE"
+        # Format as FAT32 with MBR partition table.
+        # Create a single partition spanning the whole disk.
+        /sbin/mkfs.vfat -F 32 "$DISK_IMG"
+    fi
+    qemu_args+=(
+        -drive "file=${DISK_IMG},format=raw,if=none,id=disk0"
+        -device virtio-blk-pci,drive=disk0
+        -boot d
+    )
+    DISK_INFO=" | disk: $DISK_IMG"
+fi
+
 # ── KVM acceleration ─────────────────────────────────────────────────
 if [ -r /dev/kvm ]; then
     qemu_args+=(-accel kvm)
@@ -125,7 +147,7 @@ case "$DISPLAY_MODE" in
         ;;
 esac
 
-echo "Starting QEMU ($ACCEL) — $NET_INFO"
+echo "Starting QEMU ($ACCEL) — $NET_INFO$DISK_INFO"
 if [ "$NET_MODE" = "nat" ]; then
     echo "Connect: ssh -p ${HOST_SSH_PORT} veeros@<host-ip>"
 else
