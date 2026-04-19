@@ -124,9 +124,9 @@ pub static NET_IF: NetIfCell = NetIfCell(UnsafeCell::new(NetInterface::empty()))
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// smoltcp socket-set storage (static, no heap).
-/// We support 8 sockets: 2 TCP (primary + SSH server) + 1 TCP (SSH client)
-/// + 1 UDP + 1 DHCP + 3 spare.
-const MAX_SMOL_SOCKETS: usize = 8;
+/// We support: 1 TCP (primary) + 4 SSH sessions + 1 SSH client
+/// + 1 UDP + 1 DHCP + spare.
+const MAX_SMOL_SOCKETS: usize = 16;
 
 // Compile-time sanity: make sure the SocketStorage array can't silently
 // overflow into neighbouring statics.
@@ -146,6 +146,14 @@ const _: () = {
 struct SmolSocketBuf([smoltcp::iface::SocketStorage<'static>; MAX_SMOL_SOCKETS]);
 
 static mut SOCKET_SET_BUF: SmolSocketBuf = SmolSocketBuf([
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
+    smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
     smoltcp::iface::SocketStorage::EMPTY,
@@ -185,18 +193,36 @@ static mut UDP_TX_DATA: [u8; UDP_TX_BUF_SIZE] = [0u8; UDP_TX_BUF_SIZE];
 /// UDP socket handle (stored after creation).
 static mut UDP_HANDLE: Option<smoltcp::iface::SocketHandle> = None;
 
-/// SSH TCP socket buffers (separate from the primary TCP socket in NetStack).
+/// Maximum number of concurrent SSH sessions.
 #[cfg(feature = "ssh")]
-const SSH_TCP_RX_BUF_SIZE: usize = 4096;
+pub const MAX_SSH_SESSIONS: usize = 4;
+
+/// Per-session TCP socket buffers.
 #[cfg(feature = "ssh")]
-const SSH_TCP_TX_BUF_SIZE: usize = 4096;
+const SSH_SESSION_BUF_SIZE: usize = 16384;
 
 #[cfg(feature = "ssh")]
-static mut SSH_TCP_RX_BUF: [u8; SSH_TCP_RX_BUF_SIZE] = [0u8; SSH_TCP_RX_BUF_SIZE];
+static mut SSH_SESSION_RX_BUFS: [[u8; SSH_SESSION_BUF_SIZE]; MAX_SSH_SESSIONS] =
+    [[0u8; SSH_SESSION_BUF_SIZE]; MAX_SSH_SESSIONS];
 #[cfg(feature = "ssh")]
-static mut SSH_TCP_TX_BUF: [u8; SSH_TCP_TX_BUF_SIZE] = [0u8; SSH_TCP_TX_BUF_SIZE];
+static mut SSH_SESSION_TX_BUFS: [[u8; SSH_SESSION_BUF_SIZE]; MAX_SSH_SESSIONS] =
+    [[0u8; SSH_SESSION_BUF_SIZE]; MAX_SSH_SESSIONS];
 
-/// SSH TCP socket handle.
+/// Per-session TCP socket handles.
+#[cfg(feature = "ssh")]
+pub static mut SSH_SESSION_HANDLES: [Option<smoltcp::iface::SocketHandle>; MAX_SSH_SESSIONS] =
+    [None; MAX_SSH_SESSIONS];
+
+/// Per-session in-use flags (true = slot has an active SSH session).
+#[cfg(feature = "ssh")]
+pub static SSH_SESSION_ACTIVE: [AtomicBool; MAX_SSH_SESSIONS] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
+
+// Legacy alias — slot 0 for backward compat with SSH client code.
 #[cfg(feature = "ssh")]
 pub static mut SSH_TCP_HANDLE: Option<smoltcp::iface::SocketHandle> = None;
 
@@ -308,18 +334,28 @@ pub fn init() {
         UDP_HANDLE = Some(handle);
     }
 
-    // Add a TCP socket for the SSH server (port 2222).
+    // Add TCP sockets for the SSH server session pool (port 22).
+    // Each socket listens independently; when a client connects, one
+    // transitions to Established while the rest keep listening.
     #[cfg(feature = "ssh")]
     {
         let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
         unsafe {
             use smoltcp::socket::tcp::SocketBuffer;
-            let rx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_TCP_RX_BUF))[..]);
-            let tx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_TCP_TX_BUF))[..]);
-            let mut ssh_socket = TcpSocket::new(rx_buf, tx_buf);
-            ssh_socket.set_nagle_enabled(false);
-            let handle = sockets.add(ssh_socket);
-            SSH_TCP_HANDLE = Some(handle);
+            for i in 0..MAX_SSH_SESSIONS {
+                let rx_buf = SocketBuffer::new(
+                    &mut (&mut *core::ptr::addr_of_mut!(SSH_SESSION_RX_BUFS))[i][..],
+                );
+                let tx_buf = SocketBuffer::new(
+                    &mut (&mut *core::ptr::addr_of_mut!(SSH_SESSION_TX_BUFS))[i][..],
+                );
+                let mut ssh_socket = TcpSocket::new(rx_buf, tx_buf);
+                ssh_socket.set_nagle_enabled(false);
+                let handle = sockets.add(ssh_socket);
+                SSH_SESSION_HANDLES[i] = Some(handle);
+            }
+            // Legacy alias — point at slot 0 for ssh_listen/ssh_is_connected compat.
+            SSH_TCP_HANDLE = SSH_SESSION_HANDLES[0];
         }
     }
 
@@ -448,6 +484,29 @@ pub fn poll(now_ms: u64) {
     POLL_BUSY.store(false, Ordering::Release);
 }
 
+/// Like `poll()`, but **leaves POLL_BUSY held** on success so the caller
+/// can safely access the socket set before releasing it.
+///
+/// Returns `true` if the lock was acquired (caller must release via
+/// `POLL_BUSY.store(false, Release)`).  Returns `false` when the lock
+/// was already held by another task (stack was NOT polled).
+fn poll_locked(now_ms: u64) -> bool {
+    if !is_active() {
+        return false;
+    }
+
+    if POLL_BUSY.swap(true, Ordering::Acquire) {
+        return false; // another task is polling
+    }
+
+    let stack = unsafe { (*NET_STACK.0.get()).as_mut().unwrap() };
+    let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
+    stack.poll(sockets, now_ms);
+
+    // NOTE: we intentionally do NOT release POLL_BUSY here.
+    true
+}
+
 /// Network polling task — runs as a kernel task, polls the stack every tick.
 pub fn net_poll_task() -> ! {
     loop {
@@ -465,22 +524,165 @@ pub fn net_poll_task() -> ! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SSH helpers — poll, listen, connect for the SSH TCP socket
+// SSH helpers — session pool management
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Poll function for the SSH TCP socket — called from TcpSerial while
-/// waiting for data.
+/// Acquire the POLL_BUSY lock for exclusive socket-set access.
+///
+/// Does NOT poll the stack — `net_poll_task` drives `stack.poll()`
+/// continuously and handles all TX/RX processing.  TcpSerial uses
+/// this to safely read/write socket buffers between polls.
+///
+/// Returns `true` if the lock was acquired (caller must call `ssh_poll_unlock()`).
+/// Returns `false` if another task holds the lock (caller should spin/retry).
 #[cfg(feature = "ssh")]
-pub fn ssh_poll() {
-    let ticks = unsafe { (*crate::SCHEDULER.0.get()).ticks };
-    poll(ticks);
+pub fn ssh_poll() -> bool {
+    if !is_active() {
+        return false;
+    }
+    !POLL_BUSY.swap(true, Ordering::Acquire)
 }
 
-/// Start listening on the SSH TCP socket.
+/// Release the POLL_BUSY lock after a `ssh_poll()` + socket access.
+#[cfg(feature = "ssh")]
+pub fn ssh_poll_unlock() {
+    POLL_BUSY.store(false, Ordering::Release);
+}
+
+/// Start all idle session sockets listening on the SSH port.
+#[cfg(feature = "ssh")]
+pub fn ssh_listen_all(port: u16) {
+    // Acquire POLL_BUSY so we don't race with net_poll_task.
+    loop {
+        if !POLL_BUSY.swap(true, Ordering::Acquire) {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    unsafe {
+        let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
+        for i in 0..MAX_SSH_SESSIONS {
+            if SSH_SESSION_ACTIVE[i].load(Ordering::Relaxed) {
+                continue; // slot busy with a session
+            }
+            if let Some(handle) = SSH_SESSION_HANDLES[i] {
+                let socket = sockets.get_mut::<TcpSocket>(handle);
+                if !socket.is_listening() {
+                    if socket.is_open() {
+                        socket.abort();
+                    }
+                    socket.listen(port).ok();
+                }
+            }
+        }
+    }
+    POLL_BUSY.store(false, Ordering::Release);
+}
+
+/// Start listening on the SSH TCP socket (legacy — listens slot 0).
 #[cfg(feature = "ssh")]
 pub fn ssh_listen(port: u16) {
+    ssh_listen_all(port);
+}
+
+/// Find a session slot that has a newly connected client.
+/// Returns the slot index (0..MAX_SSH_SESSIONS) or `None`.
+/// The caller must mark it active via `SSH_SESSION_ACTIVE[slot].store(true, ...)`.
+#[cfg(feature = "ssh")]
+pub fn ssh_accept() -> Option<usize> {
     unsafe {
-        if let Some(handle) = SSH_TCP_HANDLE {
+        let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
+        for i in 0..MAX_SSH_SESSIONS {
+            if SSH_SESSION_ACTIVE[i].load(Ordering::Relaxed) {
+                continue; // already in use
+            }
+            if let Some(handle) = SSH_SESSION_HANDLES[i] {
+                let socket = sockets.get::<TcpSocket>(handle);
+                if socket.is_active() && !socket.is_listening() {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if any client is connected (for the listener poll loop).
+#[cfg(feature = "ssh")]
+pub fn ssh_is_connected() -> bool {
+    ssh_accept().is_some()
+}
+
+/// Debug: print the state of all SSH session sockets.
+#[cfg(feature = "ssh")]
+pub fn ssh_debug_socket_states() {
+    unsafe {
+        let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
+        let serial = soc_qemu_pc::default_serial();
+        let mut con = arch::Console::new(serial);
+        for i in 0..MAX_SSH_SESSIONS {
+            let active = SSH_SESSION_ACTIVE[i].load(Ordering::Relaxed);
+            if let Some(handle) = SSH_SESSION_HANDLES[i] {
+                let socket = sockets.get::<TcpSocket>(handle);
+                let state = socket.state();
+                let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
+                    "[ssh-dbg] slot {} active={} state={}\n",
+                    i, active, state,
+                ));
+            }
+        }
+    }
+}
+
+/// Check if a specific session socket can send payload bytes.
+#[cfg(feature = "ssh")]
+pub fn ssh_session_can_send(slot: usize) -> bool {
+    unsafe {
+        if let Some(handle) = SSH_SESSION_HANDLES.get(slot).and_then(|h| *h) {
+            let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
+            let socket = sockets.get::<TcpSocket>(handle);
+            socket.can_send()
+        } else {
+            false
+        }
+    }
+}
+
+/// Release a session slot: flush pending TX data, abort the socket, re-listen.
+#[cfg(feature = "ssh")]
+pub fn ssh_session_release(slot: usize, port: u16) {
+    // Keep the slot ACTIVE during teardown so the listener doesn't
+    // reuse the slot (and its stack) while we're still running.
+
+    // Flush pending TX data: acquire the lock and poll the stack a few
+    // times so that any data still in the socket's TX buffer is
+    // transmitted before we abort the socket.
+    for _ in 0..5 {
+        if !POLL_BUSY.swap(true, Ordering::Acquire) {
+            unsafe {
+                let stack = (*NET_STACK.0.get()).as_mut().unwrap();
+                let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
+                let ticks = (*crate::SCHEDULER.0.get()).ticks;
+                stack.poll(sockets, ticks);
+            }
+            POLL_BUSY.store(false, Ordering::Release);
+        }
+        // Yield to give the NIC time to transmit.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("int 0x80", in("rax") 0x00usize, options(nostack, preserves_flags));
+        }
+    }
+
+    // Now tear down: acquire POLL_BUSY, abort, and re-listen.
+    loop {
+        if !POLL_BUSY.swap(true, Ordering::Acquire) {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    unsafe {
+        if let Some(handle) = SSH_SESSION_HANDLES.get(slot).and_then(|h| *h) {
             let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
             let socket = sockets.get_mut::<TcpSocket>(handle);
             if socket.is_open() {
@@ -489,34 +691,17 @@ pub fn ssh_listen(port: u16) {
             socket.listen(port).ok();
         }
     }
+    POLL_BUSY.store(false, Ordering::Release);
+
+    // Only now mark the slot as free — the socket is listening and
+    // the stack has been flushed.
+    SSH_SESSION_ACTIVE[slot].store(false, Ordering::Release);
 }
 
-/// Check if a client is connected to the SSH TCP socket.
-#[cfg(feature = "ssh")]
-pub fn ssh_is_connected() -> bool {
-    unsafe {
-        if let Some(handle) = SSH_TCP_HANDLE {
-            let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
-            let socket = sockets.get::<TcpSocket>(handle);
-            socket.is_active()
-        } else {
-            false
-        }
-    }
-}
-
-/// Check if the SSH TCP socket can send payload bytes.
+/// Check if the SSH TCP socket can send payload bytes (legacy).
 #[cfg(feature = "ssh")]
 pub fn ssh_can_send() -> bool {
-    unsafe {
-        if let Some(handle) = SSH_TCP_HANDLE {
-            let sockets = (*SMOL_SOCKETS.0.get()).as_ref().unwrap();
-            let socket = sockets.get::<TcpSocket>(handle);
-            socket.can_send()
-        } else {
-            false
-        }
-    }
+    ssh_session_can_send(0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -529,10 +714,20 @@ pub fn ssh_can_send() -> bool {
 /// The caller must poll until `ssh_client_is_connected()` returns true.
 #[cfg(feature = "ssh")]
 pub fn ssh_client_connect(ip: [u8; 4], port: u16) -> bool {
-    unsafe {
+    // Acquire POLL_BUSY so we don't race with net_poll_task.
+    loop {
+        if !POLL_BUSY.swap(true, Ordering::Acquire) {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    let result = unsafe {
         let handle = match SSH_CLIENT_TCP_HANDLE {
             Some(h) => h,
-            None => return false,
+            None => {
+                POLL_BUSY.store(false, Ordering::Release);
+                return false;
+            }
         };
 
         let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
@@ -561,16 +756,27 @@ pub fn ssh_client_connect(ip: [u8; 4], port: u16) -> bool {
             Ok(()) => true,
             Err(_) => false,
         }
-    }
+    };
+    POLL_BUSY.store(false, Ordering::Release);
+    result
 }
 
 /// Poll function for SSH client — same as server poll (drives the stack).
 #[cfg(feature = "ssh")]
-pub fn ssh_client_poll() {
-    ssh_poll();
+pub fn ssh_client_poll() -> bool {
+    ssh_poll()
+}
+
+/// Release lock after SSH client poll.
+#[cfg(feature = "ssh")]
+pub fn ssh_client_poll_unlock() {
+    ssh_poll_unlock();
 }
 
 /// Check if the SSH client TCP socket is connected (established).
+///
+/// **Must be called while POLL_BUSY is held** (between ssh_client_poll
+/// returning true and ssh_client_poll_unlock).
 #[cfg(feature = "ssh")]
 pub fn ssh_client_is_connected() -> bool {
     unsafe {
@@ -585,6 +791,8 @@ pub fn ssh_client_is_connected() -> bool {
 }
 
 /// Check if the SSH client TCP socket can send.
+///
+/// **Must be called while POLL_BUSY is held.**
 #[cfg(feature = "ssh")]
 pub fn ssh_client_can_send() -> bool {
     unsafe {
@@ -601,6 +809,13 @@ pub fn ssh_client_can_send() -> bool {
 /// Disconnect and clean up the SSH client TCP socket.
 #[cfg(feature = "ssh")]
 pub fn ssh_client_disconnect() {
+    // Acquire POLL_BUSY so we don't race with net_poll_task.
+    loop {
+        if !POLL_BUSY.swap(true, Ordering::Acquire) {
+            break;
+        }
+        core::hint::spin_loop();
+    }
     unsafe {
         if let Some(handle) = SSH_CLIENT_TCP_HANDLE {
             let sockets = (*SMOL_SOCKETS.0.get()).as_mut().unwrap();
@@ -608,6 +823,7 @@ pub fn ssh_client_disconnect() {
             socket.abort();
         }
     }
+    POLL_BUSY.store(false, Ordering::Release);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

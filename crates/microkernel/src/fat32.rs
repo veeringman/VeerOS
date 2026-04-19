@@ -14,6 +14,9 @@ use crate::vfs::{InodeTable, InodeKind, MAX_INODES, NO_INODE};
 
 // ─── Constants ───────────────────────────────────────────────────────
 
+/// Maximum number of concurrent FAT32 instances (one per block device).
+pub const MAX_FAT32: usize = 4;
+
 const SECTOR_SIZE: usize = 512;
 
 /// End-of-chain markers (any value >= this is EOC).

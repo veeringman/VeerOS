@@ -289,7 +289,7 @@ impl<D: NetworkDevice> NetStack<D> {
 /// **Usage pattern (inside a task):**
 /// ```ignore
 /// // After NetStack::poll() detects a connection on port 2323:
-/// let tcp_serial = TcpSerial::new(tcp_handle, &SOCKETS, &NET_STACK, poll_fn);
+/// let tcp_serial = TcpSerial::new(tcp_handle, &SOCKETS, poll_fn, unlock_fn);
 /// let mut con = Console::new(tcp_serial);
 /// shell.run(&mut con);
 /// ```
@@ -297,13 +297,22 @@ impl<D: NetworkDevice> NetStack<D> {
 /// Because `Serial` is synchronous (blocking), `TcpSerial` spins and
 /// calls the provided `poll_fn` while waiting for data. This keeps the
 /// network stack alive during blocking reads.
+///
+/// The `poll_fn` must acquire a global lock (e.g. POLL_BUSY) and
+/// **leave the lock held** on return.  A separate background task must
+/// call `NetStack::poll()` frequently to drive the TCP/IP stack.
+/// After TcpSerial finishes accessing the socket set, it calls
+/// `unlock_fn` to release the lock.  This prevents races with
+/// the background net-poll task that also mutates the socket set.
 pub struct TcpSerial {
     handle: SocketHandle,
     /// Pointer to the global SocketSet (via UnsafeCell in the kernel).
     sockets: *mut SocketSet<'static>,
-    /// Function the caller provides to poll the network stack.
-    /// Signature: fn() — expected to call NetStack::poll() + drive the NIC.
-    poll_fn: fn(),
+    /// Lock, poll the network stack, and keep lock held.
+    /// Returns `true` if the lock was acquired (caller must unlock).
+    poll_fn: fn() -> bool,
+    /// Release the lock acquired by `poll_fn`.
+    unlock_fn: fn(),
 }
 
 impl TcpSerial {
@@ -312,12 +321,14 @@ impl TcpSerial {
     pub unsafe fn new(
         handle: SocketHandle,
         sockets: *mut SocketSet<'static>,
-        poll_fn: fn(),
+        poll_fn: fn() -> bool,
+        unlock_fn: fn(),
     ) -> Self {
         Self {
             handle,
             sockets,
             poll_fn,
+            unlock_fn,
         }
     }
 }
@@ -330,56 +341,79 @@ impl Serial for TcpSerial {
     fn write_bytes(&self, bytes: &[u8]) {
         let mut offset = 0;
         while offset < bytes.len() {
-            (self.poll_fn)();
+            let locked = (self.poll_fn)();
+            if !locked {
+                core::hint::spin_loop();
+                continue;
+            }
             let sockets = unsafe { &mut *self.sockets };
             let socket = sockets.get_mut::<TcpSocket>(self.handle);
             if !socket.may_send() {
+                (self.unlock_fn)();
                 return; // connection closed or closing
             }
             if socket.can_send() {
                 match socket.send_slice(&bytes[offset..]) {
                     Ok(sent) if sent > 0 => {
                         offset += sent;
+                        (self.unlock_fn)();
                         continue;
                     }
                     Ok(_) | Err(_) => {}
                 }
             }
+            (self.unlock_fn)();
             core::hint::spin_loop();
         }
 
         // Drive the stack once more so buffered data gets pushed promptly.
-        (self.poll_fn)();
+        let locked = (self.poll_fn)();
+        if locked { (self.unlock_fn)(); }
     }
 
     fn read_byte(&self) -> u8 {
         loop {
-            (self.poll_fn)();
+            let locked = (self.poll_fn)();
+            if !locked {
+                core::hint::spin_loop();
+                continue;
+            }
             let sockets = unsafe { &mut *self.sockets };
             let socket = sockets.get_mut::<TcpSocket>(self.handle);
             if !socket.may_recv() {
+                (self.unlock_fn)();
                 return 0x04; // EOF → Ctrl-D → shell exit
             }
             if socket.can_recv() {
                 let mut buf = [0u8; 1];
                 if let Ok(n) = socket.recv_slice(&mut buf) {
                     if n > 0 {
+                        (self.unlock_fn)();
                         return buf[0];
                     }
                 }
             }
+            (self.unlock_fn)();
             core::hint::spin_loop();
         }
     }
 
     fn has_data(&self) -> bool {
-        (self.poll_fn)();
-        let sockets = unsafe { &mut *self.sockets };
-        let socket = sockets.get_mut::<TcpSocket>(self.handle);
-        socket.can_recv()
+        loop {
+            let locked = (self.poll_fn)();
+            if locked {
+                let sockets = unsafe { &mut *self.sockets };
+                let socket = sockets.get_mut::<TcpSocket>(self.handle);
+                let result = socket.can_recv();
+                (self.unlock_fn)();
+                return result;
+            }
+            core::hint::spin_loop();
+        }
     }
 
     fn flush(&self) {
-        (self.poll_fn)();
+        let locked = (self.poll_fn)();
+        if locked { (self.unlock_fn)(); }
     }
 }

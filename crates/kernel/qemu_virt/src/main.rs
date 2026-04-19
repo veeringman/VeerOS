@@ -437,7 +437,7 @@ static NET_SOCKETS: SocketSetCell = SocketSetCell(UnsafeCell::new(None));
 /// Global poll function handed to TcpSerial so it can drive the stack
 /// while blocking on read_byte / write_byte.
 #[cfg(feature = "net")]
-fn net_poll() {
+fn net_poll() -> bool {
     unsafe {
         if let (Some(stack), Some(sockets)) =
             (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
@@ -446,6 +446,12 @@ fn net_poll() {
             stack.poll(sockets, ticks);
         }
     }
+    true
+}
+
+#[cfg(feature = "net")]
+fn net_poll_unlock() {
+    // Single-threaded — no lock to release.
 }
 
 /// The network listener task.
@@ -546,7 +552,7 @@ fn net_task() -> ! {
         unsafe {
             let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
             let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap() as *mut SocketSet<'static>;
-            let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll);
+            let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll, net_poll_unlock);
             let mut tcp_con = Console::new(tcp_serial);
 
             #[cfg(feature = "shell")]

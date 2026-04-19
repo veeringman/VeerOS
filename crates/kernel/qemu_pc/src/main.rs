@@ -152,7 +152,16 @@ use microkernel::fat32::Fat32;
 
 pub(crate) struct Fat32Cell(pub UnsafeCell<Fat32>);
 unsafe impl Sync for Fat32Cell {}
-pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(Fat32::new()));
+
+/// Maximum number of virtio-blk devices (and corresponding FAT32 instances).
+const MAX_BLK_DEVS: usize = 4;
+
+pub(crate) static FAT32S: [Fat32Cell; MAX_BLK_DEVS] = [
+    Fat32Cell(UnsafeCell::new(Fat32::new())),
+    Fat32Cell(UnsafeCell::new(Fat32::new())),
+    Fat32Cell(UnsafeCell::new(Fat32::new())),
+    Fat32Cell(UnsafeCell::new(Fat32::new())),
+];
 
 // ---------------------------------------------------------------------------
 // Mount table
@@ -272,14 +281,23 @@ unsafe impl Sync for AcpiCell {}
 pub(crate) static ACPI_INFO: AcpiCell = AcpiCell(UnsafeCell::new(AcpiInfo::new()));
 
 // ---------------------------------------------------------------------------
-// VIRTIO block device
+// VIRTIO block devices (up to MAX_BLK_DEVS)
 // ---------------------------------------------------------------------------
 
 use soc_qemu_pc::virtio_blk::VirtioBlk;
 
 pub(crate) struct VirtioBlkCell(pub UnsafeCell<VirtioBlk>);
 unsafe impl Sync for VirtioBlkCell {}
-pub(crate) static VIRTIO_BLK: VirtioBlkCell = VirtioBlkCell(UnsafeCell::new(VirtioBlk::new()));
+pub(crate) static VIRTIO_BLKS: [VirtioBlkCell; MAX_BLK_DEVS] = [
+    VirtioBlkCell(UnsafeCell::new(VirtioBlk::new())),
+    VirtioBlkCell(UnsafeCell::new(VirtioBlk::new())),
+    VirtioBlkCell(UnsafeCell::new(VirtioBlk::new())),
+    VirtioBlkCell(UnsafeCell::new(VirtioBlk::new())),
+];
+/// Number of active virtio-blk devices.
+pub(crate) struct BlkCountCell(pub UnsafeCell<usize>);
+unsafe impl Sync for BlkCountCell {}
+pub(crate) static BLK_COUNT: BlkCountCell = BlkCountCell(UnsafeCell::new(0));
 
 // ---------------------------------------------------------------------------
 // VIRTIO network device
@@ -415,12 +433,26 @@ static RING3_KSTACK: Ring3KernelStack = Ring3KernelStack([0u8; 8192]);
 struct NetStack([u8; 8192]);
 static NET_POLL_STACK: NetStack = NetStack([0u8; 8192]);
 
-// SSH task stack (256 KiB — ed25519-dalek + curve25519-dalek serial backend need deep stack).
+// SSH listener task stack (small — just accepts and spawns).
 #[cfg(feature = "ssh")]
 #[repr(align(16))]
-struct SshStack([u8; 262144]);
+struct SshListenerStack([u8; 16384]);
 #[cfg(feature = "ssh")]
-static SSH_STACK: SshStack = SshStack([0u8; 262144]);
+static SSH_STACK: SshListenerStack = SshListenerStack([0u8; 16384]);
+
+// SSH session stacks — one per concurrent session (256 KiB each for crypto).
+#[cfg(feature = "ssh")]
+const SSH_SESSION_STACK_SIZE: usize = 262144;
+#[cfg(feature = "ssh")]
+#[repr(align(16))]
+struct SshSessionStacks([[u8; SSH_SESSION_STACK_SIZE]; net::MAX_SSH_SESSIONS]);
+#[cfg(feature = "ssh")]
+static SSH_SESSION_STACKS: SshSessionStacks =
+    SshSessionStacks([[0u8; SSH_SESSION_STACK_SIZE]; net::MAX_SSH_SESSIONS]);
+
+/// Atomic slot index used to pass the accepted session slot to a spawned task.
+#[cfg(feature = "ssh")]
+static SSH_SPAWN_SLOT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
 
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
@@ -454,6 +486,7 @@ fn shell_task() -> ! {
         mount_fs: Some(do_mount),
         umount_fs: Some(do_umount),
         lsblk: Some(lsblk_info),
+        df_cmd: Some(df_info),
         input_status: Some(input_status),
         usb_list: None,
         ble_hid_list: None,
@@ -515,11 +548,11 @@ fn shell_task() -> ! {
 }
 
 // ---------------------------------------------------------------------------
-// SSH server task (listens on port 2222, encrypted remote shell)
+// SSH server task (listens on port 22, encrypted remote shell)
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "ssh", feature = "shell"))]
-const SSH_PORT: u16 = 2222;
+const SSH_PORT: u16 = 22;
 
 /// Ed25519 host key seed (32 bytes). In production this should be
 /// generated once and persisted; for now we use a fixed test seed.
@@ -660,9 +693,13 @@ fn ssh_client_cmd(args: &str, local: &dyn arch::Serial) {
     // Wait for TCP establishment (up to ~10 seconds).
     let start = unsafe { (*SCHEDULER.0.get()).ticks };
     loop {
-        net::ssh_client_poll();
-        if net::ssh_client_is_connected() {
-            break;
+        let locked = net::ssh_client_poll();
+        if locked {
+            let connected = net::ssh_client_is_connected();
+            net::ssh_client_poll_unlock();
+            if connected {
+                break;
+            }
         }
         let now = unsafe { (*SCHEDULER.0.get()).ticks };
         if now.wrapping_sub(start) > 10_000 {
@@ -670,7 +707,11 @@ fn ssh_client_cmd(args: &str, local: &dyn arch::Serial) {
             net::ssh_client_disconnect();
             return;
         }
-        core::hint::spin_loop();
+        // Yield to let net_poll_task drive the TCP handshake.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("int 0x80", in("rax") 0x00usize, options(nostack, preserves_flags));
+        }
     }
 
     // ── Create TcpSerial for the client TCP socket ─────────────────
@@ -678,7 +719,7 @@ fn ssh_client_cmd(args: &str, local: &dyn arch::Serial) {
         let handle = net::SSH_CLIENT_TCP_HANDLE.unwrap();
         let socket_set_ptr = (*net::SMOL_SOCKETS.0.get()).as_mut().unwrap()
             as *mut smoltcp::iface::SocketSet<'static>;
-        TcpSerial::new(handle, socket_set_ptr, net::ssh_client_poll)
+        TcpSerial::new(handle, socket_set_ptr, net::ssh_client_poll, net::ssh_client_poll_unlock)
     };
 
     // ── Run SSH client handshake ───────────────────────────────────
@@ -707,8 +748,6 @@ fn ssh_client_cmd(args: &str, local: &dyn arch::Serial) {
 
             // ── Interactive bridge loop ────────────────────────────
             loop {
-                net::ssh_client_poll();
-
                 // Remote → local: drain any buffered decrypted data.
                 if tcp_serial.has_data() {
                     let b = bridge.read_byte_from(&tcp_serial);
@@ -732,7 +771,11 @@ fn ssh_client_cmd(args: &str, local: &dyn arch::Serial) {
                     break;
                 }
 
-                core::hint::spin_loop();
+                // Yield to let net_poll_task drive TX/RX.
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::asm!("int 0x80", in("rax") 0x00usize, options(nostack, preserves_flags));
+                }
             }
 
             bridge.close_channel(&tcp_serial);
@@ -785,30 +828,33 @@ fn parse_u16(s: &str) -> Option<u16> {
 
 #[cfg(all(feature = "ssh", feature = "shell"))]
 fn ssh_task() -> ! {
-    use net::TcpSerial;
+    use core::sync::atomic::Ordering;
 
     let serial = default_serial();
     let mut con = Console::new(serial);
 
-    let _ = writeln!(con, "[ssh] task started");
-    let _ = writeln!(con, "[ssh] before listen");
+    let _ = writeln!(con, "[ssh] listener started (max {} sessions)", net::MAX_SSH_SESSIONS);
 
-    // Start listening IMMEDIATELY so TCP connections don't get RST.
-    net::ssh_listen(SSH_PORT);
-    let _ = writeln!(con, "[ssh] after listen");
-
-    let host_pubkey = SSH_HOST_PUBKEY;
+    // Put all idle session sockets into listening state.
+    net::ssh_listen_all(SSH_PORT);
 
     let _ = writeln!(con, "[ssh] SSH server ready on port {}", SSH_PORT);
 
     loop {
-        // Re-listen after each session.
-        net::ssh_listen(SSH_PORT);
+        // Ensure all idle slots are listening.
+        net::ssh_listen_all(SSH_PORT);
 
-        // Poll until a client connects.
+        // Poll until any session socket accepts a connection.
         loop {
-            net::ssh_poll();
-            if net::ssh_is_connected() {
+            let locked = net::ssh_poll();
+            let accepted = if locked {
+                let result = net::ssh_accept();
+                net::ssh_poll_unlock();
+                result.is_some()
+            } else {
+                false
+            };
+            if accepted {
                 break;
             }
             // Yield to other tasks.
@@ -818,160 +864,214 @@ fn ssh_task() -> ! {
             }
         }
 
-        let _ = writeln!(con, "[ssh] client connected");
+        // Re-check under lock after yield.
+        let locked = net::ssh_poll();
+        let slot = if locked {
+            let s = net::ssh_accept();
+            net::ssh_poll_unlock();
+            s
+        } else {
+            None
+        };
+        let slot = match slot {
+            Some(s) => s,
+            None => continue,
+        };
 
-        // Wait until the socket is fully send-ready before protocol I/O.
+        // Mark slot active so no one else grabs it.
+        net::SSH_SESSION_ACTIVE[slot].store(true, Ordering::Release);
+
+        let _ = writeln!(con, "[ssh] client connected on slot {}", slot);
+
+        // Wait until the socket is send-ready.
         loop {
-            net::ssh_poll();
-            if net::ssh_can_send() {
-                break;
+            let locked = net::ssh_poll();
+            if locked {
+                let ready = net::ssh_session_can_send(slot);
+                net::ssh_poll_unlock();
+                if ready {
+                    break;
+                }
             }
             #[cfg(target_arch = "x86_64")]
             unsafe {
                 core::arch::asm!("int 0x80", in("rax") 0x00usize, options(nostack, preserves_flags));
             }
         }
-        let _ = writeln!(con, "[ssh] socket send-ready");
 
-        // Create a TcpSerial over the SSH TCP socket.
-        let tcp_serial = unsafe {
-            let handle = net::SSH_TCP_HANDLE.unwrap();
-            let socket_set_ptr = (*net::SMOL_SOCKETS.0.get()).as_mut().unwrap()
-                as *mut smoltcp::iface::SocketSet<'static>;
-            TcpSerial::new(handle, socket_set_ptr, net::ssh_poll)
-        };
+        // Publish slot index for the spawned task to pick up.
+        SSH_SPAWN_SLOT.store(slot, Ordering::Release);
 
-        // Run the SSH handshake.
-        let config = ssh::server::SshServerConfig {
-            host_seed: SSH_HOST_SEED,
-            host_pubkey,
-            password_verify: ssh_verify_password,
-        };
-
-        // Create a simple RNG seeded from the tick counter.
-        let ticks = unsafe { (*SCHEDULER.0.get()).ticks };
-        let mut seed = [0u8; 32];
-        let tb = ticks.to_le_bytes();
-        seed[..8].copy_from_slice(&tb);
-        seed[8..16].copy_from_slice(&tb);
-        seed[16..24].copy_from_slice(&tb);
-        seed[24..32].copy_from_slice(&tb);
-        let mut rng = crypto::rng::ChaChaRng::from_seed(seed);
-
-        match ssh::server::run_ssh_handshake_with_trace(&tcp_serial, &config, &mut rng, |stage| {
-            let _ = writeln!(con, "[ssh] {}", stage);
-        }) {
-            Some(mut bridge) => {
-                let _ = writeln!(con, "[ssh] handshake succeeded — starting shell");
-
-                // Save the bridge pointer for cleanup after the shell exits.
-                let bridge_ptr = &mut bridge as *mut ssh::server::SshShellBridge;
-
-                // Create an SshSerial adapter that the shell can use.
-                let ssh_serial = SshSerial {
-                    bridge: bridge_ptr,
-                    tcp: &tcp_serial,
-                };
-
-                let mut ssh_con = Console::new(ssh_serial);
-                let env = ShellEnv {
-                    version: VERSION,
-                    platform: "QEMU PC (x86-64) [SSH]",
-                    scheduler: "minimal",
-                    get_uptime_ticks: Some(get_uptime_ticks),
-                    get_task_list: Some(write_task_list),
-                    get_mem_info: Some(write_mem_info),
-                    get_driver_list: Some(write_driver_list),
-                    wifi_cmd: None,
-                    bt_cmd: None,
-                    zigbee_cmd: None,
-                    get_current_user: Some(get_current_user),
-                    get_user_list: Some(write_user_list),
-                    vfs_list_dir: Some(vfs_list_dir),
-                    vfs_read_file: Some(vfs_read_file),
-                    vfs_write_file: Some(vfs_write_file),
-                    vfs_mkdir: Some(vfs_mkdir),
-                    vfs_stat: Some(vfs_stat),
-                    vfs_unlink: Some(vfs_unlink),
-                    vfs_rename: Some(vfs_rename),
-                    vfs_getcwd: Some(vfs_getcwd),
-                    vfs_chdir: Some(vfs_chdir),
-                    vfs_tree: Some(vfs_tree),
-                    vfs_touch: Some(vfs_touch),
-                    mount_list: Some(mount_list),
-                    mount_fs: Some(do_mount),
-                    umount_fs: Some(do_umount),
-                    lsblk: Some(lsblk_info),
-                    input_status: Some(input_status),
-                    usb_list: None,
-                    ble_hid_list: None,
-                    gpio_cmd: None,
-                    i2c_cmd: None,
-                    spi_cmd: None,
-                    hw_info: Some(hw_info),
-                    get_temp_millic: None,
-                    dmesg: Some(dmesg_info),
-                    reboot: Some(do_reboot),
-                    shutdown: Some(do_shutdown),
-                    caps_cmd: Some(caps_command),
-                    auditlog_cmd: Some(auditlog_command),
-                    ifconfig_cmd: Some(ifconfig_callback),
-                    ping_cmd: Some(ping_callback),
-                    netstat_cmd: Some(netstat_callback),
-                    ssh_cmd: Some(ssh_client_cmd),
-                    #[cfg(feature = "multi-user")]
-                    login: Some(do_login),
-                    #[cfg(not(feature = "multi-user"))]
-                    login: None,
-                    #[cfg(feature = "multi-user")]
-                    logout: Some(do_logout),
-                    #[cfg(not(feature = "multi-user"))]
-                    logout: None,
-                    #[cfg(feature = "multi-user")]
-                    change_password: Some(do_change_password),
-                    #[cfg(not(feature = "multi-user"))]
-                    change_password: None,
-                    #[cfg(feature = "multi-user")]
-                    add_user: Some(do_add_user),
-                    #[cfg(not(feature = "multi-user"))]
-                    add_user: None,
-                    #[cfg(feature = "multi-user")]
-                    remove_user: Some(do_remove_user),
-                    #[cfg(not(feature = "multi-user"))]
-                    remove_user: None,
-                    pre_authenticated: true,
-                    get_agent_list: None,
-                    agent_cmd: None,
-                    get_intent_list: None,
-                    intent_cmd: None,
-                    memory_cmd: None,
-                    get_fabric_status: None,
-                    peers_cmd: None,
-                    mesh_cmd: None,
-                    zkp_cmd: None,
-                    hostname_cmd: Some(hostname_command),
-                };
-                let mut sh = Shell::new(env);
-
-                // Check if this is an exec request (single command) or interactive shell.
-                if let Some(cmd_bytes) = bridge.exec_command() {
-                    if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
-                        sh.run_command(&mut ssh_con, cmd);
-                    }
-                } else {
-                    sh.run(&mut ssh_con);
-                }
-
-                // Clean up SSH channel.
-                let br = unsafe { &mut *bridge_ptr };
-                br.close_channel(&tcp_serial);
-                let _ = writeln!(con, "[ssh] session ended");
-            }
-            None => {
-                let _ = writeln!(con, "[ssh] handshake failed");
-            }
+        // Spawn a session handler task on the session's own stack.
+        let sb = SSH_SESSION_STACKS.0[slot].as_ptr() as usize;
+        let st = sb + SSH_SESSION_STACK_SIZE;
+        if let Some(child) = userlib::task::spawn(ssh_session_task, st, sb, 1) {
+            let _ = writeln!(con, "[ssh] spawned session task {} for slot {}", child, slot);
+        } else {
+            let _ = writeln!(con, "[ssh] ERROR: task table full, dropping slot {}", slot);
+            net::ssh_session_release(slot, SSH_PORT);
         }
     }
+}
+
+/// Per-session SSH handler — spawned by the listener for each connection.
+/// Reads its slot index from `SSH_SPAWN_SLOT`, runs the handshake + shell,
+/// then releases the slot and exits.
+#[cfg(all(feature = "ssh", feature = "shell"))]
+fn ssh_session_task() {
+    use core::sync::atomic::Ordering;
+    use net::TcpSerial;
+
+    // Pick up our slot index.
+    let slot = SSH_SPAWN_SLOT.load(Ordering::Acquire);
+    if slot >= net::MAX_SSH_SESSIONS {
+        userlib::task::exit(1);
+    }
+
+    let serial = default_serial();
+    let mut con = Console::new(serial);
+
+    let handle = unsafe { net::SSH_SESSION_HANDLES[slot].unwrap() };
+    let tcp_serial = unsafe {
+        let socket_set_ptr = (*net::SMOL_SOCKETS.0.get()).as_mut().unwrap()
+            as *mut smoltcp::iface::SocketSet<'static>;
+        TcpSerial::new(handle, socket_set_ptr, net::ssh_poll, net::ssh_poll_unlock)
+    };
+
+    let host_pubkey = SSH_HOST_PUBKEY;
+
+    // Run the SSH handshake.
+    let config = ssh::server::SshServerConfig {
+        host_seed: SSH_HOST_SEED,
+        host_pubkey,
+        password_verify: ssh_verify_password,
+    };
+
+    // RNG seeded from tick counter + slot for uniqueness.
+    let ticks = unsafe { (*SCHEDULER.0.get()).ticks };
+    let mut seed = [0u8; 32];
+    let tb = ticks.to_le_bytes();
+    seed[..8].copy_from_slice(&tb);
+    seed[8..16].copy_from_slice(&tb);
+    seed[16..24].copy_from_slice(&tb);
+    seed[24..32].copy_from_slice(&tb);
+    seed[0] ^= slot as u8;
+    let mut rng = crypto::rng::ChaChaRng::from_seed(seed);
+
+    match ssh::server::run_ssh_handshake_with_trace(&tcp_serial, &config, &mut rng, |stage| {
+        let _ = writeln!(con, "[ssh:{}] {}", slot, stage);
+    }) {
+        Some(mut bridge) => {
+            let _ = writeln!(con, "[ssh:{}] handshake succeeded", slot);
+
+            let bridge_ptr = &mut bridge as *mut ssh::server::SshShellBridge;
+
+            let ssh_serial = SshSerial {
+                bridge: bridge_ptr,
+                tcp: &tcp_serial,
+            };
+
+            let mut ssh_con = Console::new(ssh_serial);
+            let env = ShellEnv {
+                version: VERSION,
+                platform: "QEMU PC (x86-64) [SSH]",
+                scheduler: "minimal",
+                get_uptime_ticks: Some(get_uptime_ticks),
+                get_task_list: Some(write_task_list),
+                get_mem_info: Some(write_mem_info),
+                get_driver_list: Some(write_driver_list),
+                wifi_cmd: None,
+                bt_cmd: None,
+                zigbee_cmd: None,
+                get_current_user: Some(get_current_user),
+                get_user_list: Some(write_user_list),
+                vfs_list_dir: Some(vfs_list_dir),
+                vfs_read_file: Some(vfs_read_file),
+                vfs_write_file: Some(vfs_write_file),
+                vfs_mkdir: Some(vfs_mkdir),
+                vfs_stat: Some(vfs_stat),
+                vfs_unlink: Some(vfs_unlink),
+                vfs_rename: Some(vfs_rename),
+                vfs_getcwd: Some(vfs_getcwd),
+                vfs_chdir: Some(vfs_chdir),
+                vfs_tree: Some(vfs_tree),
+                vfs_touch: Some(vfs_touch),
+                mount_list: Some(mount_list),
+                mount_fs: Some(do_mount),
+                umount_fs: Some(do_umount),
+                lsblk: Some(lsblk_info),
+                df_cmd: Some(df_info),
+                input_status: Some(input_status),
+                usb_list: None,
+                ble_hid_list: None,
+                gpio_cmd: None,
+                i2c_cmd: None,
+                spi_cmd: None,
+                hw_info: Some(hw_info),
+                get_temp_millic: None,
+                dmesg: Some(dmesg_info),
+                reboot: Some(do_reboot),
+                shutdown: Some(do_shutdown),
+                caps_cmd: Some(caps_command),
+                auditlog_cmd: Some(auditlog_command),
+                ifconfig_cmd: Some(ifconfig_callback),
+                ping_cmd: Some(ping_callback),
+                netstat_cmd: Some(netstat_callback),
+                ssh_cmd: Some(ssh_client_cmd),
+                #[cfg(feature = "multi-user")]
+                login: Some(do_login),
+                #[cfg(not(feature = "multi-user"))]
+                login: None,
+                #[cfg(feature = "multi-user")]
+                logout: Some(do_logout),
+                #[cfg(not(feature = "multi-user"))]
+                logout: None,
+                #[cfg(feature = "multi-user")]
+                change_password: Some(do_change_password),
+                #[cfg(not(feature = "multi-user"))]
+                change_password: None,
+                #[cfg(feature = "multi-user")]
+                add_user: Some(do_add_user),
+                #[cfg(not(feature = "multi-user"))]
+                add_user: None,
+                #[cfg(feature = "multi-user")]
+                remove_user: Some(do_remove_user),
+                #[cfg(not(feature = "multi-user"))]
+                remove_user: None,
+                pre_authenticated: true,
+                get_agent_list: None,
+                agent_cmd: None,
+                get_intent_list: None,
+                intent_cmd: None,
+                memory_cmd: None,
+                get_fabric_status: None,
+                peers_cmd: None,
+                mesh_cmd: None,
+                zkp_cmd: None,
+                hostname_cmd: Some(hostname_command),
+            };
+            let mut sh = Shell::new(env);
+
+            if let Some(cmd_bytes) = bridge.exec_command() {
+                if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
+                    sh.run_command(&mut ssh_con, cmd);
+                }
+            } else {
+                sh.run(&mut ssh_con);
+            }
+
+            let br = unsafe { &mut *bridge_ptr };
+            br.close_channel(&tcp_serial);
+            let _ = writeln!(con, "[ssh:{}] session ended", slot);
+        }
+        None => {
+            let _ = writeln!(con, "[ssh:{}] handshake failed", slot);
+        }
+    }
+
+    // Release the session slot and exit the task.
+    net::ssh_session_release(slot, SSH_PORT);
+    userlib::task::exit(0);
 }
 
 /// Adapter that implements `Serial` over an SSH channel.
@@ -1057,12 +1157,17 @@ fn hw_info(w: &mut dyn core::fmt::Write) {
 
     // VIRTIO devices.
     unsafe {
-        let blk = &*VIRTIO_BLK.0.get();
-        if blk.active {
-            let _ = writeln!(w, "  virtio-blk: {} MiB ({} sectors){}",
-                blk.capacity_bytes() / (1024 * 1024),
-                blk.capacity_sectors(),
-                if blk.read_only { " [RO]" } else { "" });
+        let count = *BLK_COUNT.0.get();
+        for idx in 0..count {
+            let blk = &*VIRTIO_BLKS[idx].0.get();
+            if blk.active {
+                let letter = (b'a' + idx as u8) as char;
+                let _ = writeln!(w, "  virtio-blk: vd{} {} MiB ({} sectors){}",
+                    letter,
+                    blk.capacity_bytes() / (1024 * 1024),
+                    blk.capacity_sectors(),
+                    if blk.read_only { " [RO]" } else { "" });
+            }
         }
         let net = &*VIRTIO_NET.0.get();
         if net.active {
@@ -1369,20 +1474,28 @@ fn do_mount(device: &str, path: &str) -> bool {
             Some(s) => s,
             None => return false,
         };
-        // For FAT32 devices, actually mount the filesystem.
-        if fs_type == FsType::Fat32 && device.starts_with("vda") {
-            let blk = &*VIRTIO_BLK.0.get();
+        // For FAT32 devices, resolve device name to block index.
+        if fs_type == FsType::Fat32 {
+            let blk_idx = blk_dev_index(device);
+            if blk_idx >= MAX_BLK_DEVS {
+                mounts.unmount(dir);
+                return false;
+            }
+            let blk = &*VIRTIO_BLKS[blk_idx].0.get();
             if !blk.active {
                 mounts.unmount(dir);
                 return false;
             }
-            // Detect MBR partition table or raw FAT32.
-            let part_offset = detect_partition_offset();
-            let fat = &mut *FAT32.0.get();
-            if !fat.mount(blk_read_sector, blk_write_sector, part_offset, dir, inodes, slot) {
+            let read_fn = BLK_READ_FNS[blk_idx];
+            let write_fn = BLK_WRITE_FNS[blk_idx];
+            let part_offset = detect_partition_offset_dev(blk_idx);
+            let fat = &mut *FAT32S[blk_idx].0.get();
+            if !fat.mount(read_fn, write_fn, part_offset, dir, inodes, slot) {
                 mounts.unmount(dir);
                 return false;
             }
+            // Record which block device backs this mount.
+            mounts.mounts[(slot - 1) as usize].blk_index = blk_idx as u8;
         }
         true
     }
@@ -1399,57 +1512,81 @@ fn do_umount(path: &str) -> bool {
         if dir == NO_INODE {
             return false;
         }
-        // If FAT32, unmount the filesystem too.
-        let fat = &mut *FAT32.0.get();
-        if fat.mounted && fat.mount_inode == dir {
-            fat.unmount();
+        // Find the mount and unmount the corresponding FAT32 instance.
+        for m in mounts.mounts.iter() {
+            if m.active && m.dir_inode == dir && m.fs_type == microkernel::vfs::FsType::Fat32 {
+                let fat = &mut *FAT32S[m.blk_index as usize].0.get();
+                if fat.mounted && fat.mount_inode == dir {
+                    fat.unmount();
+                }
+                break;
+            }
         }
         mounts.unmount(dir)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Block I/O wrappers for FAT32 — bridge virtio-blk to fat32::BlockReadFn
+// Block I/O wrappers — per-device fn pairs for FAT32's BlockReadFn/BlockWriteFn
 // ---------------------------------------------------------------------------
 
-/// Read a single sector from virtio-blk.
-fn blk_read_sector(sector: u64, buf: &mut [u8]) -> bool {
-    unsafe {
-        let blk = &mut *VIRTIO_BLK.0.get();
-        blk.read_sectors(sector, buf, 1)
+/// Map device name ("vda", "vdb", ...) to block device index (0, 1, ...).
+fn blk_dev_index(name: &str) -> usize {
+    let s = if name.starts_with("/dev/") { &name[5..] } else { name };
+    if s.len() == 3 && s.as_bytes()[0] == b'v' && s.as_bytes()[1] == b'd' {
+        let ch = s.as_bytes()[2];
+        if ch >= b'a' && ch < b'a' + MAX_BLK_DEVS as u8 {
+            return (ch - b'a') as usize;
+        }
     }
+    MAX_BLK_DEVS // invalid
 }
 
-/// Write a single sector to virtio-blk.
-fn blk_write_sector(sector: u64, buf: &[u8]) -> bool {
-    unsafe {
-        let blk = &mut *VIRTIO_BLK.0.get();
-        blk.write_sectors(sector, buf, 1)
-    }
+/// Find the FAT32 instance that owns an inode (by dev_major → mount slot → blk_index).
+fn fat32_for_inode(dev_major: u8) -> &'static mut Fat32 {
+    let blk_idx = unsafe {
+        let mounts = &*MOUNTS.0.get();
+        if dev_major > 0 && (dev_major as usize) <= microkernel::vfs::MAX_MOUNTS {
+            let m = &mounts.mounts[(dev_major - 1) as usize];
+            m.blk_index as usize
+        } else {
+            0
+        }
+    };
+    unsafe { &mut *FAT32S[blk_idx].0.get() }
 }
 
-/// Detect MBR partition table and return the LBA offset of the first
-/// FAT32 partition, or 0 if the disk is raw FAT32 (no MBR).
-fn detect_partition_offset() -> u32 {
+// Per-device sector read/write functions (FAT32 requires fn pointers, not closures).
+fn blk_read_0(sector: u64, buf: &mut [u8]) -> bool { unsafe { (*VIRTIO_BLKS[0].0.get()).read_sectors(sector, buf, 1) } }
+fn blk_read_1(sector: u64, buf: &mut [u8]) -> bool { unsafe { (*VIRTIO_BLKS[1].0.get()).read_sectors(sector, buf, 1) } }
+fn blk_read_2(sector: u64, buf: &mut [u8]) -> bool { unsafe { (*VIRTIO_BLKS[2].0.get()).read_sectors(sector, buf, 1) } }
+fn blk_read_3(sector: u64, buf: &mut [u8]) -> bool { unsafe { (*VIRTIO_BLKS[3].0.get()).read_sectors(sector, buf, 1) } }
+fn blk_write_0(sector: u64, buf: &[u8]) -> bool { unsafe { (*VIRTIO_BLKS[0].0.get()).write_sectors(sector, buf, 1) } }
+fn blk_write_1(sector: u64, buf: &[u8]) -> bool { unsafe { (*VIRTIO_BLKS[1].0.get()).write_sectors(sector, buf, 1) } }
+fn blk_write_2(sector: u64, buf: &[u8]) -> bool { unsafe { (*VIRTIO_BLKS[2].0.get()).write_sectors(sector, buf, 1) } }
+fn blk_write_3(sector: u64, buf: &[u8]) -> bool { unsafe { (*VIRTIO_BLKS[3].0.get()).write_sectors(sector, buf, 1) } }
+
+static BLK_READ_FNS: [fn(u64, &mut [u8]) -> bool; MAX_BLK_DEVS] = [blk_read_0, blk_read_1, blk_read_2, blk_read_3];
+static BLK_WRITE_FNS: [fn(u64, &[u8]) -> bool; MAX_BLK_DEVS] = [blk_write_0, blk_write_1, blk_write_2, blk_write_3];
+
+/// Detect MBR partition table on a given device, return LBA offset of first
+/// FAT32 partition or 0 for raw FAT32.
+fn detect_partition_offset_dev(blk_idx: usize) -> u32 {
     let mut mbr = [0u8; 512];
-    if !blk_read_sector(0, &mut mbr) {
+    if !BLK_READ_FNS[blk_idx](0, &mut mbr) {
         return 0;
     }
-    // Check MBR signature (0x55AA at offset 510).
     if mbr[510] != 0x55 || mbr[511] != 0xAA {
         return 0;
     }
-    // Scan 4 MBR partition entries (offset 446, 16 bytes each).
     for i in 0..4 {
         let off = 446 + i * 16;
         let ptype = mbr[off + 4];
-        // FAT32 partition types: 0x0B (FAT32 CHS), 0x0C (FAT32 LBA).
         if ptype == 0x0B || ptype == 0x0C {
             let lba = u32::from_le_bytes([mbr[off + 8], mbr[off + 9], mbr[off + 10], mbr[off + 11]]);
             return lba;
         }
     }
-    // No FAT32 partition found — try raw (sector 0 may be BPB directly).
     0
 }
 
@@ -1599,7 +1736,7 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
                 if inode.dev_major > 0 && inode.children_head == NO_INODE && inode.data_offset != 0 {
                     let mount_id = inode.dev_major;
                     let cluster = inode.data_offset;
-                    let fat = &mut *FAT32.0.get();
+                    let fat = fat32_for_inode(mount_id);
                     fat.populate_dir(inodes, id, cluster, mount_id);
                 }
                 let inode = &inodes.inodes[id as usize];
@@ -1633,7 +1770,7 @@ fn vfs_read_file(path: &str, buf: &mut [u8]) -> usize {
         if inode.kind != InodeKind::File { return 0; }
         // Route to FAT32 if the file belongs to a FAT32 mount.
         if inode.dev_major > 0 {
-            let fat = &mut *FAT32.0.get();
+            let fat = fat32_for_inode(inode.dev_major);
             return fat.read(inodes, id, 0, buf);
         }
         let ramfs = &*RAMFS.0.get();
@@ -1662,8 +1799,8 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
 
             // If parent is under a FAT32 mount, create file on disk.
             if inodes.inodes[parent as usize].dev_major > 0 {
-                let fat = &mut *FAT32.0.get();
                 let mount_id = inodes.inodes[parent as usize].dev_major;
+                let fat = fat32_for_inode(mount_id);
                 id = match fat.create_file(inodes, parent, name, mount_id) {
                     Some(i) => i,
                     None => return false,
@@ -1681,7 +1818,7 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
 
         // Route to FAT32 if the file belongs to a FAT32 mount.
         if inode.dev_major > 0 {
-            let fat = &mut *FAT32.0.get();
+            let fat = fat32_for_inode(inode.dev_major);
             let offset = if append { inode.size } else { 0 };
             return fat.write(inodes, id, offset, data) > 0;
         }
@@ -1922,14 +2059,72 @@ fn lsblk_info(w: &mut dyn core::fmt::Write) {
     let _ = writeln!(w, "  NAME        TYPE     SIZE");
     let _ = writeln!(w, "  ----------  -------  --------");
     unsafe {
-        let blk = &*VIRTIO_BLK.0.get();
-        if blk.active {
-            let _ = writeln!(w, "  vda         virtblk  {} MiB ({} sectors){}",
-                blk.capacity_bytes() / (1024 * 1024),
-                blk.capacity_sectors(),
-                if blk.read_only { " [RO]" } else { "" });
-        } else {
+        let count = *BLK_COUNT.0.get();
+        if count == 0 {
             let _ = writeln!(w, "  (no block devices)");
+            return;
+        }
+        for idx in 0..count {
+            let blk = &*VIRTIO_BLKS[idx].0.get();
+            if blk.active {
+                let letter = (b'a' + idx as u8) as char;
+                let _ = writeln!(w, "  vd{}         virtblk  {} MiB ({} sectors){}",
+                    letter,
+                    blk.capacity_bytes() / (1024 * 1024),
+                    blk.capacity_sectors(),
+                    if blk.read_only { " [RO]" } else { "" });
+            }
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+fn df_info(w: &mut dyn core::fmt::Write) {
+    let _ = writeln!(w, "  Filesystem      Size      Used     Avail  Use%  Mounted on");
+    let _ = writeln!(w, "  ------------  --------  --------  ------  ----  ----------");
+    unsafe {
+        // RamFS pool usage
+        let ramfs = &*RAMFS.0.get();
+        let total = ramfs.capacity();
+        let used = ramfs.used();
+        let avail = total - used;
+        let pct = if total > 0 { (used * 100) / total } else { 0 };
+        let _ = writeln!(w, "  ramfs           {} KB    {} KB   {} KB  {:3}%  /",
+            total / 1024, used / 1024, avail / 1024, pct);
+
+        // Inodes
+        let inodes = &*INODES.0.get();
+        let mut inode_used = 0usize;
+        for i in 0..microkernel::vfs::MAX_INODES {
+            if inodes.inodes[i].kind != microkernel::vfs::InodeKind::Free {
+                inode_used += 1;
+            }
+        }
+        let _ = writeln!(w, "  inodes          {}/{}",
+            inode_used, microkernel::vfs::MAX_INODES);
+
+        // Mounted FAT32 partitions
+        let mounts = &*MOUNTS.0.get();
+        for m in mounts.mounts.iter() {
+            if m.active && m.fs_type == microkernel::vfs::FsType::Fat32 {
+                let mut pathbuf = [0u8; 64];
+                let plen = inodes.build_path(m.dir_inode, &mut pathbuf);
+                let path = core::str::from_utf8(&pathbuf[..plen]).unwrap_or("?");
+                let _ = writeln!(w, "  {}         (fat32)                          {}",
+                    m.label_str(), path);
+            }
+        }
+
+        // Virtio block devices
+        let count = *BLK_COUNT.0.get();
+        for idx in 0..count {
+            let blk = &*VIRTIO_BLKS[idx].0.get();
+            if blk.active {
+                let letter = (b'a' + idx as u8) as char;
+                let cap_mb = blk.capacity_bytes() / (1024 * 1024);
+                let _ = writeln!(w, "  /dev/vd{}        {} MB                                (block device)",
+                    letter, cap_mb);
+            }
         }
     }
 }
@@ -2374,19 +2569,26 @@ pub extern "C" fn _rust_start() -> ! {
 
             match d.device_id {
                 soc_qemu_pc::virtio::VIRTIO_DEV_BLK => {
-                    let blk = &mut *VIRTIO_BLK.0.get();
-                    if blk.init(io_base, fa) {
-                        let cap_mb = blk.capacity_bytes() / (1024 * 1024);
-                        let _ = writeln!(con, "[boot] virtio-blk: {} MiB ({} sectors), io=0x{:x}",
-                            cap_mb, blk.capacity_sectors(), io_base);
-                        let _ = reg.register("virtio-blk", DriverCaps {
-                            mmio_regions: 0,
-                            uses_interrupts: true,
-                            uses_dma: true,
-                            uses_network: false,
-                        });
+                    let idx = *BLK_COUNT.0.get();
+                    if idx >= MAX_BLK_DEVS {
+                        let _ = writeln!(con, "[boot] virtio-blk: too many block devices (max {})", MAX_BLK_DEVS);
                     } else {
-                        let _ = writeln!(con, "[boot] virtio-blk: init failed (io=0x{:x})", io_base);
+                        let blk = &mut *VIRTIO_BLKS[idx].0.get();
+                        if blk.init(io_base, fa) {
+                            let cap_mb = blk.capacity_bytes() / (1024 * 1024);
+                            let letter = (b'a' + idx as u8) as char;
+                            let _ = writeln!(con, "[boot] virtio-blk: vd{} {} MiB ({} sectors), io=0x{:x}",
+                                letter, cap_mb, blk.capacity_sectors(), io_base);
+                            *BLK_COUNT.0.get() = idx + 1;
+                            let _ = reg.register("virtio-blk", DriverCaps {
+                                mmio_regions: 0,
+                                uses_interrupts: true,
+                                uses_dma: true,
+                                uses_network: false,
+                            });
+                        } else {
+                            let _ = writeln!(con, "[boot] virtio-blk: init failed (io=0x{:x})", io_base);
+                        }
                     }
                 }
                 soc_qemu_pc::virtio::VIRTIO_DEV_NET => {
@@ -2441,7 +2643,45 @@ pub extern "C" fn _rust_start() -> ! {
         let inodes = &mut *INODES.0.get();
         let ramfs = &mut *RAMFS.0.get();
         inodes.init_root();
+
+        // Standard POSIX directory layout.
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "bin");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "sbin");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "usr");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "var");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "home");
         inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "mnt");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "opt");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "proc");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "sys");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "boot");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "lib");
+        inodes.mkdir_in(microkernel::vfs::ROOT_INODE, "run");
+
+        // /usr/{bin,sbin,lib,share}
+        let usr_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/usr").unwrap_or(microkernel::vfs::NO_INODE);
+        if usr_id != microkernel::vfs::NO_INODE {
+            inodes.mkdir_in(usr_id, "bin");
+            inodes.mkdir_in(usr_id, "sbin");
+            inodes.mkdir_in(usr_id, "lib");
+            inodes.mkdir_in(usr_id, "share");
+        }
+
+        // /var/{log,tmp,run}
+        let var_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/var").unwrap_or(microkernel::vfs::NO_INODE);
+        if var_id != microkernel::vfs::NO_INODE {
+            inodes.mkdir_in(var_id, "log");
+            inodes.mkdir_in(var_id, "tmp");
+            inodes.mkdir_in(var_id, "run");
+        }
+
+        // /home/root
+        let home_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/home").unwrap_or(microkernel::vfs::NO_INODE);
+        if home_id != microkernel::vfs::NO_INODE {
+            inodes.mkdir_in(home_id, "root");
+        }
+
+        // /dev — device nodes
         let dev_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/dev").unwrap_or(microkernel::vfs::NO_INODE);
         if dev_id != microkernel::vfs::NO_INODE {
             inodes.create_device_in(dev_id, "null", 0, 0);
@@ -2451,13 +2691,47 @@ pub extern "C" fn _rust_start() -> ! {
             inodes.create_device_in(dev_id, "keyboard", 1, 0);
             inodes.create_device_in(dev_id, "mouse", 1, 1);
         }
+
+        // /etc — system config files
         let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc").unwrap_or(microkernel::vfs::NO_INODE);
         if etc_id != microkernel::vfs::NO_INODE {
             ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS!\n");
             ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-qemu-pc\n");
+            ramfs.create_with_content(inodes, etc_id, "os-release",
+                b"NAME=VeerOS\nVERSION=0.1.0\nID=veeros\nPRETTY_NAME=\"VeerOS 0.1.0\"\n");
+            ramfs.create_with_content(inodes, etc_id, "fstab",
+                b"# <device>  <mount>    <type>  <options>\nramfs       /          ramfs   defaults\nvda         /mnt/system fat32   auto\nvdb         /mnt/data   fat32   auto\n");
+            ramfs.create_with_content(inodes, etc_id, "passwd",
+                b"root:x:0:0:root:/home/root:/bin/sh\nveeros:x:1000:1000:VeerOS User:/home/veeros:/bin/sh\n");
+            ramfs.create_with_content(inodes, etc_id, "group",
+                b"root:x:0:\nveeros:x:1000:\n");
+        }
+
+        // /mnt/system, /mnt/data — persistent mount points
+        let mnt_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/mnt").unwrap_or(microkernel::vfs::NO_INODE);
+        if mnt_id != microkernel::vfs::NO_INODE {
+            inodes.mkdir_in(mnt_id, "system");
+            inodes.mkdir_in(mnt_id, "data");
         }
     }
     let _ = writeln!(con, "[boot] VFS initialised (ramfs {} KiB)", microkernel::ramfs::RAMFS_POOL_SIZE / 1024);
+
+    // ── Auto-mount block devices ─────────────────────────────
+    unsafe {
+        let count = *BLK_COUNT.0.get();
+        // vda → /mnt/system (system disk)
+        if count >= 1 {
+            if do_mount("vda", "/mnt/system") {
+                let _ = writeln!(con, "[boot] vda mounted on /mnt/system (fat32)");
+            }
+        }
+        // vdb → /mnt/data (data disk)
+        if count >= 2 {
+            if do_mount("vdb", "/mnt/data") {
+                let _ = writeln!(con, "[boot] vdb mounted on /mnt/data (fat32)");
+            }
+        }
+    }
 
     // ── network stack ────────────────────────────────────────
     net::init();
@@ -2501,10 +2775,7 @@ pub extern "C" fn _rust_start() -> ! {
         }
 
         // Network polling task (if NIC is present).
-            // When SSH is enabled, the SSH task owns socket polling directly via
-            // TcpSerial/ssh_poll to avoid unsynchronized concurrent access to the
-            // global smoltcp state from multiple kernel tasks.
-            #[cfg(not(feature = "ssh"))]
+        // POLL_BUSY prevents races with SSH session tasks.
         if net::is_active() {
             let sb = NET_POLL_STACK.0.as_ptr() as usize;
             let st = sb + NET_POLL_STACK.0.len();
@@ -2518,7 +2789,7 @@ pub extern "C" fn _rust_start() -> ! {
         if net::is_active() {
             let sb = SSH_STACK.0.as_ptr() as usize;
             let st = sb + SSH_STACK.0.len();
-            if let Some(idx) = sched.create_task("ssh", ssh_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) = sched.create_task("ssh-listen", ssh_task as *const () as usize, st, sb, 1, 0) {
                 sched.tasks[idx].context.set_status(INITIAL_RFLAGS);
             }
         }

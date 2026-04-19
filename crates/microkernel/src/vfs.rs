@@ -47,6 +47,8 @@ pub struct MountEntry {
     pub fs_type: FsType,
     /// VFS inode ID of the directory where this filesystem is mounted.
     pub dir_inode: u16,
+    /// Block device index (0-based) for FAT32 mounts.
+    pub blk_index: u8,
     /// Human-readable label for `lsblk` / `mount` output (e.g. "sd0").
     pub label: [u8; 8],
 }
@@ -57,6 +59,7 @@ impl MountEntry {
             active: false,
             fs_type: FsType::None,
             dir_inode: NO_INODE,
+            blk_index: 0,
             label: [0u8; 8],
         }
     }

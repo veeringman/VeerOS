@@ -258,9 +258,27 @@ pub fn run_ssh_client_with_trace<S: Serial, F: FnMut(&str)>(
     }
     trace("sent-channel-open");
 
-    // Read CHANNEL_OPEN_CONFIRMATION
-    let n = transport.read_packet(serial, &mut payload);
-    if n == 0 || payload[0] != 91 { return None; }
+    // Read CHANNEL_OPEN_CONFIRMATION, skipping asynchronous messages
+    // (e.g. SSH_MSG_GLOBAL_REQUEST "hostkeys-00@openssh.com" from OpenSSH).
+    let n = loop {
+        let n = transport.read_packet(serial, &mut payload);
+        if n == 0 { return None; }
+        match payload[0] {
+            2 | 4 => continue, // SSH_MSG_IGNORE, SSH_MSG_DEBUG
+            80 => {
+                // SSH_MSG_GLOBAL_REQUEST — check want_reply
+                let (_, name_end) = get_string(&payload[1..]);
+                let want_reply_off = 1 + name_end;
+                if want_reply_off < n && payload[want_reply_off] != 0 {
+                    // Send SSH_MSG_REQUEST_FAILURE (82)
+                    transport.write_packet(serial, &[82]);
+                }
+                continue;
+            }
+            91 => break n,    // SSH_MSG_CHANNEL_OPEN_CONFIRMATION
+            _ => return None, // unexpected
+        }
+    };
 
     let server_channel_id = get_u32(&payload[5..]);
     let server_window = get_u32(&payload[9..]);
@@ -297,9 +315,23 @@ pub fn run_ssh_client_with_trace<S: Serial, F: FnMut(&str)>(
         transport.write_packet(serial, &msg[..off]);
     }
 
-    // Read PTY response
-    let n = transport.read_packet(serial, &mut payload);
-    if n == 0 { return None; }
+    // Read PTY response, skipping async messages.
+    let _n = loop {
+        let n = transport.read_packet(serial, &mut payload);
+        if n == 0 { return None; }
+        match payload[0] {
+            2 | 4 => continue,
+            80 => {
+                let (_, name_end) = get_string(&payload[1..]);
+                let want_reply_off = 1 + name_end;
+                if want_reply_off < n && payload[want_reply_off] != 0 {
+                    transport.write_packet(serial, &[82]);
+                }
+                continue;
+            }
+            _ => break n,
+        }
+    };
     // Accept both success (99) and failure (100) for pty-req
     trace("got-pty-response");
 
@@ -318,13 +350,27 @@ pub fn run_ssh_client_with_trace<S: Serial, F: FnMut(&str)>(
     }
     trace("sent-shell-request");
 
-    // Read shell response
-    let n = transport.read_packet(serial, &mut payload);
-    if n == 0 { return None; }
-    if payload[0] == 100 {
-        trace("shell-request-failed");
-        return None;
-    }
+    // Read shell response, skipping async messages.
+    let _n = loop {
+        let n = transport.read_packet(serial, &mut payload);
+        if n == 0 { return None; }
+        match payload[0] {
+            2 | 4 => continue,
+            80 => {
+                let (_, name_end) = get_string(&payload[1..]);
+                let want_reply_off = 1 + name_end;
+                if want_reply_off < n && payload[want_reply_off] != 0 {
+                    transport.write_packet(serial, &[82]);
+                }
+                continue;
+            }
+            100 => {
+                trace("shell-request-failed");
+                return None;
+            }
+            _ => break n,
+        }
+    };
     trace("shell-ready");
 
     Some(SshClientBridge {
@@ -529,6 +575,15 @@ impl SshClientBridge {
                     }
                 }
                 2 => {} // IGNORE
+                4 => {} // DEBUG
+                80 => {
+                    // SSH_MSG_GLOBAL_REQUEST — reply failure if wanted
+                    let (_, name_end) = get_string(&payload[1..]);
+                    let want_reply_off = 1 + name_end;
+                    if want_reply_off < n && payload[want_reply_off] != 0 {
+                        self.transport.write_packet(serial, &[82]);
+                    }
+                }
                 _ => {}
             }
         }

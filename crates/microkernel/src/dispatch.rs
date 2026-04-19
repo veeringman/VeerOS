@@ -13,7 +13,7 @@ use crate::agent::{AgentTable, AgentState, AgentBlockReason, Goal, GoalPriority}
 use crate::channel::{Channels, ChanMsg};
 use crate::driver::DriverRegistry;
 use crate::fabric::ExecutionFabric;
-use crate::fat32::Fat32;
+use crate::fat32::{Fat32, MAX_FAT32};
 use crate::futex::FutexTable;
 use crate::input::InputSubsystem;
 use crate::intent::{IntentEngine, IntentClass, IntentStatus};
@@ -83,6 +83,23 @@ fn check_user_ptr(
     false
 }
 
+/// Look up the FAT32 instance for a given mount slot id (1-based dev_major).
+/// Returns the FAT32 at `mounts[mount_id-1].blk_index`, or index 0 as fallback.
+#[inline]
+fn fat32_for_mount<'a>(
+    fat32s: &'a mut [Fat32; MAX_FAT32],
+    mounts: &MountTable,
+    mount_id: u8,
+) -> &'a mut Fat32 {
+    let idx = if mount_id > 0 && (mount_id as usize) <= crate::vfs::MAX_MOUNTS {
+        let blk = mounts.mounts[(mount_id - 1) as usize].blk_index as usize;
+        if blk < MAX_FAT32 { blk } else { 0 }
+    } else {
+        0
+    };
+    &mut fat32s[idx]
+}
+
 /// Dispatch a syscall from the saved trap context.
 ///
 /// # Arguments
@@ -115,7 +132,7 @@ pub unsafe fn dispatch(
     users: &mut UserTable,
     inodes: &mut InodeTable,
     ramfs: &mut RamFs,
-    fat32: &mut Fat32,
+    fat32s: &mut [Fat32; MAX_FAT32],
     mounts: &mut MountTable,
     input: &mut InputSubsystem,
     drivers: &mut DriverRegistry,
@@ -1126,8 +1143,9 @@ pub unsafe fn dispatch(
                         // File exists — if O_TRUNC, truncate it.
                         if flags.contains(OpenFlags::O_TRUNC) && inodes.inodes[id as usize].kind == InodeKind::File {
                             let mount_id = inodes.inodes[id as usize].dev_major;
-                            if mount_id > 0 && fat32.mounted {
-                                fat32.truncate(inodes, id);
+                            if mount_id > 0 {
+                                let fat = fat32_for_mount(fat32s, mounts, mount_id);
+                                if fat.mounted { fat.truncate(inodes, id); }
                             } else {
                                 ramfs.truncate(inodes, id, 0);
                             }
@@ -1147,8 +1165,9 @@ pub unsafe fn dispatch(
                         };
                         // Check if the parent is under a FAT32 mount.
                         let parent_mount = inodes.inodes[parent_id as usize].dev_major;
-                        if parent_mount > 0 && fat32.mounted {
-                            match fat32.create_file(inodes, parent_id, file_name, parent_mount) {
+                        let parent_fat = fat32_for_mount(fat32s, mounts, parent_mount);
+                        if parent_mount > 0 && parent_fat.mounted {
+                            match parent_fat.create_file(inodes, parent_id, file_name, parent_mount) {
                                 Some(id) => id,
                                 None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
                             }
@@ -1165,8 +1184,9 @@ pub unsafe fn dispatch(
                     Some(id) => {
                         if flags.contains(OpenFlags::O_TRUNC) && inodes.inodes[id as usize].kind == InodeKind::File {
                             let mount_id = inodes.inodes[id as usize].dev_major;
-                            if mount_id > 0 && fat32.mounted {
-                                fat32.truncate(inodes, id);
+                            if mount_id > 0 {
+                                let fat = fat32_for_mount(fat32s, mounts, mount_id);
+                                if fat.mounted { fat.truncate(inodes, id); }
                             } else {
                                 ramfs.truncate(inodes, id, 0);
                             }
@@ -1267,8 +1287,9 @@ pub unsafe fn dispatch(
                 }
                 InodeKind::File => {
                     let mount_id = inodes.inodes[idx].dev_major;
-                    if mount_id > 0 && fat32.mounted {
-                        fat32.read(inodes, inode_id, file_desc.cursor, buf)
+                    if mount_id > 0 {
+                        let fat = fat32_for_mount(fat32s, mounts, mount_id);
+                        if fat.mounted { fat.read(inodes, inode_id, file_desc.cursor, buf) } else { 0 }
                     } else {
                         ramfs.read(inodes, inode_id, file_desc.cursor, buf)
                     }
@@ -1333,8 +1354,9 @@ pub unsafe fn dispatch(
                 }
                 InodeKind::File => {
                     let mount_id = inodes.inodes[idx].dev_major;
-                    if mount_id > 0 && fat32.mounted {
-                        fat32.write(inodes, inode_id, cursor, data)
+                    if mount_id > 0 {
+                        let fat = fat32_for_mount(fat32s, mounts, mount_id);
+                        if fat.mounted { fat.write(inodes, inode_id, cursor, data) } else { 0 }
                     } else {
                         ramfs.write(inodes, inode_id, cursor, data)
                     }
@@ -1629,8 +1651,9 @@ pub unsafe fn dispatch(
             } else {
                 0
             };
-            let ok = if mount_id > 0 && fat32.mounted {
-                fat32.truncate(inodes, f.inode_id)
+            let ok = if mount_id > 0 {
+                let fat = fat32_for_mount(fat32s, mounts, mount_id);
+                if fat.mounted { fat.truncate(inodes, f.inode_id) } else { false }
             } else {
                 ramfs.truncate(inodes, f.inode_id, new_size)
             };
@@ -1822,7 +1845,14 @@ pub unsafe fn dispatch(
                 None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
             };
             if mounts.unmount(dir_id) {
-                fat32.unmount();
+                // Find and unmount the FAT32 instance for this mount point.
+                // The mount was already removed, so check each fat32 instance.
+                for f in fat32s.iter_mut() {
+                    if f.mounted && f.mount_inode == dir_id {
+                        f.unmount();
+                        break;
+                    }
+                }
                 c.set_ret(0, 0);
             } else {
                 c.set_ret(0, usize::MAX);

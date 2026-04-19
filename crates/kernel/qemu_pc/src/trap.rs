@@ -12,7 +12,7 @@ use microkernel::dispatch::{self, SyscallAction};
 
 #[allow(unused_imports)]
 use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES,
-            SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT,
+            SOCKETS, USERS, INODES, RAMFS, FAT32S, MOUNTS, INPUT, DRIVERS, AUDIT,
             AGENTS, INTENTS, MEMORY_ENGINE, FABRIC, INTENT_SCHED};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -886,7 +886,9 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
     let users = unsafe { &mut *USERS.0.get() };
     let inodes = unsafe { &mut *INODES.0.get() };
     let ramfs = unsafe { &mut *RAMFS.0.get() };
-    let fat32 = unsafe { &mut *FAT32.0.get() };
+    let fat32s: &mut [microkernel::fat32::Fat32; microkernel::fat32::MAX_FAT32] = unsafe {
+        &mut *(core::ptr::addr_of!(FAT32S) as *const _ as *mut [microkernel::fat32::Fat32; microkernel::fat32::MAX_FAT32])
+    };
     let mounts = unsafe { &mut *MOUNTS.0.get() };
     let input = unsafe { &mut *INPUT.0.get() };
     let drivers = unsafe { &mut *DRIVERS.0.get() };
@@ -914,7 +916,7 @@ unsafe fn handle_syscall(frame: *mut TrapFrame) -> *mut TrapFrame {
             users,
             inodes,
             ramfs,
-            fat32,
+            fat32s,
             mounts,
             input,
             drivers,

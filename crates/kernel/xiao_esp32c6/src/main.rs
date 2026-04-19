@@ -691,7 +691,7 @@ fn shell_task() -> ! {
 
 /// Poll the smoltcp network stack and the WiFi driver's RX path.
 #[cfg(feature = "wifi")]
-fn net_poll() {
+fn net_poll() -> bool {
     // Drive WiFi RX so frames arrive in the ring buffer.
     unsafe {
         (*WIFI.0.get()).driver_mut().poll_rx();
@@ -704,6 +704,12 @@ fn net_poll() {
             stack.poll(sockets, ticks);
         }
     }
+    true
+}
+
+#[cfg(feature = "wifi")]
+fn net_poll_unlock() {
+    // Single-threaded — no lock to release.
 }
 
 /// The Wi-Fi network listener task.
@@ -906,7 +912,7 @@ fn net_task() -> ! {
             let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
             let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap()
                 as *mut SocketSet<'static>;
-            let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll);
+            let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll, net_poll_unlock);
             let mut tcp_con = Console::new(tcp_serial);
 
             #[cfg(feature = "shell")]

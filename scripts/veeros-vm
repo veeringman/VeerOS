@@ -21,19 +21,41 @@
 #   veeros-vm logs <name>                 Show VM serial log
 #   veeros-vm build                       Rebuild the kernel ISO
 #   veeros-vm ip <name>                   Show SSH connection info
+#   veeros-vm volume create <name>        Create a persistent volume
+#   veeros-vm volume list                 List volumes
+#   veeros-vm volume attach <vm> <vol>    Attach volume to VM
+#   veeros-vm volume detach <vm> <vol>    Detach volume from VM
+#   veeros-vm volume delete <name>        Delete a volume
 #
 # VM state is persisted under ~/.veeros/vms/<name>/
+# Volumes are stored under ~/.veeros/volumes/
 
 set -euo pipefail
 
 # ── Paths ────────────────────────────────────────────────────────────
-VEEROS_HOME="${VEEROS_HOME:-$HOME/.veeros}"
+# When run via sudo, use the invoking user's home (SUDO_USER).
+_REAL_HOME="${HOME}"
+if [ -n "${SUDO_USER:-}" ]; then
+    _REAL_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+fi
+VEEROS_HOME="${VEEROS_HOME:-${_REAL_HOME}/.veeros}"
 VEEROS_VMS="$VEEROS_HOME/vms"
+VEEROS_VOLUMES="$VEEROS_HOME/volumes"
 VEEROS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VEEROS_ISO="$VEEROS_ROOT/build/veeros.iso"
 
 # Ensure base dirs exist
-mkdir -p "$VEEROS_VMS"
+mkdir -p "$VEEROS_VMS" "$VEEROS_VOLUMES"
+
+# ── Network constants ────────────────────────────────────────────────
+VEEROS_BRIDGE="veeros0"
+VEEROS_SUBNET="10.10.10"
+VEEROS_GW="${VEEROS_SUBNET}.1"
+VEEROS_DHCP_START="${VEEROS_SUBNET}.10"
+VEEROS_DHCP_END="${VEEROS_SUBNET}.254"
+VEEROS_CIDR="${VEEROS_GW}/24"
+VEEROS_DNSMASQ_PID="$VEEROS_HOME/dnsmasq.pid"
+VEEROS_DNSMASQ_LEASE="$VEEROS_HOME/dnsmasq.leases"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -49,16 +71,22 @@ vm_log_file() { echo "$(vm_dir "$1")/serial.log"; }
 
 vm_disk_file() { echo "$(vm_dir "$1")/disk.img"; }
 
+vm_system_disk() { echo "$(vm_dir "$1")/system.img"; }
+
 vm_is_running() {
-    local pf
+    local pf pid
     pf="$(vm_pid_file "$1")"
-    [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null
+    [ -f "$pf" ] || return 1
+    pid=$(cat "$pf" 2>/dev/null) || return 1
+    # Use /proc check instead of kill -0, since the VM may be owned by
+    # root (bridge mode) while the caller is unprivileged.
+    [ -n "$pid" ] && [ -d "/proc/$pid" ]
 }
 
 # Read a VM config value
 vm_get() {
     local name="$1" key="$2"
-    grep "^${key}=" "$(vm_dir "$name")/vm.conf" 2>/dev/null | head -1 | cut -d= -f2-
+    { grep "^${key}=" "$(vm_dir "$name")/vm.conf" 2>/dev/null || true; } | head -1 | cut -d= -f2-
 }
 
 # Write/update a VM config value
@@ -103,6 +131,170 @@ validate_name() {
     [ ${#1} -le 63 ] || die "VM name too long (max 63 chars)"
 }
 
+# ── VeerOS Network (bridge + DHCP) ──────────────────────────────────
+
+# Check if the veeros0 bridge is up
+_net_is_up() {
+    ip link show "$VEEROS_BRIDGE" >/dev/null 2>&1
+}
+
+# Ensure running as root for network operations
+_require_root() {
+    [ "$(id -u)" -eq 0 ] || die "$1 requires root (use sudo)"
+}
+
+# Find the default internet-facing interface for NAT masquerade
+_default_iface() {
+    ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'
+}
+
+# Set up the veeros0 bridge, dnsmasq DHCP, and NAT masquerade
+_net_setup() {
+    _require_root "network setup"
+
+    if _net_is_up; then
+        echo "veeros network already up ($VEEROS_BRIDGE $VEEROS_CIDR)"
+        return 0
+    fi
+
+    echo "Creating bridge $VEEROS_BRIDGE ($VEEROS_CIDR)..."
+    ip link add "$VEEROS_BRIDGE" type bridge
+    ip addr add "$VEEROS_CIDR" dev "$VEEROS_BRIDGE"
+    ip link set "$VEEROS_BRIDGE" up
+
+    # Enable IP forwarding
+    sysctl -q net.ipv4.ip_forward=1
+
+    # NAT masquerade so VMs can reach the internet
+    local iface
+    iface=$(_default_iface)
+    if [ -n "$iface" ]; then
+        iptables -t nat -C POSTROUTING -s "${VEEROS_SUBNET}.0/24" -o "$iface" -j MASQUERADE 2>/dev/null \
+            || iptables -t nat -A POSTROUTING -s "${VEEROS_SUBNET}.0/24" -o "$iface" -j MASQUERADE
+        # Allow forwarding to/from bridge
+        iptables -C FORWARD -i "$VEEROS_BRIDGE" -o "$iface" -j ACCEPT 2>/dev/null \
+            || iptables -A FORWARD -i "$VEEROS_BRIDGE" -o "$iface" -j ACCEPT
+        iptables -C FORWARD -i "$iface" -o "$VEEROS_BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+            || iptables -A FORWARD -i "$iface" -o "$VEEROS_BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    fi
+
+    # Start dnsmasq for DHCP on the bridge
+    if [ -f "$VEEROS_DNSMASQ_PID" ] && kill -0 "$(cat "$VEEROS_DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
+        echo "dnsmasq already running"
+    else
+        dnsmasq \
+            --interface="$VEEROS_BRIDGE" \
+            --bind-interfaces \
+            --dhcp-range="${VEEROS_DHCP_START},${VEEROS_DHCP_END},24h" \
+            --dhcp-option=3,"$VEEROS_GW" \
+            --dhcp-option=6,"8.8.8.8,8.8.4.4" \
+            --pid-file="$VEEROS_DNSMASQ_PID" \
+            --dhcp-leasefile="$VEEROS_DNSMASQ_LEASE" \
+            --log-dhcp \
+            --no-resolv \
+            --server=8.8.8.8 \
+            --except-interface=lo
+        echo "dnsmasq started (DHCP ${VEEROS_DHCP_START}–${VEEROS_DHCP_END})"
+    fi
+
+    echo "veeros network ready"
+}
+
+# Tear down the veeros0 bridge, stop dnsmasq, remove NAT rules
+_net_teardown() {
+    _require_root "network teardown"
+
+    # Check for running VMs using the bridge
+    local running=0
+    for d in "$VEEROS_VMS"/*/vm.conf; do
+        [ -f "$d" ] || continue
+        local n
+        n=$(basename "$(dirname "$d")")
+        local nm
+        nm=$(vm_get "$n" net_mode)
+        local br
+        br=$(vm_get "$n" bridge)
+        if [ "$nm" = "bridge" ] && [ "$br" = "$VEEROS_BRIDGE" ] && vm_is_running "$n"; then
+            running=$((running + 1))
+        fi
+    done
+    if [ "$running" -gt 0 ]; then
+        die "$running VM(s) still running on $VEEROS_BRIDGE — stop them first"
+    fi
+
+    # Stop dnsmasq
+    if [ -f "$VEEROS_DNSMASQ_PID" ]; then
+        local pid
+        pid=$(cat "$VEEROS_DNSMASQ_PID" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$VEEROS_DNSMASQ_PID"
+    fi
+
+    # Remove NAT rules
+    local iface
+    iface=$(_default_iface)
+    if [ -n "$iface" ]; then
+        iptables -t nat -D POSTROUTING -s "${VEEROS_SUBNET}.0/24" -o "$iface" -j MASQUERADE 2>/dev/null || true
+        iptables -D FORWARD -i "$VEEROS_BRIDGE" -o "$iface" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -i "$iface" -o "$VEEROS_BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    fi
+
+    # Remove bridge
+    if _net_is_up; then
+        ip link set "$VEEROS_BRIDGE" down 2>/dev/null || true
+        ip link delete "$VEEROS_BRIDGE" 2>/dev/null || true
+    fi
+
+    rm -f "$VEEROS_DNSMASQ_LEASE"
+    echo "veeros network stopped"
+}
+
+_net_status() {
+    if _net_is_up; then
+        echo "Network:  UP"
+        echo "Bridge:   $VEEROS_BRIDGE"
+        echo "Gateway:  $VEEROS_GW"
+        echo "Subnet:   ${VEEROS_SUBNET}.0/24"
+        echo "DHCP:     ${VEEROS_DHCP_START} – ${VEEROS_DHCP_END}"
+        if [ -f "$VEEROS_DNSMASQ_PID" ] && kill -0 "$(cat "$VEEROS_DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
+            echo "dnsmasq:  running (pid=$(cat "$VEEROS_DNSMASQ_PID"))"
+        else
+            echo "dnsmasq:  not running"
+        fi
+        # Active leases
+        if [ -f "$VEEROS_DNSMASQ_LEASE" ] && [ -s "$VEEROS_DNSMASQ_LEASE" ]; then
+            echo ""
+            printf "%-17s  %-15s  %s\n" "MAC" "IP" "HOSTNAME"
+            while IFS=' ' read -r _ts mac ip hostname _id; do
+                printf "%-17s  %-15s  %s\n" "$mac" "$ip" "$hostname"
+            done < "$VEEROS_DNSMASQ_LEASE"
+        fi
+    else
+        echo "Network:  DOWN"
+        echo ""
+        echo "Start with: sudo veeros-vm network setup"
+    fi
+}
+
+# Create TAP for a VM and attach to bridge
+_tap_create() {
+    local name="$1"
+    local tap="tap-${name}"
+    ip link delete "$tap" 2>/dev/null || true
+    ip tuntap add dev "$tap" mode tap
+    ip link set "$tap" up
+    ip link set "$tap" master "$VEEROS_BRIDGE"
+}
+
+# Remove TAP for a VM
+_tap_destroy() {
+    local name="$1"
+    local tap="tap-${name}"
+    ip link delete "$tap" 2>/dev/null || true
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 cmd_create() {
@@ -116,8 +308,8 @@ cmd_create() {
     local memory=256
     local disk_size="64M"
     local ssh_port=""
-    local net_mode="nat"
-    local bridge="br0"
+    local net_mode="bridge"
+    local bridge="$VEEROS_BRIDGE"
     local hostname="VeerOS"
 
     # Parse options
@@ -163,16 +355,54 @@ display=serial
 created=$(date -Iseconds)
 EOF
 
-    # Create the disk image
+    # Create the system disk (POSIX directory layout)
+    local sysdisk
+    sysdisk="$(vm_system_disk "$name")"
+    qemu-img create -f raw "$sysdisk" 64M >/dev/null
+    /sbin/mkfs.vfat -F 32 -n "SYSTEM" "$sysdisk" >/dev/null 2>&1
+
+    if command -v mcopy >/dev/null 2>&1; then
+        export MTOOLS_SKIP_CHECK=1
+        # POSIX directory layout
+        mmd -i "$sysdisk" "::bin" "::sbin" "::lib" "::usr" "::var" \
+            "::home" "::opt" "::srv" "::boot" "::run" 2>/dev/null || true
+        mmd -i "$sysdisk" "::usr/bin" "::usr/sbin" "::usr/lib" "::usr/share" 2>/dev/null || true
+        mmd -i "$sysdisk" "::var/log" "::var/tmp" "::var/run" 2>/dev/null || true
+        mmd -i "$sysdisk" "::home/root" "::home/veeros" 2>/dev/null || true
+        mmd -i "$sysdisk" "::etc" 2>/dev/null || true
+
+        # System config files
+        echo "VeerOS 0.1.0" | mcopy -i "$sysdisk" - "::etc/version"
+        echo "$hostname" | mcopy -i "$sysdisk" - "::etc/hostname"
+        echo "Welcome to VeerOS!" | mcopy -i "$sysdisk" - "::etc/motd"
+        printf 'NAME=VeerOS\nVERSION=0.1.0\nID=veeros\nPRETTY_NAME="VeerOS 0.1.0"\n' \
+            | mcopy -i "$sysdisk" - "::etc/os-release"
+        printf '# <device>  <mount>     <type>  <options>\nvda         /mnt/system fat32   auto\nvdb         /mnt/data   fat32   auto\n' \
+            | mcopy -i "$sysdisk" - "::etc/fstab"
+        printf 'root:x:0:0:root:/home/root:/bin/sh\nveeros:x:1000:1000:VeerOS User:/home/veeros:/bin/sh\n' \
+            | mcopy -i "$sysdisk" - "::etc/passwd"
+        printf 'root:x:0:\nveeros:x:1000:\n' \
+            | mcopy -i "$sysdisk" - "::etc/group"
+    fi
+
+    # Create the data disk
     local disk
     disk="$(vm_disk_file "$name")"
     qemu-img create -f raw "$disk" "$disk_size" >/dev/null
-    /sbin/mkfs.vfat -F 32 "$disk" >/dev/null 2>&1
+    /sbin/mkfs.vfat -F 32 -n "DATA" "$disk" >/dev/null 2>&1
+
+    if command -v mcopy >/dev/null 2>&1; then
+        export MTOOLS_SKIP_CHECK=1
+        echo "VeerOS VM: $name" | mcopy -i "$disk" - "::README.TXT"
+        echo "hostname=$hostname" | mcopy -i "$disk" - "::VMINFO.TXT"
+        mmd -i "$disk" "::DATA" 2>/dev/null || true
+    fi
 
     echo "VM '$name' created"
     echo "  hostname : $hostname"
     echo "  memory   : ${memory}M"
-    echo "  disk     : $disk_size"
+    echo "  system   : 64M (POSIX layout)"
+    echo "  data     : $disk_size"
     echo "  SSH port : $ssh_port"
     echo "  network  : $net_mode"
     echo ""
@@ -183,7 +413,32 @@ cmd_start() {
     local name="${1:-}"
     [ -n "$name" ] || die "usage: veeros-vm start <name>"
     vm_exists "$name" || die "VM '$name' does not exist"
-    vm_is_running "$name" && die "VM '$name' is already running"
+
+    # Clean up stale state from crashed/killed VMs
+    local pf
+    pf="$(vm_pid_file "$name")"
+    if [ -f "$pf" ]; then
+        local old_pid
+        old_pid=$(cat "$pf" 2>/dev/null || echo "")
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            die "VM '$name' is already running (pid=$old_pid)"
+        fi
+        # Stale PID file — clean up
+        rm -f "$pf"
+    fi
+    # Kill any orphan QEMU still using this VM's disk
+    local disk
+    disk="$(vm_disk_file "$name")"
+    if [ -f "$disk" ]; then
+        local holder
+        holder=$(fuser "$disk" 2>/dev/null || true)
+        if [ -n "$holder" ]; then
+            echo "Killing orphan process holding disk: $holder"
+            kill -9 $holder 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    rm -f "$(vm_dir "$name")/qmp.sock"
 
     # Ensure ISO exists
     if [ ! -f "$VEEROS_ISO" ]; then
@@ -207,32 +462,67 @@ cmd_start() {
         -name "veeros-$name"
     )
 
-    # Disk
+    # System disk (vda)
+    local sysdisk
+    sysdisk="$(vm_system_disk "$name")"
+    local disk_idx=0
+    if [ -f "$sysdisk" ]; then
+        qemu_args+=(
+            -drive "file=${sysdisk},format=raw,if=none,id=disk${disk_idx}"
+            -device "virtio-blk-pci,drive=disk${disk_idx}"
+        )
+        disk_idx=$((disk_idx + 1))
+    fi
+
+    # Data disk (vdb)
     if [ -f "$disk" ]; then
         qemu_args+=(
-            -drive "file=${disk},format=raw,if=none,id=disk0"
-            -device virtio-blk-pci,drive=disk0
-            -boot d
+            -drive "file=${disk},format=raw,if=none,id=disk${disk_idx}"
+            -device "virtio-blk-pci,drive=disk${disk_idx}"
         )
+        disk_idx=$((disk_idx + 1))
+    fi
+
+    # Attached volumes (vdc, vdd, ...)
+    local attached
+    attached=$(vm_get "$name" volumes)
+    if [ -n "$attached" ]; then
+        local IFS=','
+        for vol_name in $attached; do
+            local vol_img="$VEEROS_VOLUMES/${vol_name}.img"
+            if [ -f "$vol_img" ] && [ "$disk_idx" -lt 4 ]; then
+                qemu_args+=(
+                    -drive "file=${vol_img},format=raw,if=none,id=disk${disk_idx}"
+                    -device "virtio-blk-pci,drive=disk${disk_idx}"
+                )
+                disk_idx=$((disk_idx + 1))
+            fi
+        done
+    fi
+
+    if [ "$disk_idx" -gt 0 ]; then
+        qemu_args+=(-boot d)
     fi
 
     # Networking
     case "$net_mode" in
         nat)
             qemu_args+=(
-                -netdev "user,id=net0,hostfwd=tcp:0.0.0.0:${ssh_port}-:2222"
+                -netdev "user,id=net0,hostfwd=tcp:0.0.0.0:${ssh_port}-:22"
                 -device virtio-net-pci,netdev=net0
             )
             ;;
         bridge)
-            local tap="tap-${name}"
-            # Create TAP (requires root)
-            if [ "$(id -u)" -ne 0 ]; then
-                die "bridge mode requires root"
+            _require_root "starting a bridge-mode VM"
+            # Auto-setup veeros network if this is the managed bridge
+            if [ "$bridge" = "$VEEROS_BRIDGE" ] && ! _net_is_up; then
+                _net_setup
             fi
-            ip tuntap add dev "$tap" mode tap 2>/dev/null || true
-            ip link set "$tap" up
-            ip link set "$tap" master "$bridge" 2>/dev/null || true
+            if ! ip link show "$bridge" >/dev/null 2>&1; then
+                die "bridge '$bridge' does not exist"
+            fi
+            local tap="tap-${name}"
+            _tap_create "$name"
             qemu_args+=(
                 -netdev "tap,id=net0,ifname=${tap},script=no,downscript=no"
                 -device virtio-net-pci,netdev=net0
@@ -263,7 +553,15 @@ cmd_start() {
 
     : > "$log"  # truncate log
 
+    vm_set "$name" last_started "$(date -Iseconds)"
+
     qemu-system-x86_64 "${qemu_args[@]}"
+
+    # Make state files readable by the invoking user (when run via sudo)
+    if [ -n "${SUDO_USER:-}" ]; then
+        chown "$SUDO_USER" "$(vm_pid_file "$name")" "$log" "${vdir}/qmp.sock" 2>/dev/null || true
+    fi
+
     local pid
     pid=$(cat "$(vm_pid_file "$name")" 2>/dev/null || echo "?")
 
@@ -271,7 +569,7 @@ cmd_start() {
     if [ "$net_mode" = "nat" ]; then
         echo "  SSH: ssh -p ${ssh_port} veeros@localhost"
     else
-        echo "  SSH: check serial log for DHCP IP (veeros-vm logs $name)"
+        echo "  SSH: ssh veeros@<ip>  (use 'veeros-vm ip $name' after boot)"
     fi
 }
 
@@ -308,6 +606,8 @@ cmd_stop() {
     fi
 
     rm -f "$(vm_pid_file "$name")"
+    # Clean up TAP interface
+    _tap_destroy "$name" 2>/dev/null || true
     echo "VM '$name' stopped"
 }
 
@@ -320,6 +620,8 @@ cmd_kill() {
         kill -9 "$(cat "$(vm_pid_file "$name")")" 2>/dev/null || true
     fi
     rm -f "$(vm_pid_file "$name")"
+    # Clean up TAP interface
+    _tap_destroy "$name" 2>/dev/null || true
     echo "VM '$name' killed"
 }
 
@@ -369,27 +671,132 @@ _print_status() {
         "$name" "$state" "$hostname" "$memory" "$ssh_port" "$net_mode"
 }
 
+_fmt_age() {
+    local ts="$1"
+    [ -n "$ts" ] || { echo "—"; return; }
+    local epoch_then epoch_now delta
+    epoch_then=$(date -d "$ts" +%s 2>/dev/null) || { echo "$ts"; return; }
+    epoch_now=$(date +%s)
+    delta=$(( epoch_now - epoch_then ))
+    if [ $delta -lt 60 ]; then
+        echo "${delta}s ago"
+    elif [ $delta -lt 3600 ]; then
+        echo "$(( delta / 60 ))m ago"
+    elif [ $delta -lt 86400 ]; then
+        echo "$(( delta / 3600 ))h ago"
+    else
+        echo "$(( delta / 86400 ))d ago"
+    fi
+}
+
+_fmt_uptime() {
+    local name="$1"
+    if ! vm_is_running "$name"; then echo "—"; return; fi
+    local started
+    started=$(vm_get "$name" last_started)
+    [ -n "$started" ] || { echo "?"; return; }
+    local epoch_s epoch_now delta
+    epoch_s=$(date -d "$started" +%s 2>/dev/null) || { echo "?"; return; }
+    epoch_now=$(date +%s)
+    delta=$(( epoch_now - epoch_s ))
+    if [ $delta -lt 60 ]; then
+        echo "${delta}s"
+    elif [ $delta -lt 3600 ]; then
+        printf "%dm%ds" $(( delta / 60 )) $(( delta % 60 ))
+    elif [ $delta -lt 86400 ]; then
+        printf "%dh%dm" $(( delta / 3600 )) $(( (delta % 3600) / 60 ))
+    else
+        printf "%dd%dh" $(( delta / 86400 )) $(( (delta % 86400) / 3600 ))
+    fi
+}
+
+_fmt_disk() {
+    local name="$1"
+    local disk
+    disk="$(vm_disk_file "$name")"
+    if [ -f "$disk" ]; then
+        du -h "$disk" | awk '{print $1}'
+    else
+        echo "—"
+    fi
+}
+
+# Extract guest IP from the serial log or ARP table.
+_vm_ip() {
+    local name="$1"
+    local log
+    log="$(vm_log_file "$name")"
+    [ -f "$log" ] || { echo "—"; return; }
+
+    local ip=""
+
+    # Method 1: Parse MAC from serial log and look up via ARP/neighbor table.
+    # This is reliable even when serial output is garbled by interleaved prints.
+    local mac
+    mac=$(grep -oP 'MAC=\K[0-9a-fA-F:]{17}' "$log" 2>/dev/null | head -1)
+    if [ -n "$mac" ]; then
+        # Try ip neighbor (works without root)
+        ip=$(ip neigh show 2>/dev/null | awk -v m="$mac" 'tolower($5)==tolower(m) {print $1; exit}')
+        # Fall back to arp -n
+        if [ -z "$ip" ]; then
+            ip=$(arp -n 2>/dev/null | awk -v m="$mac" 'tolower($3)==tolower(m) {print $1; exit}')
+        fi
+    fi
+
+    # Method 2: Fall back to serial log DHCP/boot lines.
+    if [ -z "$ip" ]; then
+        ip=$(grep -oP 'DHCP: acquired \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$log" 2>/dev/null | tail -1)
+    fi
+    if [ -z "$ip" ]; then
+        ip=$(grep -oP '\[boot\] network: \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$log" 2>/dev/null | tail -1)
+    fi
+
+    echo "${ip:-—}"
+}
+
 cmd_list() {
-    printf "%-16s  %-18s  %-22s  %-7s  %-7s  %s\n" "NAME" "STATUS" "HOSTNAME" "MEMORY" "SSH" "NET"
-    printf "%-16s  %-18s  %-22s  %-7s  %-7s  %s\n" "────" "──────" "────────" "──────" "───" "───"
+    printf "%-14s  %-10s  %-20s  %-17s  %-5s  %-24s  %-5s  %-12s  %-12s  %s\n" \
+        "NAME" "STATUS" "HOSTNAME" "IP" "MEM" "SSH" "NET" "CREATED" "LAST START" "UPTIME"
+    printf "%-14s  %-10s  %-20s  %-17s  %-5s  %-24s  %-5s  %-12s  %-12s  %s\n" \
+        "────" "──────" "────────" "──" "───" "───" "───" "───────" "──────────" "──────"
     local found=false
     for d in "$VEEROS_VMS"/*/vm.conf; do
         [ -f "$d" ] || continue
         found=true
-        local name hostname memory ssh_port net_mode state
+        local name hostname memory ssh_port net_mode state created last_started uptime_str ip_addr ssh_info
         name=$(basename "$(dirname "$d")")
         hostname=$(vm_get "$name" hostname)
         memory=$(vm_get "$name" memory)
         ssh_port=$(vm_get "$name" ssh_port)
         net_mode=$(vm_get "$name" net_mode)
+        created=$(vm_get "$name" created)
+        last_started=$(vm_get "$name" last_started)
 
         if vm_is_running "$name"; then
             state="\033[32mrunning\033[0m"
+            ip_addr=$(_vm_ip "$name")
         else
             state="\033[31mstopped\033[0m"
+            ip_addr="—"
         fi
-        printf "%-16s  %b          %-22s  %-4sM    %-7s  %s\n" \
-            "$name" "$state" "$hostname" "$memory" "$ssh_port" "$net_mode"
+
+        # Show the actual SSH connect command
+        if [ "$net_mode" = "bridge" ] && [ "$ip_addr" != "—" ]; then
+            ssh_info="${ip_addr}"
+        elif [ "$net_mode" = "nat" ]; then
+            ssh_info="localhost:${ssh_port}"
+        else
+            ssh_info="—"
+        fi
+
+        local created_ago last_start_ago
+        created_ago=$(_fmt_age "$created")
+        last_start_ago=$(_fmt_age "$last_started")
+        uptime_str=$(_fmt_uptime "$name")
+
+        printf "%-14s  %b    %-20s  %-17s  %-3sM  %-24s  %-5s  %-12s  %-12s  %s\n" \
+            "$name" "$state" "$hostname" "$ip_addr" "$memory" "$ssh_info" "$net_mode" \
+            "$created_ago" "$last_start_ago" "$uptime_str"
     done
     $found || echo "(no VMs)"
 }
@@ -401,26 +808,33 @@ cmd_ssh() {
     vm_is_running "$name" || die "VM '$name' is not running"
     shift
 
-    local ssh_port net_mode
+    local ssh_port net_mode target_host target_port
     ssh_port=$(vm_get "$name" ssh_port)
     net_mode=$(vm_get "$name" net_mode)
 
-    if [ "$net_mode" = "nat" ]; then
-        local ssh_args=(
-            -o StrictHostKeyChecking=no
-            -o UserKnownHostsFile=/dev/null
-            -o ConnectTimeout=10
-            -o LogLevel=ERROR
-            -p "$ssh_port"
-            veeros@localhost
-        )
-        if [ $# -gt 0 ]; then
-            exec ssh "${ssh_args[@]}" "$@"
-        else
-            exec ssh -tt "${ssh_args[@]}"
-        fi
+    if [ "$net_mode" = "bridge" ]; then
+        local ip
+        ip=$(_vm_ip "$name")
+        [ "$ip" != "—" ] || die "cannot determine guest IP — check 'veeros-vm logs $name'"
+        target_host="$ip"
+        target_port=22
     else
-        die "bridge mode: check 'veeros-vm logs $name' for guest IP, then ssh manually"
+        target_host="localhost"
+        target_port="$ssh_port"
+    fi
+
+    local ssh_args=(
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o ConnectTimeout=10
+        -o LogLevel=ERROR
+        -p "$target_port"
+        "veeros@${target_host}"
+    )
+    if [ $# -gt 0 ]; then
+        exec ssh "${ssh_args[@]}" "$@"
+    else
+        exec ssh -tt "${ssh_args[@]}"
     fi
 }
 
@@ -510,6 +924,155 @@ cmd_logs() {
     fi
 }
 
+# ── Volume Management ────────────────────────────────────────────────
+
+cmd_volume() {
+    local subcmd="${1:-}"
+    [ -n "$subcmd" ] || die "usage: veeros-vm volume <create|list|attach|detach|delete> [args...]"
+    shift
+
+    case "$subcmd" in
+        create)  vol_create "$@" ;;
+        list|ls) vol_list ;;
+        attach)  vol_attach "$@" ;;
+        detach)  vol_detach "$@" ;;
+        delete)  vol_delete "$@" ;;
+        *)       die "unknown volume command: $subcmd (use create|list|attach|detach|delete)" ;;
+    esac
+}
+
+vol_create() {
+    local vol_name="${1:-}"
+    [ -n "$vol_name" ] || die "usage: veeros-vm volume create <name> [--size SIZE]"
+    validate_name "$vol_name"
+    local vol_img="$VEEROS_VOLUMES/${vol_name}.img"
+    [ ! -f "$vol_img" ] || die "volume '$vol_name' already exists"
+    shift
+
+    local size="64M"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --size) size="${2:?--size requires value}"; shift 2 ;;
+            *)      die "unknown option: $1" ;;
+        esac
+    done
+
+    qemu-img create -f raw "$vol_img" "$size" >/dev/null
+    /sbin/mkfs.vfat -F 32 -n "${vol_name:0:11}" "$vol_img" >/dev/null 2>&1
+
+    echo "Volume '$vol_name' created ($size)"
+}
+
+vol_list() {
+    printf "%-20s %-10s %s\n" "VOLUME" "SIZE" "ATTACHED-TO"
+    for img in "$VEEROS_VOLUMES"/*.img; do
+        [ -f "$img" ] || continue
+        local vn
+        vn="$(basename "$img" .img)"
+        local sz
+        sz="$(du -h "$img" 2>/dev/null | cut -f1)"
+        # Find which VMs have this volume attached
+        local vms=""
+        for conf in "$VEEROS_VMS"/*/vm.conf; do
+            [ -f "$conf" ] || continue
+            local attached
+            attached=$(grep "^volumes=" "$conf" 2>/dev/null | cut -d= -f2- || true)
+            if [ -n "$attached" ] && [[ ",$attached," == *",$vn,"* ]]; then
+                local vm_name
+                vm_name=$(grep "^name=" "$conf" | cut -d= -f2-)
+                vms="${vms:+${vms}, }${vm_name}"
+            fi
+        done
+        [ -z "$vms" ] && vms="—"
+        printf "%-20s %-10s %s\n" "$vn" "$sz" "$vms"
+    done
+}
+
+vol_attach() {
+    local vm_name="${1:-}"
+    local vol_name="${2:-}"
+    [ -n "$vm_name" ] && [ -n "$vol_name" ] || die "usage: veeros-vm volume attach <vm> <volume>"
+    vm_exists "$vm_name" || die "VM '$vm_name' does not exist"
+    [ -f "$VEEROS_VOLUMES/${vol_name}.img" ] || die "volume '$vol_name' does not exist"
+
+    local current
+    current=$(vm_get "$vm_name" volumes)
+    # Check not already attached
+    if [[ ",$current," == *",$vol_name,"* ]]; then
+        echo "Volume '$vol_name' is already attached to '$vm_name'"
+        return 0
+    fi
+    # Max 2 extra volumes (vdc, vdd) since vda=system, vdb=data
+    local count=0
+    if [ -n "$current" ]; then
+        count=$(echo "$current" | tr ',' '\n' | wc -l)
+    fi
+    [ "$count" -lt 2 ] || die "VM '$vm_name' already has 2 volumes attached (max 4 disks total)"
+
+    if [ -n "$current" ]; then
+        vm_set "$vm_name" volumes "${current},${vol_name}"
+    else
+        vm_set "$vm_name" volumes "$vol_name"
+    fi
+    echo "Volume '$vol_name' attached to VM '$vm_name'"
+    if vm_is_running "$vm_name"; then
+        echo "Note: restart the VM for the volume to appear."
+    fi
+}
+
+vol_detach() {
+    local vm_name="${1:-}"
+    local vol_name="${2:-}"
+    [ -n "$vm_name" ] && [ -n "$vol_name" ] || die "usage: veeros-vm volume detach <vm> <volume>"
+    vm_exists "$vm_name" || die "VM '$vm_name' does not exist"
+
+    local current
+    current=$(vm_get "$vm_name" volumes)
+    if [[ ",$current," != *",$vol_name,"* ]]; then
+        die "volume '$vol_name' is not attached to '$vm_name'"
+    fi
+    # Remove vol_name from comma-separated list
+    local new_list
+    new_list=$(echo "$current" | tr ',' '\n' | grep -v "^${vol_name}$" | paste -sd ',' - || true)
+    vm_set "$vm_name" volumes "$new_list"
+    echo "Volume '$vol_name' detached from VM '$vm_name'"
+    if vm_is_running "$vm_name"; then
+        echo "Note: restart the VM for the change to take effect."
+    fi
+}
+
+vol_delete() {
+    local vol_name="${1:-}"
+    [ -n "$vol_name" ] || die "usage: veeros-vm volume delete <name>"
+    local vol_img="$VEEROS_VOLUMES/${vol_name}.img"
+    [ -f "$vol_img" ] || die "volume '$vol_name' does not exist"
+
+    # Check if attached to any VM
+    for conf in "$VEEROS_VMS"/*/vm.conf; do
+        [ -f "$conf" ] || continue
+        local attached
+        attached=$(grep "^volumes=" "$conf" 2>/dev/null | cut -d= -f2- || true)
+        if [ -n "$attached" ] && [[ ",$attached," == *",$vol_name,"* ]]; then
+            local vm_name
+            vm_name=$(grep "^name=" "$conf" | cut -d= -f2-)
+            die "volume '$vol_name' is still attached to VM '$vm_name' — detach first"
+        fi
+    done
+
+    rm -f "$vol_img"
+    echo "Volume '$vol_name' deleted"
+}
+
+cmd_network() {
+    local subcmd="${1:-status}"
+    case "$subcmd" in
+        setup)    _net_setup ;;
+        teardown) _net_teardown ;;
+        status)   _net_status ;;
+        *)        die "usage: veeros-vm network <setup|teardown|status>" ;;
+    esac
+}
+
 cmd_build() {
     echo "Building VeerOS kernel ISO..."
     "$VEEROS_ROOT/scripts/build-qemu-pc.sh"
@@ -527,10 +1090,15 @@ cmd_ip() {
 
     if [ "$net_mode" = "nat" ]; then
         echo "ssh -p $ssh_port veeros@localhost"
-        echo "sshpass -p veeros ssh -p $ssh_port veeros@localhost"
     else
-        echo "Bridge mode — check guest DHCP IP:"
-        echo "  veeros-vm logs $name | grep network"
+        local ip
+        ip=$(_vm_ip "$name")
+        if [ "$ip" != "—" ]; then
+            echo "ssh veeros@${ip}"
+        else
+            echo "Bridge mode — guest IP not yet known."
+            echo "  veeros-vm logs $name | grep DHCP"
+        fi
     fi
 }
 
@@ -555,6 +1123,8 @@ case "$cmd" in
     logs|log) cmd_logs "$@" ;;
     build)    cmd_build ;;
     ip)       cmd_ip "$@" ;;
+    volume|vol) cmd_volume "$@" ;;
+    network|net) cmd_network "$@" ;;
     help|--help|-h)
         echo "veeros-vm — VeerOS VM orchestration tool"
         echo ""
@@ -563,16 +1133,28 @@ case "$cmd" in
         echo "VM Lifecycle:"
         echo "  create <name> [options]   Create a new VM"
         echo "    --memory MB             RAM size (default: 256)"
-        echo "    --disk SIZE             Disk image size (default: 64M)"
+        echo "    --disk SIZE             Data disk size (default: 64M)"
         echo "    --ssh-port PORT         Host SSH port (auto-assigned if omitted)"
-        echo "    --net nat|bridge        Network mode (default: nat)"
-        echo "    --bridge BR             Bridge interface (default: br0)"
+        echo "    --net nat|bridge        Network mode (default: bridge)"
+        echo "    --bridge BR             Bridge interface (default: veeros0)"
         echo "    --hostname NAME         Guest hostname (default: VM name)"
         echo "  start <name>              Start a VM (daemonized)"
         echo "  stop <name>               Graceful shutdown"
         echo "  kill <name>               Force-kill a VM"
         echo "  restart <name>            Stop + start"
         echo "  destroy <name>            Remove VM and all data"
+        echo ""
+        echo "Network:"
+        echo "  network setup             Create veeros0 bridge + DHCP (requires sudo)"
+        echo "  network teardown          Remove bridge + DHCP (requires sudo)"
+        echo "  network status            Show bridge, DHCP and VM IPs"
+        echo ""
+        echo "Volumes:"
+        echo "  volume create <name> [--size SIZE]   Create a new volume (default: 64M)"
+        echo "  volume list                          List all volumes"
+        echo "  volume attach <vm> <volume>          Attach volume to VM"
+        echo "  volume detach <vm> <volume>          Detach volume from VM"
+        echo "  volume delete <name>                 Delete a volume"
         echo ""
         echo "Information:"
         echo "  status [name]             Show VM status(es)"
@@ -588,6 +1170,13 @@ case "$cmd" in
         echo "Maintenance:"
         echo "  set <name> key=value ...  Update VM settings"
         echo "  build                     Rebuild kernel ISO"
+        echo ""
+        echo "Disks: Each VM gets a 64M system disk (vda, POSIX layout) and a"
+        echo "data disk (vdb). Attached volumes appear as vdc, vdd (max 4 total)."
+        echo ""
+        echo "Networking: Default mode is bridge. All VMs share a veeros0 bridge"
+        echo "(10.10.10.0/24) with DHCP-assigned unique IPs. Bridge is auto-created"
+        echo "on first 'start' if not already up. Use --net nat for legacy NAT mode."
         echo ""
         echo "State directory: $VEEROS_HOME"
         ;;

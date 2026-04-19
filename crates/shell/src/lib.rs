@@ -83,6 +83,8 @@ pub struct ShellEnv {
     pub umount_fs: Option<fn(&str) -> bool>,
     /// List block devices. Writes output to writer.
     pub lsblk: Option<fn(&mut dyn core::fmt::Write)>,
+    /// Report filesystem disk space usage. Writes output to writer.
+    pub df_cmd: Option<fn(&mut dyn core::fmt::Write)>,
 
     // ── Input device callbacks ───────────────────────────────────────
     /// Write input subsystem status to writer.
@@ -376,6 +378,7 @@ impl Shell {
             "mount" => self.cmd_mount(con, args),
             "umount" | "unmount" => self.cmd_umount(con, args),
             "lsblk" => self.cmd_lsblk(con),
+            "df" => self.cmd_df(con),
             // ── input device commands ────────────────────
             "input" => self.cmd_input(con, args),
             "lsusb" => self.cmd_lsusb(con),
@@ -469,6 +472,7 @@ impl Shell {
         let _ = writeln!(con, "  mount      Mount filesystem / list mounts");
         let _ = writeln!(con, "  umount     Unmount a filesystem");
         let _ = writeln!(con, "  lsblk      List block devices");
+        let _ = writeln!(con, "  df         Show filesystem disk space usage");
         let _ = writeln!(con, "  ────────── input ─────────────────");
         let _ = writeln!(con, "  input      Input device status");
         let _ = writeln!(con, "  lsusb      List USB devices");
@@ -1117,6 +1121,13 @@ impl Shell {
         match self.env.lsblk {
             Some(f) => f(con),
             None => { let _ = writeln!(con, "lsblk: not available"); }
+        }
+    }
+
+    fn cmd_df<S: Serial>(&self, con: &mut Console<S>) {
+        match self.env.df_cmd {
+            Some(f) => f(con),
+            None => { let _ = writeln!(con, "df: not available"); }
         }
     }
 
@@ -3224,6 +3235,28 @@ Subcommands:
 Syscalls: SYS_ZKP_PROVE (0xE5), SYS_ZKP_VERIFY (0xE6).
 
 See also: peers, mesh, fabric"),
+
+    ("df", "\
+DF(1) — Report filesystem disk space usage
+
+Usage:
+  df             — show space usage for all filesystems
+
+Displays:
+  - RamFS data pool: total, used, and available bytes
+  - Inode usage: allocated vs maximum inodes
+  - Mounted FAT32 partitions (label and mount point)
+  - Block devices (capacity)
+
+Example:
+  veeros> df
+    Filesystem      Size      Used     Avail  Use%  Mounted on
+    ------------  --------  --------  ------  ----  ----------
+    ramfs           64 KB    2 KB     62 KB    3%  /
+    inodes          12/128
+    /dev/vda        64 MB                           (block device)
+
+See also: mount, lsblk, meminfo, vfs"),
 ];
 
 #[cfg(test)]
