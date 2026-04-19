@@ -25,6 +25,10 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [ ] Function invocation model — `invoke("name.function", payload)` replaces URLs/endpoints; ephemeral, versioned, identity-routed (Phase 20A′)
 - [ ] InterFabric Protocol (IFP) / VeerLink — cross-fabric federation; independent fabrics communicate via trust-bound, identity-driven invocation without shared networks or API gateways (Phase 24)
 - [ ] Fabric Client / VeerUX — next-generation UI replacing the browser; fabric-native composable views, semantic navigation, identity-native auth, adaptive rendering from serial to pixel framebuffer, AI-generated interfaces; eliminates URLs, REST, cookies, JS frameworks (Phase 25)
+- [ ] VeerFlow interaction layer — VeerFlow branded Fabric Client; invoke-first, live-by-default, identity-native; command palette + semantic navigation; context stack replaces tabs; canvas + panels; time-travel UI (Phase 25)
+- [ ] VDF (Veer Definition Format) — declarative view DSL (YAML-like) that compiles to `invoke()` + `subscribe()` calls; reactive bindings, policy-aware components, composable views, offline-first (Phase 25C)
+- [ ] IFP binary wire protocol — QUIC-native, Ed25519-signed, CBOR-encoded invocations; 8 message types (INVOKE/DATA/RESULT/ERROR/CANCEL/HEARTBEAT/POLICY_HINT/FEDERATION); per-invoke identity, streaming, priorities, federation envelope (Phase 22A / 24G)
+- [ ] Living Systems / Integrity Engine — continuous behavioral integrity as kernel primitive; self-observation, self-explanation, self-repair, self-learning; integrity signals replace defect management; living graph of system health (Phase 26)
 
 ## Logical Phase Order (Primitives → Complex)
 _Phases are numbered by historical creation order. Read in this dependency order for logical flow:_
@@ -51,6 +55,7 @@ TIER 4 — Heterogeneous Compute
 TIER 5 — Intelligence
   Phase 10  AI as First-Class OS Citizen (inference, NL shell, agents, vision, voice, RAG)
   Phase 14  AI-Native Execution Kernel (agents, intents, memory engine, fabric, scheduler) — Implemented
+  Phase 26  Living Systems / Integrity Engine (self-observation, self-explanation, self-repair, self-learning) — NEW
 
 TIER 6 — Distributed Systems
   Phase 11  Distributed OS / Cluster (membership, consensus, distributed scheduler/IPC/VFS)
@@ -76,7 +81,7 @@ TIER 10 — Inter-Fabric Federation
   Phase 24  InterFabric Protocol (IFP) / VeerLink — cross-fabric trust, federated invocation, identity federation — NEW
 
 TIER 11 — User Experience
-  Phase 25  Fabric Client / VeerUX — adaptive rendering, composable views, semantic navigation, AI-native UI, dist-desktop — NEW
+  Phase 25  Fabric Client / VeerFlow — adaptive rendering, composable views, VDF view DSL, semantic navigation, AI-native UI, dist-desktop — NEW
 
 CROSS-CUTTING
   Phase 4   Distribution Profiles (feature flags, per-target defaults, component matrix)
@@ -2350,6 +2355,8 @@ Bandwidth monitor      ─            ─          ─          ─          ✓
 ## Phase 14 — AI-Native Execution Kernel (Implemented)
 _The OS kernel treats autonomous agents, goals, and memory as first-class primitives — not userspace libraries. Agents replace processes as the primary execution unit for AI workloads. Intents replace manual commands with declarative goals. The kernel plans, schedules, and orchestrates autonomously._
 
+_**Determinism guarantee**: every learning mechanism in Phase 14 is fully deterministic. Intent decomposition is rule-based (not stochastic). Placement scoring uses explicit weighted formulas. Episodic memory is append-only with exact replay. Given the same history, the fabric always makes the same decision. LLMs (Phase 10) are an opt-in inference tool for human interaction — never the learning substrate. The fabric itself IS the model: distributed episodic memories, placement scores, behavioral baselines, and repair strategies — all inspectable, auditable, and reproducible._
+
 **Status**: Core kernel modules implemented. Syscall ABI defined (0xF0–0xFF). Wired into dispatch + all 5 kernel targets. Compiles clean.
 
 ### 14A — Agent Primitive (`microkernel::agent`)
@@ -2985,14 +2992,20 @@ _Locality-aware replication with tunable consistency — from strong to eventual
 ## Phase 22 — Fabric Protocol & Transport
 _Binary, zero-copy, QUIC-native protocol for all fabric communication. Every fabric message — invocations, state sync, events, management — uses the same wire protocol. Feature-gated: `fabric-proto`._
 
-### 22A — Wire Protocol
-_Compact binary framing for minimal overhead on constrained links._
+### 22A — Wire Protocol (IFP — InterFabric Protocol)
+_Compact binary framing for minimal overhead on constrained links. IFP is the unified wire protocol for intra-fabric and inter-fabric communication._
 
-- [ ] **Binary envelope** — `FabricFrame { version: u8, msg_type: u8, flags: u16, correlation_id: u32, sender_id: NodeId, payload_len: u32, payload: [u8] }` — fixed 16-byte header + payload; zero-copy parseable
-- [ ] **Message types** — `Invoke` (function call), `InvokeReply`, `StateOp` (KV/stream/object), `StateSync` (replication), `Event` (structured event), `Gossip` (membership/health), `Console` (remote shell), `Control` (management)
-- [ ] **Serialization** — payload serialized as CBOR (Concise Binary Object Representation); self-describing, compact, schema-optional; JSON-compatible for debugging
+- [ ] **IFP common header** — fixed + varint fields: `{ version: u8, msg_type: u8, flags: u16, header_len: varint, invocation_id: [u8; 16] (UUID), trace_id: [u8; 16], timestamp: varint (µs since epoch), body_len: varint, extensions: TLV[] }` — all messages share this header for tracing and correlation
+- [ ] **Message types** — 8 core types: `INVOKE (0x01)` (function call), `DATA (0x02)` (streaming chunks, bidirectional), `RESULT (0x03)` (success response), `ERROR (0x04)` (failure with structured code), `CANCEL (0x05)` (abort invocation), `HEARTBEAT (0x06)` (keepalive), `POLICY_HINT (0x07)` (early permission feedback for UX), `FEDERATION (0x08)` (cross-fabric envelope)
+- [ ] **INVOKE body** — CBOR-encoded: `{ function: "auth.login", version: "v1", args: {…}, caller: { id, fabric }, capabilities: ["auth.invoke"], deadline_ms: 5000, priority: P0-P3, target: { fabric, constraints: { region, latency_ms } }, idempotency_key: optional }`
+- [ ] **RESULT body** — `{ status: "OK", result: {…}, metrics: { latency_ms, node } }` — small results inline; large results streamed via DATA frames
+- [ ] **ERROR body** — `{ code: "POLICY_DENIED|NOT_FOUND|TIMEOUT|RESOURCE_EXHAUSTED|FABRIC_UNAVAILABLE", message, retryable: bool, details: {…} }` — structured error codes, not HTTP status
+- [ ] **DATA streaming** — `{ seq: u32, chunk: [u8], eof: bool }` — ordered per QUIC stream; backpressure via QUIC flow control; used for large payloads and live subscriptions
+- [ ] **Identity block (TLV extension)** — mandatory on INVOKE: `{ sig_alg: "ed25519", signature: [u8; 64], cert_chain: [leaf, intermediate], claims: { sub, fabric, exp, caps } }` — detached signature over `hash(header + body)`; verified before execution
+- [ ] **Priority & QoS** — header flags encode priority: `P0` (panic/control), `P1` (user actions), `P2` (background), `P3` (debug); fabric can preempt and shed load (drop P3 first)
+- [ ] **Subscription pattern** — streaming invocation: `INVOKE(subscribe) → continuous DATA(events) → END on cancel`; replaces WebSockets/SSE
+- [ ] **Serialization** — CBOR (default, self-describing, compact); optional protobuf for schema-defined services; `zstd` compression flag for large DATA frames
 - [ ] **Zero-copy forwarding** — intermediate relay nodes forward frames without deserializing payload; only header inspected for routing
-- [ ] **Compression** — optional LZ4 compression for payload > 1 KB; flag in header; transparent to application
 - [ ] **Fragmentation** — large messages fragmented into MTU-sized frames; reassembled at receiver; ordered delivery guarantee within session
 
 ### 22B — QUIC Transport
@@ -3185,10 +3198,10 @@ Result: Inter-org communication without API gateways, VPNs, or shared networks.
 
 ---
 
-## Phase 25 — Fabric Client / VeerUX (Next-Generation User Interface)
+## Phase 25 — Fabric Client / VeerFlow (Next-Generation User Interface)
 _The browser is dead. VeerOS replaces it with a fabric-native runtime that binds directly to `invoke()`, State Fabric, and identity — no URLs, no REST, no cookies, no origin policy. The Fabric Client is simultaneously an OS shell, application runtime, and composable UI surface. It renders adaptively from serial ASCII to rich pixel framebuffer based on device capabilities. Feature-gated: `fabric-client` (core runtime), `fc-views` (composable views), `fc-render` (pixel rendering), `fc-remote` (remote Fabric Client protocol)._
 
-_Product naming: **VeerUX** (user-facing brand), **Fabric Client** (architecture term), **FC** (code prefix)._
+_Product naming: **VeerFlow** (user-facing brand — "Don't browse. Flow."), **Fabric Client** (architecture term), **FC** (code prefix), **VFCR** (VeerFlow Client Runtime). Design principles: invoke-first, live-by-default, identity-native, composable, context-preserving, zero-chrome._
 
 ### Why the Browser Dies in VeerOS
 
@@ -3211,8 +3224,8 @@ PWA offline bolt-on                →  Offline-first by design (CRDT sync, loca
 
 **Result**: Entire classes of web attacks (XSS, CSRF, clickjacking, supply-chain JS attacks) **disappear** because there are no origins, no cookies, no injected scripts, no ambient authority, and no untrusted code execution.
 
-### 25A — Fabric Client Architecture
-_The layered architecture of the Fabric Client — from identity to pixels._
+### 25A — Fabric Client Architecture (VFCR — VeerFlow Client Runtime)
+_The layered architecture of the Fabric Client — from identity to pixels. Architecture name: **VFCR** (VeerFlow Client Runtime). Nine logical modules: Identity Manager (Layer 1), Invocation Engine (Layer 2), State Sync Engine (Layer 3), Event Engine (Layer 3½), View Runtime (Layer 4), Policy Engine / Security Sandbox (Layer 5), Transport Layer (QUIC/mTLS), Local Storage (offline-first). Event-driven concurrency: async everywhere, backpressure-aware, internal queues. Offline-first: local state cache, sync later, CRDT conflict resolution. Multi-fabric: federation handled automatically at transport level._
 
 #### Layer 1 — Identity Layer (Built-in, Zero-Config)
 - [ ] **Device + user identity** — hardware-backed Ed25519 + ML-DSA keypair (Phase 8C); no login forms for already-authenticated users; biometric/PIN unlock for screen resume
@@ -3233,6 +3246,13 @@ _The layered architecture of the Fabric Client — from identity to pixels._
 - [ ] **Offline state cache** — subscribed state cached locally in persistent memory (Phase 14C); views render from cache when fabric is unreachable; CRDT merge (Phase 21B) on reconnection
 - [ ] **Optimistic updates** — view applies state change locally immediately, syncs to fabric asynchronously; rollback on conflict; configurable per-key (optimistic vs pessimistic)
 - [ ] **State windowing** — for large datasets, subscribe to a window: `fc_subscribe("logs.*", { limit: 100, offset: "latest" })` — server-side filtering reduces bandwidth
+
+#### Layer 3½ — Event Engine (replaces notifications / push)
+- [ ] **`fc_events(filter)` API** — subscribe to typed event streams: system events, user events, fabric events, audit events; filterable by severity, source, category
+- [ ] **Event stream panel** — continuous scrolling stream replacing notification popups; events rendered inline as compact cards with timestamp, source, severity badge
+- [ ] **Event correlation** — related events grouped by TraceID (from IFP header); click to expand full causal chain across nodes
+- [ ] **Event persistence** — events stored in local ring buffer for offline replay; synced to State Fabric for cross-device continuity
+- [ ] **Backpressure** — event stream respects consumer rate; slow consumers get priority-filtered subset (P0/P1 only); configurable per-stream
 
 #### Layer 4 — View Runtime (replaces browser rendering engine)
 - [ ] **Adaptive rendering engine** — same view definition renders differently based on output device:
@@ -3318,6 +3338,51 @@ _The replacement for web apps. Signed, versioned, sandboxed, locally-executed mo
 - [ ] **Native views** — view logic compiled to native ELF per-arch; used for system views (settings, diagnostics) that need direct kernel access; capability-restricted
 - [ ] **Hybrid views** — native frame with embedded WASM components; system chrome (title bar, nav) is native; content area runs sandboxed WASM view
 - [ ] **Shell-integrated views** — special views that enhance shell commands: `ls --view` renders file listing as an interactive tree (framebuffer) or formatted table (text); progressive enhancement
+
+### 25C′ — Veer Definition Format (VDF)
+_Declarative view DSL that compiles to `invoke()` + `subscribe()`. The replacement for HTML/CSS/JS. A single `.vdf` file (YAML-like) describes data bindings, layout, components, permissions, and navigation — the runtime does the rest._
+
+#### VDF Structure
+- [ ] **View declaration** — top-level `view:` block with `name`, `title`, `description`, `icon`; each `.vdf` file = one view; views compose by nesting `view:` references
+- [ ] **Data bindings** — `data:` block binds named variables to `invoke()` calls or `subscribe()` streams:
+  ```yaml
+  data:
+    metrics: { invoke: "analytics.getMetrics", args: { range: $params.range } }
+    live_traffic: { subscribe: "analytics.traffic.*" }
+    user: { invoke: "user.getProfile", args: { id: $identity.id } }
+  ```
+- [ ] **Context variables** — built-in reactive variables available in all expressions: `$identity` (current user), `$params` (navigation parameters), `$selected` (currently selected item), `$now` (current time), `$device` (display capabilities)
+- [ ] **Computed / derived state** — `computed:` block for derived values: `{ total: "sum(metrics.values)", trend: "delta(metrics, -1h)" }` — reactive, recalculated on source change
+- [ ] **Conditional rendering** — `showIf:` on any component: `showIf: canInvoke("admin.deleteUser")` — UI auto-adapts to caller's permissions; no separate "admin" vs "user" views
+- [ ] **Layout system** — `layout:` block defines structure using `grid`, `stack`, `split`, `tabs`, `scroll`; responsive breakpoints per render tier; flexbox-like grow/shrink semantics
+
+#### VDF Components
+- [ ] **Typed components** — `chart:` (line, bar, pie, sparkline), `table:` (sortable, filterable, paginated), `stream:` (live-updating event list), `card:` (key-value display), `button:` (action trigger), `input:` (text/number/select), `banner:` (alert/info/warning), `view:` (nested view reference)
+- [ ] **Action bindings** — `onClick:`, `onSubmit:`, `onSelect:` → `invoke("function", { args })` with context: `onClick: invoke("order.cancel", { id: $selected.id })`
+- [ ] **Reactive update** — data bindings auto-update components; no manual state management; subscribe sources push changes → affected components re-render
+- [ ] **Debug section** — optional `debug:` block enables trace overlay: shows raw invoke/subscribe calls, data flow, render timing; toggled in dev mode
+
+#### VDF Compilation & Lifecycle
+- [ ] **VDF parser** — YAML-like parser (no external YAML dependency; purpose-built for VDF subset) → intermediate representation (IR) of view tree + binding graph
+- [ ] **IR → invoke()/subscribe() compilation** — VDF IR compiled to optimized sequence of `fc_invoke()` + `fc_subscribe()` calls + component tree; dead code elimination for hidden components
+- [ ] **Lifecycle** — Load `.vdf` → parse → resolve permissions (check `canInvoke` for all data bindings) → execute bindings → render components → stream updates → unmount on navigate-away
+- [ ] **Hot reload** — `vdf watch <file>` monitors `.vdf` file for changes; re-parses and re-renders without losing state; developer workflow
+
+#### VDF Package Integration
+- [ ] **Package manifest** — CVP manifest (25C) extended with VDF-specific fields:
+  ```toml
+  [vdf]
+  entry = "views/main.vdf"
+  views = ["views/main.vdf", "views/detail.vdf", "views/settings.vdf"]
+  
+  [vdf.navigation]
+  targets = [
+    { path = "dashboard.analytics", view = "views/main.vdf", label = "Analytics" },
+    { path = "dashboard.analytics.detail", view = "views/detail.vdf" }
+  ]
+  ```
+- [ ] **Capability inference** — VDF parser extracts all `invoke()` and `subscribe()` targets from data bindings → auto-generates capability requirements for manifest; author reviews + approves
+- [ ] **View composability** — views reference other views: `{ type: view, src: "dashboard.widget.traffic" }` → nested CVP loaded + rendered within parent; capability scoping inherited
 
 ### 25D — Progressive Rendering Tiers
 _One view definition, multiple rendering fidelities. The Fabric Client adapts to the display device._
@@ -3510,7 +3575,7 @@ _What UI surface each hardware target supports._
 TIER 0–10 (existing tiers as documented above)
 
 TIER 11 — User Experience
-  Phase 25  Fabric Client / VeerUX — adaptive rendering, composable views, semantic navigation, AI-native UI — NEW
+  Phase 25  Fabric Client / VeerFlow — adaptive rendering, composable views, VDF view DSL, semantic navigation, AI-native UI — NEW
 ```
 
 #### Phase Dependencies
@@ -3524,6 +3589,107 @@ Phase 25C (View Packages)       ← Phase 8B (WASM Sandbox), Phase 8D (Secure Bo
 Phase 25F (Multi-Device)        ← Phase 21 (State Fabric), Phase 19A (Cross-Node Shell)
 Phase 25H (AI-Native UI)        ← Phase 10I (NL Shell), Phase 14B (Intent Engine), Phase 10L (Voice)
 Phase 25L (dist-desktop)        ← Phase 4 (Distribution Profiles), Phase 7D (USB HID), RPi5 framebuffer
+```
+
+---
+
+## Phase 26 — Living Systems / Integrity Engine
+_VeerOS replaces "bugs", "defects", and "QA" with a continuous, real-time behavioral integrity system. Every component continuously evaluates its own correctness, confidence, and alignment with declared intent. Deviations produce integrity signals — not stack traces — that form a living graph of system health. The system self-observes, self-explains, self-repairs, and self-learns. No QA environments, no defect backlogs, no release gates. Feature-gated: `integrity` (core primitive), `integrity-observe` (self-observation), `integrity-explain` (causal reasoning), `integrity-repair` (autonomous fix), `integrity-learn` (feedback loop)._
+
+_**Determinism guarantee**: all observation, scoring, anomaly detection, repair ranking, and knowledge distillation are deterministic — same history → same decision, always. LLM assistance (self-explanation text, fix proposal generation) is opt-in and always validated in simulation before deployment. The integrity engine operates correctly without LLMs; they accelerate human comprehension, they don't make autonomous decisions._
+
+_Dependencies: Phase 14 (Agents / Intent Engine / Memory Engine), Phase 19E (Structured Events / KernelEvent), Phase 8F (Audit subsystem), Phase 10I (NL / AI inference)._
+
+### 26A — Integrity Primitive
+_The foundational kernel primitive. Every evaluable component carries an integrity envelope that defines expected behavior boundaries._
+
+- [ ] **`IntegrityEnvelope` struct** — per-component behavioral boundary: `{ component_id, intent_hash, expected_behavior: BehaviorSpec, confidence_floor: f32, observation_interval_ms: u32, repair_policy: RepairPolicy }` — stored in component metadata
+- [ ] **`BehaviorSpec` definition** — declarative specification of expected behavior: input/output ranges, latency bounds, state transition rules, invariants; compiled from intent declarations (Phase 14B)
+- [ ] **`IntegritySignal` type** — continuous metrics emitted by every observed component: `{ component_id, timestamp, confidence: f32, alignment: f32, anomaly_score: f32, context: SignalContext }` — not binary pass/fail but continuous confidence
+- [ ] **`SYS_INTEGRITY_REGISTER` (0xD0)** — register a component for integrity observation: attach `IntegrityEnvelope`, initialize baseline metrics, begin observation loop
+- [ ] **`SYS_INTEGRITY_QUERY` (0xD1)** — query current integrity state of a component or subsystem: returns `IntegrityReport { signals, trend, confidence_delta, last_deviation }`
+- [ ] **Integrity signal bus** — dedicated event channel for integrity signals; subscribers (repair engine, audit, shell, dashboard) receive filtered streams; priority-ordered (critical deviations first)
+- [ ] **Signal persistence** — integrity signals written to episodic memory (Phase 14C) for trend analysis and learning; ring buffer with configurable retention per-component
+
+### 26B — Self-Observation
+_Components continuously evaluate their own correctness, confidence, and alignment against their integrity envelope._
+
+- [ ] **Observation loop** — each registered component runs a periodic self-check: evaluate current state against `BehaviorSpec` → compute confidence score → emit `IntegritySignal` → schedule next check
+- [ ] **Confidence scoring** — multi-dimensional score: `correctness` (output matches spec), `timeliness` (within latency bounds), `resource_compliance` (within budget), `alignment` (behavior matches declared intent); weighted composite → single confidence float [0.0, 1.0]
+- [ ] **Anomaly detection** — statistical baseline built from first N observations; subsequent observations scored against baseline; z-score > threshold → anomaly signal; adaptive baseline that evolves with legitimate behavioral changes
+- [ ] **Cross-component correlation** — integrity signals from interacting components correlated by TraceID; if A's confidence drops and B (which A invokes) also drops → causal chain identified
+- [ ] **Intent drift detection** — compare actual execution patterns against declared intent (Phase 14B); gradual drift (behavior slowly diverging from intent) detected via moving-window analysis; alert before hard failure
+- [ ] **Resource envelope monitoring** — observe CPU time, memory allocation, invocation count, state writes against declared budgets; budget overrun → integrity signal with `resource_compliance` drop
+- [ ] **Observation cost control** — self-observation itself has a CPU/memory budget; observation frequency auto-adjusts based on component stability (stable → less frequent; anomalous → more frequent)
+
+### 26C — Self-Explanation
+_When deviations occur, the system produces causal reasoning and confidence deltas — not stack traces and error codes._
+
+- [ ] **Causal reasoning engine** — on integrity signal with confidence < threshold: trace backward through invocation chain (TraceID), state dependencies, and event timeline → produce `CausalExplanation { root_cause, contributing_factors, confidence_delta_chain, timeline }`
+- [ ] **Confidence delta chain** — track how confidence changed over time: `[{ t: 100ms, confidence: 0.95, event: "invoke analytics.compute" }, { t: 150ms, confidence: 0.72, event: "timeout from state.get" }, ...]` — shows exactly when and why confidence dropped
+- [ ] **Natural language explanation** — `CausalExplanation` rendered to human-readable text via AI inference (Phase 10I): _"The analytics dashboard slowed because the metrics service on node-3 exceeded its memory budget, causing state reads to timeout. Confidence dropped from 0.95 to 0.72 over 50ms."_
+- [ ] **Deviation classification** — classify deviations: `Transient` (recoverable, e.g., network blip), `Degradation` (progressive, e.g., memory leak), `Violation` (hard boundary crossed), `Drift` (slow intent misalignment); each class triggers different repair strategy
+- [ ] **Explanation history** — all explanations stored in episodic memory indexed by component + time; queryable: `explain component="analytics" since="1h ago"` → returns all deviations and their causal chains
+- [ ] **Shell integration** — `integrity explain <component>` — show latest deviation explanation in human-readable form; `integrity explain --trace <trace_id>` — show full causal chain for a specific invocation
+
+### 26D — Self-Repair
+_Fixes generated, validated in simulation, and deployed autonomously. No human in the loop for known repair patterns._
+
+- [ ] **Repair strategy registry** — predefined repair actions for common deviation classes: `Transient → retry with backoff`, `ResourceOverrun → shrink budget + reschedule`, `Timeout → switch to fallback node`, `Drift → re-anchor to intent`; extensible via agent definitions (Phase 14A)
+- [ ] **Autonomous fix generation** — for unknown deviations: AI inference (Phase 10I) analyzes `CausalExplanation` + component `BehaviorSpec` + repair history → proposes corrective action: parameter adjustment, routing change, component restart, fallback activation
+- [ ] **Simulation sandbox** — proposed fix applied in isolated simulation environment: clone component state → apply fix → run synthetic workload → evaluate integrity signals; fix accepted only if simulated confidence ≥ threshold
+- [ ] **Staged deployment** — accepted fix deployed in stages: single instance → canary percentage → full rollout; integrity monitored at each stage; automatic rollback if confidence drops
+- [ ] **Repair budget** — per-component limit on autonomous repairs per time window; prevents repair loops; exceeded budget → escalate to human (shell alert + dashboard notification)
+- [ ] **Repair audit trail** — every repair action logged to audit subsystem (Phase 8F): `{ component, deviation, proposed_fix, simulation_result, deployment_stage, outcome }` — full accountability
+- [ ] **`SYS_INTEGRITY_REPAIR` (0xD2)** — manual repair trigger: `integrity repair <component> --strategy <name>` — apply specific repair strategy; useful for human-guided recovery
+- [ ] **Rollback** — every repair creates a rollback checkpoint; if repair worsens integrity → automatic revert to pre-repair state; rollback chain maintained (up to N checkpoints)
+
+### 26E — Self-Learning
+_Every integrity signal feeds back into future decisions and execution strategies. The system gets smarter over time._
+
+- [ ] **Episodic feedback loop** — completed repair cycles stored as episodes in memory engine (Phase 14C): `{ deviation, explanation, repair_action, outcome, confidence_before, confidence_after, duration }` — training data for future repairs
+- [ ] **Pattern recognition** — AI inference analyzes episode history: identify recurring deviation patterns, time-of-day correlations, load-dependent failures, seasonal trends; generate preventive rules
+- [ ] **Predictive integrity** — based on learned patterns, predict upcoming deviations: _"Node-3 memory usage trend suggests budget overrun in ~2h based on similar episodes on 2026-03-01 and 2026-03-15"_ → preemptive repair before failure
+- [ ] **Baseline evolution** — observation baselines updated based on learned patterns; legitimate behavioral changes (e.g., after code update) auto-accepted after observation window; prevents false positives
+- [ ] **Repair strategy refinement** — successful repair strategies promoted (higher priority, shorter simulation); failed strategies demoted or retired; strategy effectiveness score maintained
+- [ ] **Fleet learning** — integrity patterns shared across fabric nodes (via State Fabric / gossip); a repair strategy proven on one node is available to all nodes; configurable sharing policy (opt-in per fleet)
+- [ ] **Knowledge distillation** — periodically compress episode history into compact rules: `IF deviation_class == Timeout AND component_type == StateRead AND time_of_day IN [02:00, 04:00] THEN preemptive_repair(increase_timeout_20%)` — reduces memory footprint while preserving learning
+
+### 26F — Integrity Graph
+_All integrity signals form a live graph of system health. The graph is queryable, visualizable, and actionable._
+
+- [ ] **Graph data structure** — directed graph: nodes = components, edges = invocation/state dependencies; each node carries current `IntegritySignal`; edges carry latency + confidence propagation weight
+- [ ] **Real-time aggregation** — subsystem-level integrity computed by aggregating component signals: `subsystem_confidence = weighted_avg(component_confidences)` — cascading: fabric confidence = avg(subsystem_confidences)
+- [ ] **Health dashboard view** — VeerFlow view (Phase 25 / VDF) rendering integrity graph: color-coded nodes (green/yellow/red by confidence), animated edges showing data flow, drill-down to component detail
+- [ ] **`integrity status`** — shell command showing system-wide integrity summary: overall confidence, top-N deviating components, active repairs, recent explanations
+- [ ] **`integrity graph <component>`** — show dependency graph for a component: upstream + downstream, confidence propagation, bottleneck identification
+- [ ] **Alerting** — configurable thresholds: `integrity alert when confidence < 0.5 for component "analytics.*"` — triggers shell notification, event stream entry, optional `invoke("ops.page", { ... })`
+- [ ] **Historical replay** — `integrity replay --from "2h ago" --to "1h ago"` — replay integrity graph state over time; identify when deviations started and how they propagated
+
+### 26G — Shell Integration & UX
+_Living Systems presented to users through the shell and VeerFlow views._
+
+- [ ] **`integrity` shell command family**:
+  - `integrity status` — system-wide health summary
+  - `integrity observe <component>` — show live integrity signals for a component
+  - `integrity explain <component>` — latest deviation with causal explanation
+  - `integrity repair <component>` — trigger manual repair
+  - `integrity history <component>` — deviation + repair history timeline
+  - `integrity graph [component]` — dependency graph with health overlay
+  - `integrity learn --stats` — learning system statistics (episodes, patterns, predictions)
+  - `integrity config <component> --confidence-floor 0.8` — configure per-component thresholds
+- [ ] **Integrity indicators in system views** — `ps` shows per-process integrity score; `top` includes integrity column; `sysinfo` includes overall system integrity percentage
+- [ ] **VeerFlow integrity dashboard** — dedicated system view (Phase 25I) with live integrity graph, event stream, active repairs, prediction timeline; auto-installed as system view
+
+### 26H — Phase Dependencies
+```
+Phase 26A (Integrity Primitive)    ← Phase 14A (Agent Table), Phase 14B (Intent Engine), Phase 19E (Structured Events)
+Phase 26B (Self-Observation)       ← Phase 26A, Phase 8F (Audit Ring Buffer), Phase 14C (Memory Engine)
+Phase 26C (Self-Explanation)       ← Phase 26B, Phase 10I (NL/AI Inference), Phase 14C (Episodic Memory)
+Phase 26D (Self-Repair)            ← Phase 26C, Phase 8B (Isolation Domains / Simulation), Phase 14A (Agents)
+Phase 26E (Self-Learning)          ← Phase 26D, Phase 14C (Episodic Memory), Phase 10I (AI Inference)
+Phase 26F (Integrity Graph)        ← Phase 26B, Phase 21 (State Fabric), Phase 25 (VeerFlow for dashboard)
+Phase 26G (Shell Integration)      ← Phase 26A-F, Phase 3 (Shell), Phase 25I (System Views)
 ```
 
 ---

@@ -354,6 +354,110 @@ User submits intent (SYS_INTENT_SUBMIT)
 
 ---
 
+## The Fabric as a Learning System
+
+VeerOS does not bolt AI onto an operating system. The distributed execution
+fabric itself is a continuously learning, deterministic intelligence.
+
+### Learning Loop
+
+The Intent Scheduler's 6-phase tick embeds learning directly into execution:
+
+```
+Phase 1: Decompose  — intent → plan DAG (informed by past episodes)
+Phase 2: Assign     — select nodes + spawn agents (placement scores from history)
+Phase 3: Monitor    — track budget, deadline, resource usage
+Phase 4: Sync       — agent completion updates plan state
+Phase 5: Record     — outcome written to Episodic Memory    ← THIS IS THE LEARNING STEP
+Phase 6: Health     — node heartbeats, integrity signals update baselines
+```
+
+Every execution cycle is both **inference** (using accumulated knowledge
+to make decisions) and **training** (recording outcomes to refine future
+decisions). There is no separate training pipeline.
+
+### Distributed Knowledge
+
+The "model" is not a weight matrix. It is the collective state distributed
+across every node in the fabric:
+
+| Knowledge Type | Storage | Scope | Purpose |
+|---|---|---|---|
+| Episodic Memory | Per-node ring buffer | Local + gossip | What happened, what worked |
+| Placement Scores | Execution Fabric node table | Per-node | Which nodes are good at what |
+| Behavioral Baselines | Integrity Engine (Phase 26) | Per-component | What is normal behavior |
+| Repair Strategies | Strategy Registry | Fleet-wide via gossip | What fixes work for what |
+| Distilled Rules | Persistent Memory | Fleet-wide | Compressed episode patterns |
+
+Knowledge propagates fleet-wide via gossip — a repair strategy proven on one
+node becomes available to all nodes without a central registry.
+
+### Determinism Guarantee
+
+Every learning mechanism is **fully deterministic**:
+
+- **Placement scoring** — explicit weighted formula:
+  `score = w₁×capability_match + w₂×resource_fit + w₃×locality + w₄×load`.
+  Same inputs → same placement, always.
+
+- **Intent decomposition** — rule-based constraint matching, not an LLM.
+  The code explicitly states: "deterministic, not stochastic."
+
+- **Anomaly detection** — statistical z-score against observed baseline.
+  Reproducible given the same observation history.
+
+- **Repair strategy selection** — score-ranked registry. Strategies promoted
+  on success, demoted on failure. Given the same repair history, the same
+  strategy will always be selected.
+
+- **Knowledge distillation** — episodes compressed into explicit IF/THEN rules
+  (Phase 26E). Rules are human-readable and auditable.
+
+**Given the same history, the fabric will always make the same decision.**
+Every adaptation is traceable to specific episodic evidence, not statistical
+correlation.
+
+### Where LLMs Fit (and Don't)
+
+LLMs (Phase 10) are an inference *tool* the fabric uses — never the learning
+substrate:
+
+| Fabric Mechanism | Uses LLM? | Notes |
+|---|---|---|
+| Intent decomposition | No | Rule-based, deterministic |
+| Agent placement | No | Weighted scoring formula |
+| Anomaly detection | No | Statistical z-score |
+| Repair strategy ranking | No | Episode-based score |
+| Knowledge distillation | No | Rule extraction from episodes |
+| NL shell commands (10I) | Yes | Intent classifier, argmax (deterministic) |
+| Self-explanation text (26C) | Yes | Generates human-readable causal summary |
+| Fix proposal generation (26D) | Yes | Proposes repair — always simulation-validated |
+| Cloud escalation (10F) | Yes | External API — privacy-gated, opt-in |
+
+All LLM-assisted decisions are opt-in, validated, and auditable. The fabric
+operates correctly without them — LLMs accelerate human interaction, they
+don't make autonomous decisions.
+
+### Design Consequence
+
+```
+Conventional AI:    Train offline → Deploy model → Serve inference
+VeerOS Fabric:      Execute → Record → Refine → Execute (continuous loop)
+
+Conventional AI:    Central GPU cluster trains a weight matrix
+VeerOS Fabric:      Every node learns independently, shares via gossip
+
+Conventional AI:    Model is opaque (billions of parameters)
+VeerOS Fabric:      "Model" is inspectable episodes + explicit rules + scored strategies
+
+Conventional AI:    Non-deterministic (sampling, FP variance, batch effects)
+VeerOS Fabric:      Deterministic (same history → same decision → same outcome)
+```
+
+The fabric doesn't use a model. **The fabric IS the model.**
+
+---
+
 ## Target Application Domains
 
 The AI-native architecture is designed for domains where autonomous decision-making,

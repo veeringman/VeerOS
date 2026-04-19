@@ -150,7 +150,7 @@ Compromise one fabric → revoke trust instantly, channels severed in < 1 second
 
 ### Fabric Client — Beyond the Browser
 No URLs. No REST. No cookies. No JavaScript frameworks. The Fabric Client
-(VeerUX) renders composable views directly from fabric state — semantic
+(VeerFlow) renders composable views directly from fabric state — semantic
 navigation replaces address bars, identity-native auth replaces login forms,
 and AI generates adaptive interfaces that reshape from a serial terminal to a
 pixel framebuffer. A developer publishes a function; the fabric renders the UI.
@@ -189,6 +189,89 @@ not a userspace framework.
 `memory_query`, `fabric_status`, `sched_stats`, `agent_count`.
 
 ➡️ **Full design:** [Architecture Documentation](docs/architecture.md)
+
+---
+
+## Intelligence Philosophy — The Fabric IS the Model
+
+VeerOS does not bolt an LLM onto an operating system. The distributed fabric
+itself is a continuously learning, deterministic intelligence.
+
+### How the Fabric Learns
+
+Every execution cycle feeds back into future decisions:
+
+```
+  Intent submitted
+    → Decomposed into plan (step DAG)
+    → Agents placed on fabric nodes
+    → Execution monitored (budget, deadline, outcome)
+    → Episode recorded (what worked, what failed, timing, placement)
+    → Future decomposition + placement refined by accumulated episodes
+    → Integrity signals update behavioral baselines
+    → Repair strategies promoted or demoted based on outcomes
+    → Knowledge propagated fleet-wide via gossip
+```
+
+There is no central model, no training step, no weight matrix. The **"model"**
+is the collective state distributed across every node — episodic memories,
+placement scores, behavioral baselines, repair strategies, and integrity
+history.
+
+### Deterministic by Design
+
+Every learning mechanism in VeerOS is **fully deterministic and auditable**:
+
+| Mechanism | How It Works | Determinism |
+|---|---|---|
+| Placement scoring | Weighted formula: capability × resources × locality × load | Same inputs → same placement, always |
+| Intent decomposition | Rule-based constraint matching (not an LLM) | Same goal + state → same plan |
+| Anomaly detection | Statistical z-score against observed baseline | Reproducible given same history |
+| Repair strategy selection | Score-ranked registry; promote on success, demote on failure | Deterministic ranking |
+| Episodic memory | Append-only log of (action, context, outcome) tuples | Exact replay possible |
+| Knowledge distillation | IF/THEN rules extracted from episodes (26E) | Rules are explicit, inspectable |
+| Fleet learning | Gossip replication of proven strategies | Same strategy, same evaluation |
+
+**Given the same history, VeerOS will always make the same decision.** Every
+learning step is reproducible, every decision is traceable to specific episodic
+evidence, and every adaptation is explainable in causal terms — not statistical
+correlation.
+
+### Where LLMs Fit
+
+LLMs are **one inference tool** the fabric uses for specific tasks — never the
+learning substrate itself:
+
+| Task | Mechanism | Deterministic? |
+|---|---|---|
+| NL shell commands | Intent classifier (<50KB) | Yes (argmax, no sampling) |
+| Self-explanation text | LLM generates causal summary | No (sampling) — **opt-in, auditable** |
+| Autonomous fix proposals | LLM analyzes deviation + spec | No (sampling) — **simulation-validated** |
+| Cloud AI escalation | External API (OpenAI, Ollama) | No — **privacy-gated, never default** |
+
+Non-deterministic LLM outputs are always:
+- **Opt-in** — switched on explicitly (`ai on`), never default behavior
+- **Validated** — repair proposals tested in simulation before deployment
+- **Auditable** — every LLM-assisted decision logged with full context
+- **Bypassable** — the system works without them; LLMs accelerate, they don't decide
+
+### What This Means
+
+```
+Conventional AI:    Train model → Deploy → Inference (static until retrained)
+VeerOS Fabric:      Execute → Record → Refine → Execute (continuous, deterministic)
+
+Conventional AI:    Central model server, GPU cluster, training pipeline
+VeerOS Fabric:      Every node learns independently + shares via gossip
+
+Conventional AI:    Model = opaque weight matrix
+VeerOS Fabric:      "Model" = inspectable episodes + explicit rules + scored strategies
+
+Conventional AI:    Non-deterministic (sampling, floating-point variance)
+VeerOS Fabric:      Deterministic (same history → same decision, always)
+```
+
+**The fabric doesn't use a model. The fabric IS the model.**
 
 ---
 
@@ -332,7 +415,7 @@ veeros> memory set deploy.target rpi5-edge-01
   both ends. Compromise a peer → revoke trust in < 1 second. An internet of
   fabrics, not an internet of endpoints.
 
-- **Fabric Client (VeerUX)** — the browser is obsolete. Composable views render
+- **Fabric Client (VeerFlow)** — the browser is obsolete. Composable views render
   directly from fabric state — no URLs, no REST, no cookies, no JS frameworks.
   Semantic navigation replaces address bars; identity-native auth replaces login
   forms. AI generates adaptive interfaces that reshape from a serial console to a
@@ -346,6 +429,13 @@ veeros> memory set deploy.target rpi5-edge-01
   places them across the fabric, enforces budgets, and learns from outcomes via
   episodic memory. Inference engine, NL-aware shell, vision/voice pipelines, and
   on-device training extend the AI surface into userspace.
+
+- **Deterministic Intelligence** — the fabric itself is a continuously learning
+  system. Every execution records episodes, refines placement scores, updates
+  behavioral baselines, and promotes repair strategies — all deterministically.
+  Same history → same decision, always. No opaque weight matrices, no stochastic
+  sampling, no training pipelines. LLMs are an opt-in inference tool, never the
+  learning substrate.
 
 - **Security by Construction** — capability-based access control, isolation
   domains, post-quantum cryptography, measured boot, hardware-enforced
