@@ -35,11 +35,24 @@ use net::{NetStack, NetStorage, TcpSerial};
 #[cfg(feature = "shell")]
 use shell::{Shell, ShellEnv};
 #[cfg(feature = "net")]
-use smoltcp::iface::SocketSet;
+use smoltcp::iface::{SocketHandle, SocketSet};
 #[cfg(feature = "net")]
-use smoltcp::wire::{IpCidr, Ipv4Address};
+use smoltcp::socket::dhcpv4;
 
-use panic_halt as _;
+
+// Custom panic handler that prints to serial
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let serial = default_serial();
+    let mut con = Console::new(serial);
+    let _ = writeln!(con, "\r\n!!! PANIC: {}", info);
+    loop {
+        #[cfg(target_arch = "riscv32")]
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        #[cfg(not(target_arch = "riscv32"))]
+        core::hint::spin_loop();
+    }
+}
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -603,19 +616,19 @@ const REMOTE_SHELL_PORT: u16 = 2323;
 const REMOTE_PASSWORD_HASH: u32 = net::auth::fnv1a(b"veeros");
 
 #[cfg(feature = "net")]
-const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
+static mut DHCP_HANDLE: Option<SocketHandle> = None;
 #[cfg(feature = "net")]
-const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+static mut DHCP_CONFIGURED: bool = false;
 
 #[cfg(feature = "net")]
 #[repr(align(16))]
-struct NetStack0([u8; 4096]);
+struct NetStack0([u8; 16384]);
 #[cfg(feature = "net")]
-static NET_TASK_STACK: NetStack0 = NetStack0([0u8; 4096]);
+static NET_TASK_STACK: NetStack0 = NetStack0([0u8; 16384]);
 
 #[cfg(feature = "net")]
-static mut SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 4] =
-    [smoltcp::iface::SocketStorage::EMPTY; 4];
+static mut SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 5] =
+    [smoltcp::iface::SocketStorage::EMPTY; 5];
 #[cfg(feature = "net")]
 static mut NET_STORAGE: NetStorage = NetStorage::new();
 
@@ -641,6 +654,41 @@ fn net_poll() -> bool {
         {
             let ticks = (*SCHEDULER.0.get()).ticks;
             stack.poll(sockets, ticks);
+
+            // Process DHCP events.
+            if let Some(handle) = DHCP_HANDLE {
+                let event = sockets.get_mut::<dhcpv4::Socket>(handle).poll();
+                match event {
+                    Some(dhcpv4::Event::Configured(config)) => {
+                        let address = config.address;
+                        let router = config.router;
+                        let addr = address.address().0;
+                        let prefix = address.prefix_len();
+                        stack.apply_ip_config(address, router);
+                        DHCP_CONFIGURED = true;
+                        let serial = default_serial();
+                        let mut c = Console::new(serial);
+                        let _ = writeln!(c,
+                            "[net] DHCP: acquired {}.{}.{}.{}/{}",
+                            addr[0], addr[1], addr[2], addr[3], prefix,
+                        );
+                        if let Some(gw) = router {
+                            let g = gw.0;
+                            let _ = writeln!(c,
+                                "[net] DHCP: gateway {}.{}.{}.{}",
+                                g[0], g[1], g[2], g[3],
+                            );
+                        }
+                    }
+                    Some(dhcpv4::Event::Deconfigured) => {
+                        DHCP_CONFIGURED = false;
+                        let serial = default_serial();
+                        let mut c = Console::new(serial);
+                        let _ = writeln!(c, "[net] DHCP: lease expired, waiting for renewal");
+                    }
+                    None => {}
+                }
+            }
         }
     }
     true
@@ -790,11 +838,7 @@ fn net_task() -> ! {
         nic.mmio_version(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
-    let ip = IpCidr::new(
-        Ipv4Address::new(GUEST_IP[0], GUEST_IP[1], GUEST_IP[2], GUEST_IP[3]).into(),
-        24,
-    );
-    let gw = Ipv4Address::new(GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3]);
+    let _ = writeln!(con, "[net] configuring DHCP stack...");
 
     unsafe {
         let sockets_ref: &'static mut [smoltcp::iface::SocketStorage<'static>] =
@@ -802,17 +846,28 @@ fn net_task() -> ! {
         let mut socket_set = SocketSet::new(sockets_ref);
         let storage = &mut *core::ptr::addr_of_mut!(NET_STORAGE);
 
-        let stack = NetStack::new(nic, ip, gw, &mut socket_set, storage);
+        let stack = NetStack::new_dhcp(nic, &mut socket_set, storage);
+
+        let dhcp_socket = dhcpv4::Socket::new();
+        let handle = socket_set.add(dhcp_socket);
+        DHCP_HANDLE = Some(handle);
 
         *NET_SOCKETS.0.get() = Some(socket_set);
         *NET.0.get() = Some(stack);
     }
 
-    let _ = writeln!(
-        con,
-        "[net] IP {}.{}.{}.{} \u{2014} listening on port {}",
-        GUEST_IP[0], GUEST_IP[1], GUEST_IP[2], GUEST_IP[3], REMOTE_SHELL_PORT
-    );
+    let _ = writeln!(con, "[net] DHCP: client started, awaiting lease...");
+
+    // Wait for DHCP lease before listening for connections.
+    loop {
+        net_poll();
+        unsafe {
+            if DHCP_CONFIGURED { break; }
+        }
+        core::hint::spin_loop();
+    }
+
+    let _ = writeln!(con, "[net] DHCP complete \u{2014} listening on port {}", REMOTE_SHELL_PORT);
 
     loop {
         unsafe {

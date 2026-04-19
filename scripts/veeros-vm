@@ -53,13 +53,9 @@ mkdir -p "$VEEROS_VMS" "$VEEROS_VOLUMES"
 
 # ── Network constants ────────────────────────────────────────────────
 VEEROS_BRIDGE="veeros0"
-VEEROS_SUBNET="10.10.10"
-VEEROS_GW="${VEEROS_SUBNET}.1"
-VEEROS_DHCP_START="${VEEROS_SUBNET}.10"
-VEEROS_DHCP_END="${VEEROS_SUBNET}.254"
-VEEROS_CIDR="${VEEROS_GW}/24"
-VEEROS_DNSMASQ_PID="$VEEROS_HOME/dnsmasq.pid"
-VEEROS_DNSMASQ_LEASE="$VEEROS_HOME/dnsmasq.leases"
+VEEROS_BRIDGE_PHYS="$VEEROS_HOME/bridge_phys"
+VEEROS_BRIDGE_HOST_CIDR="$VEEROS_HOME/bridge_host_cidr"
+VEEROS_BRIDGE_HOST_GW="$VEEROS_HOME/bridge_host_gw"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -152,59 +148,52 @@ _default_iface() {
     ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'
 }
 
-# Set up the veeros0 bridge, dnsmasq DHCP, and NAT masquerade
+# Set up the veeros0 bridge, bridging the physical NIC so VMs
+# appear on the external LAN and get DHCP from the router.
 _net_setup() {
     _require_root "network setup"
 
     if _net_is_up; then
-        echo "veeros network already up ($VEEROS_BRIDGE $VEEROS_CIDR)"
+        echo "veeros network already up ($VEEROS_BRIDGE)"
         return 0
     fi
 
-    echo "Creating bridge $VEEROS_BRIDGE ($VEEROS_CIDR)..."
+    # Find the default physical interface
+    local phys
+    phys=$(_default_iface)
+    [ -n "$phys" ] || die "no default network interface found"
+
+    # Capture current IP and gateway before touching anything
+    local host_cidr host_gw
+    host_cidr=$(ip -4 -o addr show "$phys" | awk '{print $4}' | head -1)
+    host_gw=$(ip -4 route show default dev "$phys" | awk '{print $3; exit}')
+    [ -n "$host_cidr" ] || die "cannot determine IP of $phys"
+    [ -n "$host_gw" ]   || die "cannot determine gateway via $phys"
+
+    echo "Creating bridge $VEEROS_BRIDGE (bridging $phys to physical LAN)..."
+
+    # Create bridge and attach the physical NIC
     ip link add "$VEEROS_BRIDGE" type bridge
-    ip addr add "$VEEROS_CIDR" dev "$VEEROS_BRIDGE"
     ip link set "$VEEROS_BRIDGE" up
+    ip link set "$phys" master "$VEEROS_BRIDGE"
+
+    # Move host IP from physical NIC to bridge
+    ip addr flush dev "$phys"
+    ip addr add "$host_cidr" dev "$VEEROS_BRIDGE"
+    ip route add default via "$host_gw" dev "$VEEROS_BRIDGE" 2>/dev/null || true
 
     # Enable IP forwarding
     sysctl -q net.ipv4.ip_forward=1
 
-    # NAT masquerade so VMs can reach the internet
-    local iface
-    iface=$(_default_iface)
-    if [ -n "$iface" ]; then
-        iptables -t nat -C POSTROUTING -s "${VEEROS_SUBNET}.0/24" -o "$iface" -j MASQUERADE 2>/dev/null \
-            || iptables -t nat -A POSTROUTING -s "${VEEROS_SUBNET}.0/24" -o "$iface" -j MASQUERADE
-        # Allow forwarding to/from bridge
-        iptables -C FORWARD -i "$VEEROS_BRIDGE" -o "$iface" -j ACCEPT 2>/dev/null \
-            || iptables -A FORWARD -i "$VEEROS_BRIDGE" -o "$iface" -j ACCEPT
-        iptables -C FORWARD -i "$iface" -o "$VEEROS_BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-            || iptables -A FORWARD -i "$iface" -o "$VEEROS_BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT
-    fi
+    # Save original config for teardown
+    echo "$phys"      > "$VEEROS_BRIDGE_PHYS"
+    echo "$host_cidr" > "$VEEROS_BRIDGE_HOST_CIDR"
+    echo "$host_gw"   > "$VEEROS_BRIDGE_HOST_GW"
 
-    # Start dnsmasq for DHCP on the bridge
-    if [ -f "$VEEROS_DNSMASQ_PID" ] && kill -0 "$(cat "$VEEROS_DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
-        echo "dnsmasq already running"
-    else
-        dnsmasq \
-            --interface="$VEEROS_BRIDGE" \
-            --bind-interfaces \
-            --dhcp-range="${VEEROS_DHCP_START},${VEEROS_DHCP_END},24h" \
-            --dhcp-option=3,"$VEEROS_GW" \
-            --dhcp-option=6,"8.8.8.8,8.8.4.4" \
-            --pid-file="$VEEROS_DNSMASQ_PID" \
-            --dhcp-leasefile="$VEEROS_DNSMASQ_LEASE" \
-            --log-dhcp \
-            --no-resolv \
-            --server=8.8.8.8 \
-            --except-interface=lo
-        echo "dnsmasq started (DHCP ${VEEROS_DHCP_START}–${VEEROS_DHCP_END})"
-    fi
-
-    echo "veeros network ready"
+    echo "veeros network ready (VMs get DHCP from physical LAN)"
 }
 
-# Tear down the veeros0 bridge, stop dnsmasq, remove NAT rules
+# Tear down the veeros0 bridge and restore physical NIC config
 _net_teardown() {
     _require_root "network teardown"
 
@@ -226,54 +215,51 @@ _net_teardown() {
         die "$running VM(s) still running on $VEEROS_BRIDGE — stop them first"
     fi
 
-    # Stop dnsmasq
-    if [ -f "$VEEROS_DNSMASQ_PID" ]; then
-        local pid
-        pid=$(cat "$VEEROS_DNSMASQ_PID" 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-        fi
-        rm -f "$VEEROS_DNSMASQ_PID"
-    fi
-
-    # Remove NAT rules
-    local iface
-    iface=$(_default_iface)
-    if [ -n "$iface" ]; then
-        iptables -t nat -D POSTROUTING -s "${VEEROS_SUBNET}.0/24" -o "$iface" -j MASQUERADE 2>/dev/null || true
-        iptables -D FORWARD -i "$VEEROS_BRIDGE" -o "$iface" -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -i "$iface" -o "$VEEROS_BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    fi
-
-    # Remove bridge
     if _net_is_up; then
+        # Read saved config
+        local phys host_cidr host_gw
+        phys=$(cat "$VEEROS_BRIDGE_PHYS" 2>/dev/null || true)
+        host_cidr=$(cat "$VEEROS_BRIDGE_HOST_CIDR" 2>/dev/null || true)
+        host_gw=$(cat "$VEEROS_BRIDGE_HOST_GW" 2>/dev/null || true)
+
+        # Remove physical NIC from bridge
+        if [ -n "$phys" ]; then
+            ip link set "$phys" nomaster 2>/dev/null || true
+        fi
+
         ip link set "$VEEROS_BRIDGE" down 2>/dev/null || true
         ip link delete "$VEEROS_BRIDGE" 2>/dev/null || true
+
+        # Restore host IP on physical NIC
+        if [ -n "$phys" ] && [ -n "$host_cidr" ]; then
+            ip addr add "$host_cidr" dev "$phys" 2>/dev/null || true
+            if [ -n "$host_gw" ]; then
+                ip route add default via "$host_gw" dev "$phys" 2>/dev/null || true
+            fi
+        fi
+
+        rm -f "$VEEROS_BRIDGE_PHYS" "$VEEROS_BRIDGE_HOST_CIDR" "$VEEROS_BRIDGE_HOST_GW"
     fi
 
-    rm -f "$VEEROS_DNSMASQ_LEASE"
     echo "veeros network stopped"
 }
 
 _net_status() {
     if _net_is_up; then
+        local phys
+        phys=$(cat "$VEEROS_BRIDGE_PHYS" 2>/dev/null || echo "?")
+        local bridge_ip
+        bridge_ip=$(ip -4 -o addr show "$VEEROS_BRIDGE" 2>/dev/null | awk '{print $4}' | head -1)
         echo "Network:  UP"
         echo "Bridge:   $VEEROS_BRIDGE"
-        echo "Gateway:  $VEEROS_GW"
-        echo "Subnet:   ${VEEROS_SUBNET}.0/24"
-        echo "DHCP:     ${VEEROS_DHCP_START} – ${VEEROS_DHCP_END}"
-        if [ -f "$VEEROS_DNSMASQ_PID" ] && kill -0 "$(cat "$VEEROS_DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
-            echo "dnsmasq:  running (pid=$(cat "$VEEROS_DNSMASQ_PID"))"
-        else
-            echo "dnsmasq:  not running"
-        fi
-        # Active leases
-        if [ -f "$VEEROS_DNSMASQ_LEASE" ] && [ -s "$VEEROS_DNSMASQ_LEASE" ]; then
-            echo ""
-            printf "%-17s  %-15s  %s\n" "MAC" "IP" "HOSTNAME"
-            while IFS=' ' read -r _ts mac ip hostname _id; do
-                printf "%-17s  %-15s  %s\n" "$mac" "$ip" "$hostname"
-            done < "$VEEROS_DNSMASQ_LEASE"
+        echo "Physical: $phys"
+        echo "Host IP:  ${bridge_ip:-unknown}"
+        echo "Mode:     LAN bridge (VMs get DHCP from router)"
+        # Show bridge members
+        local members
+        members=$(bridge link show dev "$VEEROS_BRIDGE" 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+        if [ -n "$members" ]; then
+            echo "Members:  $members"
         fi
     else
         echo "Network:  DOWN"
@@ -808,25 +794,30 @@ _vm_ip() {
 
     local ip=""
 
+    # Note: serial logs may contain UTF-8 (em-dash etc.) causing grep to
+    # treat them as binary.  Always pass -a to force text mode.
+
     # Method 1: Parse MAC from serial log and look up via ARP/neighbor table.
-    # This is reliable even when serial output is garbled by interleaved prints.
     local mac
-    mac=$(grep -oP 'MAC=\K[0-9a-fA-F:]{17}' "$log" 2>/dev/null | head -1)
+    mac=$(grep -aoP 'MAC=\K[0-9a-fA-F:]{17}' "$log" 2>/dev/null | head -1)
     if [ -n "$mac" ]; then
-        # Try ip neighbor (works without root)
         ip=$(ip neigh show 2>/dev/null | awk -v m="$mac" 'tolower($5)==tolower(m) {print $1; exit}')
-        # Fall back to arp -n
         if [ -z "$ip" ]; then
             ip=$(arp -n 2>/dev/null | awk -v m="$mac" 'tolower($3)==tolower(m) {print $1; exit}')
         fi
     fi
 
-    # Method 2: Fall back to serial log DHCP/boot lines.
+    # Method 2: DHCP-acquired address (printed by kernel DHCP client).
     if [ -z "$ip" ]; then
-        ip=$(grep -oP 'DHCP: acquired \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$log" 2>/dev/null | tail -1)
+        ip=$(grep -aoP 'DHCP: acquired \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$log" 2>/dev/null | tail -1)
     fi
+    # Method 3: Boot-time network line.
     if [ -z "$ip" ]; then
-        ip=$(grep -oP '\[boot\] network: \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$log" 2>/dev/null | tail -1)
+        ip=$(grep -aoP '\[boot\] network: \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$log" 2>/dev/null | tail -1)
+    fi
+    # Method 4: Static IP from [net] IP line (ESP32-C6 / bare-metal static config).
+    if [ -z "$ip" ]; then
+        ip=$(grep -aoP '\[net\] IP \K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$log" 2>/dev/null | tail -1)
     fi
 
     echo "${ip:-—}"
