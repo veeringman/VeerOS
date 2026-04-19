@@ -1,0 +1,36 @@
+[package]
+name = "kernel-qemu-esp32c6"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VeerOS kernel for QEMU-emulated ESP32-C6 (RISC-V 32-bit virtual IoT node)"
+
+[features]
+default = ["dist-app"]
+
+# ── Distribution profiles ────────────────────────────────────
+dist-minimal = ["microkernel/dist-minimal"]
+dist-app     = ["microkernel/dist-app", "shell", "net", "userlib", "wifi", "ble", "ieee802154"]
+dist-rt      = ["microkernel/dist-rt"]
+dist-full    = ["dist-app", "dist-rt"]
+
+# ── Optional components ──────────────────────────────────────
+shell      = ["dep:shell"]
+net        = ["dep:net", "dep:smoltcp"]
+userlib    = ["dep:userlib"]
+wifi       = ["net"]
+ble        = []
+ieee802154 = []
+multi-user = ["microkernel/multi-user", "shell/multi-user"]
+
+[dependencies]
+arch = { path = "../../arch" }
+microkernel = { path = "../../microkernel", default-features = false }
+soc-qemu-virt = { path = "../../soc/qemu_virt" }
+net = { path = "../../net", optional = true }
+shell = { path = "../../shell", optional = true }
+userlib = { path = "../../userlib", optional = true }
+smoltcp = { workspace = true, optional = true }
+panic-halt = "1.0"

@@ -276,9 +276,11 @@ pub(crate) static RAMFS: RamFsCell = RamFsCell(UnsafeCell::new(RamFs::new()));
 
 use microkernel::fat32::Fat32;
 
-pub(crate) struct Fat32Cell(pub UnsafeCell<Fat32>);
+pub(crate) struct Fat32Cell(pub UnsafeCell<[Fat32; microkernel::fat32::MAX_FAT32]>);
 unsafe impl Sync for Fat32Cell {}
-pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(Fat32::new()));
+pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(
+    [Fat32::new(), Fat32::new(), Fat32::new(), Fat32::new()]
+));
 
 // ---------------------------------------------------------------------------
 // Mount table
@@ -586,6 +588,8 @@ fn shell_task() -> ! {
         peers_cmd: None,
         mesh_cmd: None,
         zkp_cmd: None,
+        hostname_cmd: None,
+        df_cmd: None,
     };
     let mut sh = Shell::new(env);
     loop {
@@ -789,6 +793,8 @@ fn net_task() -> ! {
                         peers_cmd: None,
                         mesh_cmd: None,
                         zkp_cmd: None,
+                        hostname_cmd: None,
+                        df_cmd: None,
                     };
                     let mut sh = Shell::new(env);
                     sh.run(&mut tcp_con);

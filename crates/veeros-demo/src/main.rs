@@ -657,6 +657,8 @@ fn main() {
         peers_cmd: None,
         mesh_cmd: None,
         zkp_cmd: None,
+        hostname_cmd: None,
+        df_cmd: None,
     };
     let mut sh = Shell::new(env);
     sh.run(&mut con);

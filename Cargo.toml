@@ -13,6 +13,7 @@ members = [
     "crates/kernel/esp32c3",
     "crates/kernel/xiao_esp32c6",
     "crates/kernel/qemu_virt",
+    "crates/kernel/qemu_esp32c6",
     "crates/kernel/qemu_pc",
     "crates/kernel/raspi5",
 
