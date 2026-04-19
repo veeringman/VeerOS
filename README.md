@@ -1,7 +1,7 @@
 <div align="center">
 
 <img src="./veeros-logo.png" alt="VeerOS Logo" width="210" />
-<img src="./IMG_2012.jpeg" alt="VeerOS Logo" width="210" />
+<img src="./veeros.png" alt="VeerOS Logo" width="210" />
 
 
 **An AI-native operating system - a single fabric for a single MCU to a planet scale fleet**
