@@ -12,6 +12,8 @@
 #![no_std]
 
 pub mod auth;
+#[cfg(feature = "secure-connect")]
+pub mod secure;
 
 use arch::{NetMedium, NetworkDevice, Serial};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};

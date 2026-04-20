@@ -893,28 +893,108 @@ fn net_task() -> ! {
             core::hint::spin_loop();
         }
 
-        let _ = writeln!(con, "[net] client connected");
+        let _ = writeln!(con, "[net] client connected \u{2014} VSC handshake");
 
         unsafe {
             let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
             let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap() as *mut SocketSet<'static>;
             let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll, net_poll_unlock);
-            let mut tcp_con = Console::new(tcp_serial);
 
-            #[cfg(feature = "shell")]
+            // Generate a seed from timer + scheduler ticks for the handshake RNG.
+            let mut seed = [0u8; 32];
+            let ticks = (*SCHEDULER.0.get()).ticks;
+            let cycle: u64;
+            #[cfg(target_arch = "riscv32")]
             {
-                if net::auth::login_prompt(&mut tcp_con, REMOTE_PASSWORD_HASH) {
-                    let _ = writeln!(con, "[net] authentication succeeded \u{2014} starting shell");
-                    let env = build_shell_env(true);
-                    let mut sh = Shell::new(env);
-                    sh.run(&mut tcp_con);
-                } else {
-                    let _ = writeln!(con, "[net] authentication failed");
-                }
+                let lo: u32;
+                let hi: u32;
+                core::arch::asm!("rdcycle {}", out(reg) lo);
+                core::arch::asm!("rdcycleh {}", out(reg) hi);
+                cycle = ((hi as u64) << 32) | (lo as u64);
             }
-            #[cfg(not(feature = "shell"))]
+            #[cfg(not(target_arch = "riscv32"))]
             {
-                let _ = writeln!(tcp_con, "VeerOS net: no shell available");
+                cycle = 0x12345678_9abcdef0;
+            }
+            // Mix ticks + cycle into seed using simple hash-like spread.
+            let tb = ticks.to_le_bytes();
+            let cb = cycle.to_le_bytes();
+            for i in 0..8 {
+                seed[i] = tb[i];
+                seed[i + 8] = cb[i];
+                seed[i + 16] = tb[i] ^ cb[7 - i];
+                seed[i + 24] = cb[i].wrapping_add(tb[7 - i]);
+            }
+
+            // Perform X25519 + ChaCha20-Poly1305 handshake.
+            let channel = net::secure::server_handshake(&tcp_serial, seed);
+            match channel {
+                Some(mut ch) => {
+                    let _ = writeln!(con, "[net] VSC handshake complete \u{2014} encrypted session");
+
+                    // Read client mode byte.
+                    let mode = net::secure::read_mode(&tcp_serial, &mut ch);
+                    let _ = writeln!(con, "[net] mode: {:?}", mode);
+
+                    match mode {
+                        Some(net::secure::MODE_SHELL) | None => {
+                            // Interactive shell mode.
+                            let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
+                            let mut secure_con = Console::new(secure_serial);
+
+                            #[cfg(feature = "shell")]
+                            {
+                                if net::auth::login_prompt(&mut secure_con, REMOTE_PASSWORD_HASH) {
+                                    let _ = writeln!(con, "[net] authentication succeeded \u{2014} starting shell");
+                                    let env = build_shell_env(true);
+                                    let mut sh = Shell::new(env);
+                                    sh.run(&mut secure_con);
+                                } else {
+                                    let _ = writeln!(con, "[net] authentication failed");
+                                }
+                            }
+                            #[cfg(not(feature = "shell"))]
+                            {
+                                let _ = writeln!(secure_con, "VeerOS net: no shell available");
+                            }
+                        }
+                        Some(net::secure::MODE_PUSH) => {
+                            // File upload: authenticate via SecureSerial, then transfer.
+                            let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
+                            let mut secure_con = Console::new(secure_serial);
+
+                            if net::auth::login_prompt(&mut secure_con, REMOTE_PASSWORD_HASH) {
+                                let _ = writeln!(con, "[net] push: authenticated \u{2014} receiving file");
+                                // Unwrap the SecureSerial to get raw serial + channel back.
+                                let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
+                                net::secure::handle_push(&raw_serial, &mut channel, vfs_write_file);
+                                let _ = writeln!(con, "[net] push: transfer complete");
+                            } else {
+                                let _ = writeln!(con, "[net] push: authentication failed");
+                            }
+                        }
+                        Some(net::secure::MODE_PULL) => {
+                            // File download: authenticate via SecureSerial, then transfer.
+                            let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
+                            let mut secure_con = Console::new(secure_serial);
+
+                            if net::auth::login_prompt(&mut secure_con, REMOTE_PASSWORD_HASH) {
+                                let _ = writeln!(con, "[net] pull: authenticated \u{2014} sending file");
+                                let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
+                                net::secure::handle_pull(&raw_serial, &mut channel, vfs_read_file);
+                                let _ = writeln!(con, "[net] pull: transfer complete");
+                            } else {
+                                let _ = writeln!(con, "[net] pull: authentication failed");
+                            }
+                        }
+                        Some(_) => {
+                            let _ = writeln!(con, "[net] unknown mode");
+                        }
+                    }
+                }
+                None => {
+                    let _ = writeln!(con, "[net] VSC handshake failed");
+                }
             }
         }
 

@@ -104,6 +104,11 @@ impl<S: Serial> Console<S> {
     pub fn serial(&self) -> &S {
         &self.serial
     }
+
+    /// Consume the console and return the underlying serial device.
+    pub fn into_inner(self) -> S {
+        self.serial
+    }
 }
 
 impl<S: Serial> fmt::Write for Console<S> {

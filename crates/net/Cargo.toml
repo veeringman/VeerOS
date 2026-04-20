@@ -6,6 +6,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+secure-connect = ["dep:crypto"]
+
 [dependencies]
 arch = { path = "../arch" }
+crypto = { path = "../crypto", default-features = false, features = ["sha256", "chacha20", "x25519"], optional = true }
 smoltcp.workspace = true

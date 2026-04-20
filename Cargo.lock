@@ -288,6 +288,7 @@ name = "net"
 version = "0.1.0"
 dependencies = [
  "arch",
+ "crypto",
  "smoltcp",
 ]
 
@@ -442,6 +443,13 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "userlib"
 version = "0.1.0"
+
+[[package]]
+name = "veer-connect"
+version = "0.1.0"
+dependencies = [
+ "crypto",
+]
 
 [[package]]
 name = "veeros-demo"

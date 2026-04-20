@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""VeerOS Secure Connect (VSC) client.
+
+Connects to a VeerOS IoT node running the VSC v1 protocol over TCP:
+  1. X25519 ephemeral key exchange
+  2. SHA-256 key derivation
+  3. ChaCha20-Poly1305 encrypted session
+  4. Password authentication over the encrypted channel
+
+Usage:
+    veeros-connect <host> <port>
+    veeros-connect localhost 2232
+
+The encrypted channel protects against network eavesdropping. Each
+connection uses a fresh ephemeral keypair — perfect forward secrecy.
+"""
+
+import os
+import sys
+import socket
+import struct
+import select
+import termios
+import tty
+import hashlib
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey, X25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+# ── Protocol constants ──────────────────────────────────────────────
+VSC_MAGIC = b"VSC\x01"
+TAG_LEN = 16
+MAX_FRAME_PT = 256
+MAX_FRAME_CT = MAX_FRAME_PT + TAG_LEN
+
+# ── Crypto helpers ──────────────────────────────────────────────────
+
+def make_nonce(counter: int) -> bytes:
+    """Build a 12-byte nonce: 4 zero bytes + 8-byte LE counter."""
+    return b"\x00\x00\x00\x00" + counter.to_bytes(8, "little")
+
+
+class SecureChannel:
+    """Client-side encrypted channel (ChaCha20-Poly1305)."""
+
+    def __init__(self, key: bytes):
+        self.cipher = ChaCha20Poly1305(key)
+        # Client sends on odd nonces, receives on even nonces.
+        self.tx_counter = 1   # odd (client → server)
+        self.rx_counter = 0   # even (server → client)
+
+    def encrypt(self, plaintext: bytes) -> bytes:
+        """Encrypt plaintext → [2-byte LE len][ciphertext+tag]."""
+        nonce = make_nonce(self.tx_counter)
+        self.tx_counter += 2
+        ct = self.cipher.encrypt(nonce, plaintext, b"")
+        length = struct.pack("<H", len(ct))
+        return length + ct
+
+    def decrypt(self, ct: bytes) -> bytes:
+        """Decrypt ciphertext+tag → plaintext."""
+        nonce = make_nonce(self.rx_counter)
+        self.rx_counter += 2
+        return self.cipher.decrypt(nonce, ct, b"")
+
+
+def recv_exact(sock: socket.socket, n: int) -> bytes:
+    """Read exactly n bytes from socket."""
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("connection closed during recv")
+        data += chunk
+    return data
+
+
+def handshake(sock: socket.socket) -> SecureChannel:
+    """Perform the VSC v1 client handshake."""
+    # 1. Read server hello: VSC\x01 + server_pubkey (36 bytes).
+    hello = recv_exact(sock, 36)
+    if hello[:4] != VSC_MAGIC:
+        raise ValueError(f"bad magic: {hello[:4]!r}")
+    server_pk_bytes = hello[4:]
+
+    # 2. Generate ephemeral keypair.
+    client_sk = X25519PrivateKey.generate()
+    client_pk = client_sk.public_key()
+
+    # 3. Send client pubkey (32 bytes).
+    sock.sendall(client_pk.public_bytes_raw())
+
+    # 4. Derive shared secret.
+    server_pk = X25519PublicKey.from_public_bytes(server_pk_bytes)
+    shared_secret = client_sk.exchange(server_pk)
+
+    # 5. Derive session key = SHA-256(shared_secret).
+    session_key = hashlib.sha256(shared_secret).digest()
+
+    return SecureChannel(session_key)
+
+
+# ── Encrypted frame I/O ─────────────────────────────────────────────
+
+def recv_frame(sock: socket.socket, ch: SecureChannel) -> bytes:
+    """Read and decrypt one frame from the socket."""
+    hdr = recv_exact(sock, 2)
+    ct_len = struct.unpack("<H", hdr)[0]
+    if ct_len < TAG_LEN or ct_len > MAX_FRAME_CT:
+        raise ValueError(f"bad frame length: {ct_len}")
+    ct = recv_exact(sock, ct_len)
+    return ch.decrypt(ct)
+
+
+def send_frame(sock: socket.socket, ch: SecureChannel, data: bytes):
+    """Encrypt and send one frame."""
+    # Split into MAX_FRAME_PT chunks.
+    for i in range(0, len(data), MAX_FRAME_PT):
+        chunk = data[i:i + MAX_FRAME_PT]
+        sock.sendall(ch.encrypt(chunk))
+
+
+# ── Terminal loop ────────────────────────────────────────────────────
+
+def terminal_loop(sock: socket.socket, ch: SecureChannel):
+    """Interactive terminal: read stdin → encrypt → send,
+    recv → decrypt → print."""
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        print("\r\n\033[32m[VSC] encrypted session established\033[0m\r\n", end="", flush=True)
+
+        while True:
+            rlist, _, _ = select.select([sys.stdin, sock], [], [], 0.1)
+
+            if sys.stdin in rlist:
+                data = os.read(sys.stdin.fileno(), 256)
+                if not data:
+                    break
+                # Ctrl-] to disconnect (like telnet).
+                if b"\x1d" in data:
+                    print("\r\n\033[33m[VSC] disconnected\033[0m\r\n", end="", flush=True)
+                    break
+                send_frame(sock, ch, data)
+
+            if sock in rlist:
+                # Check if data is available (non-blocking peek).
+                try:
+                    peek = sock.recv(2, socket.MSG_PEEK)
+                    if not peek:
+                        print("\r\n\033[31m[VSC] connection closed\033[0m\r\n", end="", flush=True)
+                        break
+                    pt = recv_frame(sock, ch)
+                    # Convert \n → \r\n for terminal display.
+                    out = pt.replace(b"\n", b"\r\n")
+                    os.write(sys.stdout.fileno(), out)
+                except (ConnectionError, ValueError):
+                    print("\r\n\033[31m[VSC] connection lost\033[0m\r\n", end="", flush=True)
+                    break
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <host> <port>", file=sys.stderr)
+        print(f"  e.g. {sys.argv[0]} localhost 2232", file=sys.stderr)
+        sys.exit(1)
+
+    host = sys.argv[1]
+    port = int(sys.argv[2])
+
+    print(f"[VSC] connecting to {host}:{port}...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(10)
+    try:
+        sock.connect((host, port))
+    except (ConnectionRefusedError, OSError) as e:
+        print(f"[VSC] connection failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print("[VSC] performing X25519 key exchange...")
+    try:
+        ch = handshake(sock)
+    except Exception as e:
+        print(f"[VSC] handshake failed: {e}", file=sys.stderr)
+        sock.close()
+        sys.exit(1)
+
+    print("[VSC] session encrypted (ChaCha20-Poly1305)")
+    print("[VSC] press Ctrl-] to disconnect")
+
+    sock.settimeout(None)
+    sock.setblocking(False)
+    try:
+        terminal_loop(sock, ch)
+    finally:
+        sock.close()
+
+
+if __name__ == "__main__":
+    main()

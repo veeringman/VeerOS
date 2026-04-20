@@ -25,7 +25,8 @@ members = [
     "crates/net",
     "crates/shell",
     "crates/userlib",
-
+    # ── Host tools ──────────────────────────────────────────
+    "crates/veer-connect",
     # ── Demo / test ──────────────────────────────────────
     "crates/veeros-demo",
 ]

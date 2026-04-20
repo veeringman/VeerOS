@@ -630,7 +630,13 @@ cmd_start() {
     pid=$(cat "$(vm_pid_file "$name")" 2>/dev/null || echo "?")
 
     echo "VM '$name' started (pid=$pid)"
-    if [ "$net_mode" = "nat" ]; then
+    if [ "$target" = "esp32c6" ]; then
+        if [ "$net_mode" = "nat" ]; then
+            echo "  Connect: nc localhost ${ssh_port}  (password: veeros)"
+        else
+            echo "  Connect: nc <ip> 2323  (use 'veeros-vm ip $name' after boot)"
+        fi
+    elif [ "$net_mode" = "nat" ]; then
         echo "  SSH: ssh -p ${ssh_port} veeros@localhost"
     else
         echo "  SSH: ssh veeros@<ip>  (use 'veeros-vm ip $name' after boot)"
@@ -825,9 +831,9 @@ _vm_ip() {
 
 cmd_list() {
     printf "%-14s  %-10s  %-20s  %-17s  %-5s  %-24s  %-5s  %-12s  %-12s  %s\n" \
-        "NAME" "STATUS" "HOSTNAME" "IP" "MEM" "SSH" "NET" "CREATED" "LAST START" "UPTIME"
+        "NAME" "STATUS" "HOSTNAME" "IP" "MEM" "CONNECT" "NET" "CREATED" "LAST START" "UPTIME"
     printf "%-14s  %-10s  %-20s  %-17s  %-5s  %-24s  %-5s  %-12s  %-12s  %s\n" \
-        "────" "──────" "────────" "──" "───" "───" "───" "───────" "──────────" "──────"
+        "────" "──────" "────────" "──" "───" "───────" "───" "───────" "──────────" "──────"
     local found=false
     for d in "$VEEROS_VMS"/*/vm.conf; do
         [ -f "$d" ] || continue
@@ -849,9 +855,20 @@ cmd_list() {
             ip_addr="—"
         fi
 
-        # Show the actual SSH connect command
-        if [ "$net_mode" = "bridge" ] && [ "$ip_addr" != "—" ]; then
-            ssh_info="${ip_addr}"
+        # Show the connect info
+        local target_arch
+        target_arch=$(vm_get "$name" target)
+        if [ "${target_arch:-x86_64}" = "esp32c6" ]; then
+            # ESP32-C6 runs raw TCP shell, not SSH
+            if [ "$net_mode" = "nat" ]; then
+                ssh_info="nc localhost ${ssh_port}"
+            elif [ "$ip_addr" != "—" ]; then
+                ssh_info="nc ${ip_addr} 2323"
+            else
+                ssh_info="—"
+            fi
+        elif [ "$net_mode" = "bridge" ] && [ "$ip_addr" != "—" ]; then
+            ssh_info="ssh veeros@${ip_addr}"
         elif [ "$net_mode" = "nat" ]; then
             ssh_info="localhost:${ssh_port}"
         else
@@ -917,6 +934,91 @@ cmd_console() {
     log="$(vm_log_file "$name")"
     echo "[console] Attached to $name (Ctrl-C to detach)"
     tail -f "$log"
+}
+
+cmd_connect() {
+    local name="${1:-}"
+    [ -n "$name" ] || die "usage: veeros-vm connect <name>"
+    vm_exists "$name" || die "VM '$name' does not exist"
+    vm_is_running "$name" || die "VM '$name' is not running"
+
+    local target net_mode ssh_port
+    target=$(vm_get "$name" target)
+    net_mode=$(vm_get "$name" net_mode)
+    ssh_port=$(vm_get "$name" ssh_port)
+
+    if [ "$target" = "x86_64" ]; then
+        # SSH target — delegate to ssh command.
+        shift
+        cmd_ssh "$name" "$@"
+    else
+        # VSC target (ESP32-C6, etc.) — use veer-connect.
+        local host port
+        if [ "$net_mode" = "bridge" ]; then
+            host=$(_vm_ip "$name")
+            [ "$host" != "—" ] || die "cannot determine guest IP"
+            port=9999
+        else
+            host="localhost"
+            port="$ssh_port"
+        fi
+        exec "$VEEROS_ROOT/target/debug/veer-connect" shell "$host" "$port"
+    fi
+}
+
+cmd_copy() {
+    local direction="${1:-}"
+    local name="${2:-}"
+    local src="${3:-}"
+    local dst="${4:-}"
+
+    case "$direction" in
+        push|pull) ;;
+        *) die "usage: veeros-vm copy push|pull <name> <src> <dst>" ;;
+    esac
+
+    [ -n "$name" ] || die "usage: veeros-vm copy $direction <name> <src> <dst>"
+    [ -n "$src" ]  || die "usage: veeros-vm copy $direction <name> <src> <dst>"
+    [ -n "$dst" ]  || die "usage: veeros-vm copy $direction <name> <src> <dst>"
+    vm_exists "$name" || die "VM '$name' does not exist"
+    vm_is_running "$name" || die "VM '$name' is not running"
+
+    local target net_mode ssh_port
+    target=$(vm_get "$name" target)
+    net_mode=$(vm_get "$name" net_mode)
+    ssh_port=$(vm_get "$name" ssh_port)
+
+    if [ "$target" = "x86_64" ]; then
+        # SSH target — delegate to scp.
+        local target_host target_port
+        if [ "$net_mode" = "bridge" ]; then
+            target_host=$(_vm_ip "$name")
+            [ "$target_host" != "—" ] || die "cannot determine guest IP"
+            target_port=22
+        else
+            target_host="localhost"
+            target_port="$ssh_port"
+        fi
+        local scp_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+                        -o LogLevel=ERROR -P "$target_port")
+        if [ "$direction" = "push" ]; then
+            exec scp "${scp_opts[@]}" "$src" "veeros@${target_host}:${dst}"
+        else
+            exec scp "${scp_opts[@]}" "veeros@${target_host}:${src}" "$dst"
+        fi
+    else
+        # VSC target — use veer-connect.
+        local host port
+        if [ "$net_mode" = "bridge" ]; then
+            host=$(_vm_ip "$name")
+            [ "$host" != "—" ] || die "cannot determine guest IP"
+            port=9999
+        else
+            host="localhost"
+            port="$ssh_port"
+        fi
+        exec "$VEEROS_ROOT/target/debug/veer-connect" "$direction" "$host" "$port" "$src" "$dst"
+    fi
 }
 
 cmd_destroy() {
@@ -1170,7 +1272,21 @@ cmd_ip() {
     ssh_port=$(vm_get "$name" ssh_port)
     net_mode=$(vm_get "$name" net_mode)
 
-    if [ "$net_mode" = "nat" ]; then
+    local target_arch
+    target_arch=$(vm_get "$name" target)
+    if [ "${target_arch:-x86_64}" = "esp32c6" ]; then
+        if [ "$net_mode" = "nat" ]; then
+            echo "nc localhost $ssh_port"
+        else
+            local ip
+            ip=$(_vm_ip "$name")
+            if [ "$ip" != "—" ]; then
+                echo "nc ${ip} 2323"
+            else
+                echo "(waiting for DHCP — try again)"
+            fi
+        fi
+    elif [ "$net_mode" = "nat" ]; then
         echo "ssh -p $ssh_port veeros@localhost"
     else
         local ip
@@ -1215,7 +1331,7 @@ sensor_list() {
     log="$(vm_log_file "$name")"
     if [ -f "$log" ]; then
         echo "Sensors on '$name':"
-        grep -i 'sensor\|temperature\|humidity\|pressure\|light' "$log" 2>/dev/null | head -20 || echo "  (no sensor data in log)"
+        grep -ai 'sensor\|temperature\|humidity\|pressure\|light' "$log" 2>/dev/null | head -20 || echo "  (no sensor data in log)"
     else
         echo "  (no log available)"
     fi
@@ -1257,6 +1373,8 @@ case "$cmd" in
     status)   cmd_status "$@" ;;
     list|ls)  cmd_list ;;
     ssh)      cmd_ssh "$@" ;;
+    connect)  cmd_connect "$@" ;;
+    copy|cp)  cmd_copy "$@" ;;
     console)  cmd_console "$@" ;;
     destroy)  cmd_destroy "$@" ;;
     config)   cmd_config "$@" ;;
@@ -1311,7 +1429,10 @@ case "$cmd" in
         echo "  ip <name>                 Show SSH connection info"
         echo ""
         echo "Access:"
-        echo "  ssh <name> [command...]   SSH into running VM"
+        echo "  connect <name>            Secure connect to running VM (auto-detects protocol)"
+        echo "  copy push <name> <local> <remote>   Upload file to VM"
+        echo "  copy pull <name> <remote> <local>   Download file from VM"
+        echo "  ssh <name> [command...]   SSH into running VM (x86_64 only)"
         echo "  console <name>            Tail serial console (live)"
         echo ""
         echo "Maintenance:"

@@ -29,7 +29,7 @@ multi-user = ["microkernel/multi-user", "shell/multi-user"]
 arch = { path = "../../arch" }
 microkernel = { path = "../../microkernel", default-features = false }
 soc-qemu-virt = { path = "../../soc/qemu_virt" }
-net = { path = "../../net", optional = true }
+net = { path = "../../net", optional = true, features = ["secure-connect"] }
 shell = { path = "../../shell", optional = true }
 userlib = { path = "../../userlib", optional = true }
 smoltcp = { workspace = true, optional = true }
