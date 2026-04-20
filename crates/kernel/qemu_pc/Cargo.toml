@@ -27,7 +27,7 @@ microkernel = { path = "../../microkernel", default-features = false }
 soc-qemu-pc = { path = "../../soc/qemu_pc" }
 net = { path = "../../net" }
 smoltcp = { workspace = true }
-shell = { path = "../../shell", optional = true }
+shell = { path = "../../shell", optional = true, features = ["large-vi"] }
 ssh = { path = "../../ssh", optional = true }
 crypto = { path = "../../crypto", features = ["sha256", "sha512", "chacha20", "x25519", "ed25519"], optional = true }
 userlib = { path = "../../userlib", optional = true }

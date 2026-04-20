@@ -600,12 +600,12 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
 
 #[cfg(feature = "shell")]
 #[repr(align(16))]
-struct ShellStack([u8; 4096]);
+struct ShellStack([u8; 49152]);
 #[cfg(feature = "shell")]
-static SHELL_STACK: ShellStack = ShellStack([0u8; 4096]);
+static SHELL_STACK: ShellStack = ShellStack([0u8; 49152]);
 
 // ---------------------------------------------------------------------------
-// Network task stack
+// Network task — multi-connection support
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "net")]
@@ -614,6 +614,10 @@ const REMOTE_SHELL_PORT: u16 = 2323;
 
 #[cfg(feature = "net")]
 const REMOTE_PASSWORD_HASH: u32 = net::auth::fnv1a(b"veeros");
+
+/// Maximum concurrent remote shell sessions.
+#[cfg(feature = "net")]
+const MAX_REMOTE_SESSIONS: usize = 4;
 
 #[cfg(feature = "net")]
 static mut DHCP_HANDLE: Option<SocketHandle> = None;
@@ -626,11 +630,64 @@ struct NetStack0([u8; 16384]);
 #[cfg(feature = "net")]
 static NET_TASK_STACK: NetStack0 = NetStack0([0u8; 16384]);
 
+// Socket storage: 1 (default tcp) + 1 (DHCP) + MAX_REMOTE_SESSIONS listener sockets
 #[cfg(feature = "net")]
-static mut SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 5] =
-    [smoltcp::iface::SocketStorage::EMPTY; 5];
+static mut SOCKET_STORAGE: [smoltcp::iface::SocketStorage<'static>; 8] =
+    [smoltcp::iface::SocketStorage::EMPTY; 8];
 #[cfg(feature = "net")]
 static mut NET_STORAGE: NetStorage = NetStorage::new();
+
+// Per-connection TCP buffer storage
+#[cfg(feature = "net")]
+static mut CONN_STORAGE: [NetStorage; MAX_REMOTE_SESSIONS] = [
+    NetStorage::new(), NetStorage::new(),
+    NetStorage::new(), NetStorage::new(),
+];
+
+// Per-connection task stacks (48KB each — vi editor needs headroom)
+#[cfg(feature = "net")]
+#[repr(align(16))]
+struct ConnStack([u8; 49152]);
+#[cfg(feature = "net")]
+static CONN_STACKS: [ConnStack; MAX_REMOTE_SESSIONS] = [
+    ConnStack([0u8; 49152]), ConnStack([0u8; 49152]),
+    ConnStack([0u8; 49152]), ConnStack([0u8; 49152]),
+];
+
+/// Session timeout: force-kill sessions older than this many scheduler ticks.
+/// With 1 ms ticks this is ~120 seconds.
+#[cfg(feature = "net")]
+const SESSION_TIMEOUT_TICKS: u64 = 120_000;
+
+/// Connection slot state.
+#[cfg(feature = "net")]
+struct ConnSlot {
+    handle: Option<SocketHandle>,
+    active: bool,
+    /// Scheduler tick when this session was accepted (for timeout).
+    started_tick: u64,
+    /// Scheduler task index for this connection (to free on timeout).
+    task_idx: usize,
+}
+
+#[cfg(feature = "net")]
+struct ConnSlotCell(UnsafeCell<[ConnSlot; MAX_REMOTE_SESSIONS]>);
+#[cfg(feature = "net")]
+unsafe impl Sync for ConnSlotCell {}
+
+#[cfg(feature = "net")]
+static CONN_SLOTS: ConnSlotCell = ConnSlotCell(UnsafeCell::new([
+    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
+    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
+    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
+    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
+]));
+
+/// Index of the connection currently being set up (passed to the spawned task).
+#[cfg(feature = "net")]
+struct PendingSlotCell(UnsafeCell<usize>);
+unsafe impl Sync for PendingSlotCell {}
+static PENDING_CONN_SLOT: PendingSlotCell = PendingSlotCell(UnsafeCell::new(0));
 
 #[cfg(feature = "net")]
 struct NetCell(UnsafeCell<Option<NetStack<soc_qemu_virt::virtio_net::VirtioNet>>>);
@@ -647,8 +704,14 @@ unsafe impl Sync for SocketSetCell {}
 static NET_SOCKETS: SocketSetCell = SocketSetCell(UnsafeCell::new(None));
 
 #[cfg(feature = "net")]
+static mut NET_POLL_BUSY: bool = false;
+
+#[cfg(feature = "net")]
 fn net_poll() -> bool {
     unsafe {
+        if NET_POLL_BUSY { return false; }
+        NET_POLL_BUSY = true;
+
         if let (Some(stack), Some(sockets)) =
             (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
         {
@@ -695,7 +758,148 @@ fn net_poll() -> bool {
 }
 
 #[cfg(feature = "net")]
-fn net_poll_unlock() {}
+fn net_poll_unlock() {
+    unsafe { NET_POLL_BUSY = false; }
+}
+
+/// Generate a random seed from timer + cycle counter.
+#[cfg(feature = "net")]
+fn make_rng_seed() -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    unsafe {
+        let ticks = (*SCHEDULER.0.get()).ticks;
+        let cycle: u64;
+        #[cfg(target_arch = "riscv32")]
+        {
+            let lo: u32;
+            let hi: u32;
+            core::arch::asm!("rdcycle {}", out(reg) lo);
+            core::arch::asm!("rdcycleh {}", out(reg) hi);
+            cycle = ((hi as u64) << 32) | (lo as u64);
+        }
+        #[cfg(not(target_arch = "riscv32"))]
+        {
+            cycle = 0x12345678_9abcdef0;
+        }
+        let tb = ticks.to_le_bytes();
+        let cb = cycle.to_le_bytes();
+        for i in 0..8 {
+            seed[i] = tb[i];
+            seed[i + 8] = cb[i];
+            seed[i + 16] = tb[i] ^ cb[7 - i];
+            seed[i + 24] = cb[i].wrapping_add(tb[7 - i]);
+        }
+    }
+    seed
+}
+
+/// Per-connection task entry point.  Reads the slot index from
+/// PENDING_CONN_SLOT and handles the full session lifecycle.
+#[cfg(all(feature = "net", feature = "shell"))]
+fn conn_task() -> ! {
+    let slot_idx = unsafe { *PENDING_CONN_SLOT.0.get() };
+
+    let serial = default_serial();
+    let mut con = Console::new(serial);
+
+    unsafe {
+        let slots = &mut *CONN_SLOTS.0.get();
+        let handle = match slots[slot_idx].handle {
+            Some(h) => h,
+            None => {
+                let _ = writeln!(con, "[net] conn[{}]: no socket handle", slot_idx);
+                slots[slot_idx].active = false;
+                halt_task();
+            }
+        };
+
+        let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap() as *mut SocketSet<'static>;
+        let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll, net_poll_unlock);
+
+        let seed = make_rng_seed();
+
+        let channel = net::secure::server_handshake(&tcp_serial, seed);
+        match channel {
+            Some(mut ch) => {
+                let _ = writeln!(con, "[net] conn[{}]: VSC handshake complete", slot_idx);
+
+                let mode = net::secure::read_mode(&tcp_serial, &mut ch);
+
+                match mode {
+                    Some(net::secure::MODE_SHELL) | None => {
+                        let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
+                        let mut secure_con = Console::new(secure_serial);
+
+                        if net::auth::login_prompt_full(&mut secure_con, REMOTE_PASSWORD_HASH, Some(do_login)) {
+                            let _ = writeln!(con, "[net] conn[{}]: authenticated \u{2014} starting shell", slot_idx);
+                            let env = build_shell_env(true);
+                            let mut sh = Shell::new(env);
+                            sh.run(&mut secure_con);
+                        } else {
+                            let _ = writeln!(con, "[net] conn[{}]: authentication failed", slot_idx);
+                        }
+                    }
+                    Some(net::secure::MODE_PUSH) => {
+                        let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
+                        let mut secure_con = Console::new(secure_serial);
+
+                        if net::auth::login_prompt_full(&mut secure_con, REMOTE_PASSWORD_HASH, Some(do_login)) {
+                            let _ = writeln!(con, "[net] conn[{}]: push authenticated", slot_idx);
+                            let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
+                            net::secure::handle_push(&raw_serial, &mut channel, vfs_write_file);
+                            let _ = writeln!(con, "[net] conn[{}]: push complete", slot_idx);
+                        }
+                    }
+                    Some(net::secure::MODE_PULL) => {
+                        let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
+                        let mut secure_con = Console::new(secure_serial);
+
+                        if net::auth::login_prompt_full(&mut secure_con, REMOTE_PASSWORD_HASH, Some(do_login)) {
+                            let _ = writeln!(con, "[net] conn[{}]: pull authenticated", slot_idx);
+                            let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
+                            net::secure::handle_pull(&raw_serial, &mut channel, vfs_read_file);
+                            let _ = writeln!(con, "[net] conn[{}]: pull complete", slot_idx);
+                        }
+                    }
+                    Some(_) => {
+                        let _ = writeln!(con, "[net] conn[{}]: unknown mode", slot_idx);
+                    }
+                }
+            }
+            None => {
+                let _ = writeln!(con, "[net] conn[{}]: handshake failed", slot_idx);
+            }
+        }
+
+        // Clean up: abort socket, mark slot free.
+        // The net_task acceptor loop will re-listen on a free slot.
+        let _ = writeln!(con, "[net] conn[{}]: disconnected", slot_idx);
+        if let Some(sockets) = &mut *NET_SOCKETS.0.get() {
+            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+            socket.abort();
+        }
+        slots[slot_idx].active = false;
+        if net_poll() { net_poll_unlock(); }
+    }
+
+    halt_task();
+}
+
+/// Terminate the current scheduler task (mark it Free) and spin.
+#[cfg(feature = "net")]
+fn halt_task() -> ! {
+    unsafe {
+        let sched = &mut *SCHEDULER.0.get();
+        let cur = sched.current;
+        sched.tasks[cur].state = TaskState::Free;
+    }
+    loop {
+        #[cfg(target_arch = "riscv32")]
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        #[cfg(not(target_arch = "riscv32"))]
+        core::hint::spin_loop();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shell task entry
@@ -808,7 +1012,7 @@ fn build_shell_env(pre_auth: bool) -> ShellEnv {
 }
 
 // ---------------------------------------------------------------------------
-// Network / remote-shell task
+// Network / remote-shell task — multi-connection acceptor
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "net")]
@@ -852,6 +1056,15 @@ fn net_task() -> ! {
         let handle = socket_set.add(dhcp_socket);
         DHCP_HANDLE = Some(handle);
 
+        // Create per-connection listener sockets.
+        let slots = &mut *CONN_SLOTS.0.get();
+        for i in 0..MAX_REMOTE_SESSIONS {
+            let cs = &mut *core::ptr::addr_of_mut!(CONN_STORAGE[i]);
+            let h = stack.add_tcp_socket(&mut socket_set, cs);
+            slots[i].handle = Some(h);
+            slots[i].active = false;
+        }
+
         *NET_SOCKETS.0.get() = Some(socket_set);
         *NET.0.get() = Some(stack);
     }
@@ -860,155 +1073,141 @@ fn net_task() -> ! {
 
     // Wait for DHCP lease before listening for connections.
     loop {
-        net_poll();
+        if net_poll() { net_poll_unlock(); }
         unsafe {
             if DHCP_CONFIGURED { break; }
         }
         core::hint::spin_loop();
     }
 
-    let _ = writeln!(con, "[net] DHCP complete \u{2014} listening on port {}", REMOTE_SHELL_PORT);
+    let _ = writeln!(con, "[net] DHCP complete \u{2014} listening on port {} (max {} sessions)",
+        REMOTE_SHELL_PORT, MAX_REMOTE_SESSIONS);
 
+    // Start listening on the first slot only (smoltcp: one listener per port).
+    let mut listen_slot: usize = 0;
+    unsafe {
+        if let (Some(stack), Some(sockets)) =
+            (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
+        {
+            let slots = &*CONN_SLOTS.0.get();
+            if let Some(h) = slots[listen_slot].handle {
+                stack.listen_handle(sockets, h, REMOTE_SHELL_PORT);
+            }
+        }
+    }
+
+    // Main accept loop: check the currently-listening socket for an
+    // established connection.  When one arrives, spawn a conn_task and
+    // put the next free slot into LISTEN.
+    //
+    // Also: detect and force-reclaim stale/dead sessions (timeout or
+    // TCP socket no longer active).
     loop {
+        if net_poll() { net_poll_unlock(); }
+
         unsafe {
+            let slots = &mut *CONN_SLOTS.0.get();
+            let sched = &mut *SCHEDULER.0.get();
+            let now = sched.ticks;
+
             if let (Some(stack), Some(sockets)) =
                 (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
             {
-                stack.listen(sockets, REMOTE_SHELL_PORT);
-            }
-        }
-
-        loop {
-            net_poll();
-            let connected = unsafe {
-                if let (Some(stack), Some(sockets)) =
-                    (&*NET.0.get(), &*NET_SOCKETS.0.get())
-                {
-                    stack.is_connected(sockets)
-                } else {
-                    false
-                }
-            };
-            if connected { break; }
-            core::hint::spin_loop();
-        }
-
-        let _ = writeln!(con, "[net] client connected \u{2014} VSC handshake");
-
-        unsafe {
-            let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
-            let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap() as *mut SocketSet<'static>;
-            let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll, net_poll_unlock);
-
-            // Generate a seed from timer + scheduler ticks for the handshake RNG.
-            let mut seed = [0u8; 32];
-            let ticks = (*SCHEDULER.0.get()).ticks;
-            let cycle: u64;
-            #[cfg(target_arch = "riscv32")]
-            {
-                let lo: u32;
-                let hi: u32;
-                core::arch::asm!("rdcycle {}", out(reg) lo);
-                core::arch::asm!("rdcycleh {}", out(reg) hi);
-                cycle = ((hi as u64) << 32) | (lo as u64);
-            }
-            #[cfg(not(target_arch = "riscv32"))]
-            {
-                cycle = 0x12345678_9abcdef0;
-            }
-            // Mix ticks + cycle into seed using simple hash-like spread.
-            let tb = ticks.to_le_bytes();
-            let cb = cycle.to_le_bytes();
-            for i in 0..8 {
-                seed[i] = tb[i];
-                seed[i + 8] = cb[i];
-                seed[i + 16] = tb[i] ^ cb[7 - i];
-                seed[i + 24] = cb[i].wrapping_add(tb[7 - i]);
-            }
-
-            // Perform X25519 + ChaCha20-Poly1305 handshake.
-            let channel = net::secure::server_handshake(&tcp_serial, seed);
-            match channel {
-                Some(mut ch) => {
-                    let _ = writeln!(con, "[net] VSC handshake complete \u{2014} encrypted session");
-
-                    // Read client mode byte.
-                    let mode = net::secure::read_mode(&tcp_serial, &mut ch);
-                    let _ = writeln!(con, "[net] mode: {:?}", mode);
-
-                    match mode {
-                        Some(net::secure::MODE_SHELL) | None => {
-                            // Interactive shell mode.
-                            let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
-                            let mut secure_con = Console::new(secure_serial);
-
-                            #[cfg(feature = "shell")]
-                            {
-                                if net::auth::login_prompt(&mut secure_con, REMOTE_PASSWORD_HASH) {
-                                    let _ = writeln!(con, "[net] authentication succeeded \u{2014} starting shell");
-                                    let env = build_shell_env(true);
-                                    let mut sh = Shell::new(env);
-                                    sh.run(&mut secure_con);
-                                } else {
-                                    let _ = writeln!(con, "[net] authentication failed");
-                                }
+                // --- Reap stale / dead sessions ---
+                for i in 0..MAX_REMOTE_SESSIONS {
+                    if !slots[i].active { continue; }
+                    if let Some(h) = slots[i].handle {
+                        let socket = sockets.get::<smoltcp::socket::tcp::Socket>(h);
+                        // Peer has closed (FIN received or socket fully closed).
+                        let dead_tcp = !socket.is_active() || !socket.may_recv();
+                        let timed_out = now.wrapping_sub(slots[i].started_tick) > SESSION_TIMEOUT_TICKS;
+                        if dead_tcp || timed_out {
+                            // Force-kill the task and reclaim the slot.
+                            let reason = if dead_tcp { "dead socket" } else { "timeout" };
+                            let _ = writeln!(con, "[net] conn[{}]: forced cleanup ({})", i, reason);
+                            let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(h);
+                            socket.abort();
+                            if slots[i].task_idx < sched.tasks.len() {
+                                sched.tasks[slots[i].task_idx].state = TaskState::Free;
                             }
-                            #[cfg(not(feature = "shell"))]
-                            {
-                                let _ = writeln!(secure_con, "VeerOS net: no shell available");
-                            }
-                        }
-                        Some(net::secure::MODE_PUSH) => {
-                            // File upload: authenticate via SecureSerial, then transfer.
-                            let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
-                            let mut secure_con = Console::new(secure_serial);
-
-                            if net::auth::login_prompt(&mut secure_con, REMOTE_PASSWORD_HASH) {
-                                let _ = writeln!(con, "[net] push: authenticated \u{2014} receiving file");
-                                // Unwrap the SecureSerial to get raw serial + channel back.
-                                let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
-                                net::secure::handle_push(&raw_serial, &mut channel, vfs_write_file);
-                                let _ = writeln!(con, "[net] push: transfer complete");
-                            } else {
-                                let _ = writeln!(con, "[net] push: authentication failed");
-                            }
-                        }
-                        Some(net::secure::MODE_PULL) => {
-                            // File download: authenticate via SecureSerial, then transfer.
-                            let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
-                            let mut secure_con = Console::new(secure_serial);
-
-                            if net::auth::login_prompt(&mut secure_con, REMOTE_PASSWORD_HASH) {
-                                let _ = writeln!(con, "[net] pull: authenticated \u{2014} sending file");
-                                let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
-                                net::secure::handle_pull(&raw_serial, &mut channel, vfs_read_file);
-                                let _ = writeln!(con, "[net] pull: transfer complete");
-                            } else {
-                                let _ = writeln!(con, "[net] pull: authentication failed");
-                            }
-                        }
-                        Some(_) => {
-                            let _ = writeln!(con, "[net] unknown mode");
+                            slots[i].active = false;
                         }
                     }
                 }
-                None => {
-                    let _ = writeln!(con, "[net] VSC handshake failed");
+
+                // --- Accept new connection on listen_slot ---
+                if let Some(h) = slots[listen_slot].handle {
+                    let socket = sockets.get::<smoltcp::socket::tcp::Socket>(h);
+                    if socket.may_send() && socket.may_recv() {
+                        // Connection established on listen_slot.
+                        slots[listen_slot].active = true;
+                        slots[listen_slot].started_tick = now;
+                        *PENDING_CONN_SLOT.0.get() = listen_slot;
+
+                        let sb = CONN_STACKS[listen_slot].0.as_ptr() as usize;
+                        let st = sb + CONN_STACKS[listen_slot].0.len();
+
+                        #[cfg(feature = "shell")]
+                        {
+                            if let Some(idx) = sched.create_task(
+                                "remote",
+                                conn_task as *const () as usize,
+                                st, sb, 1, 0,
+                            ) {
+                                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+                                slots[listen_slot].task_idx = idx;
+                                let _ = writeln!(con, "[net] conn[{}]: accepted \u{2014} spawned task", listen_slot);
+                            } else {
+                                let _ = writeln!(con, "[net] conn[{}]: no free task slots", listen_slot);
+                                slots[listen_slot].active = false;
+                            }
+                        }
+
+                        // Find next free slot and listen on it.
+                        let mut found = false;
+                        for j in 0..MAX_REMOTE_SESSIONS {
+                            let next = (listen_slot + 1 + j) % MAX_REMOTE_SESSIONS;
+                            if !slots[next].active {
+                                if let Some(nh) = slots[next].handle {
+                                    stack.listen_handle(sockets, nh, REMOTE_SHELL_PORT);
+                                    listen_slot = next;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !found {
+                            let _ = writeln!(con, "[net] all {} sessions in use", MAX_REMOTE_SESSIONS);
+                        }
+                    }
+                }
+
+                // --- Ensure we're always listening if a slot is free ---
+                // After reaper cleanup the socket is aborted (CLOSED),
+                // so we must re-listen even if the slot is already "ours".
+                if !slots[listen_slot].active {
+                    if let Some(h) = slots[listen_slot].handle {
+                        let socket = sockets.get::<smoltcp::socket::tcp::Socket>(h);
+                        if !socket.is_listening() {
+                            stack.listen_handle(sockets, h, REMOTE_SHELL_PORT);
+                        }
+                    }
+                } else {
+                    // Current listen slot is taken, find a free one.
+                    for j in 0..MAX_REMOTE_SESSIONS {
+                        if !slots[j].active {
+                            if let Some(h) = slots[j].handle {
+                                stack.listen_handle(sockets, h, REMOTE_SHELL_PORT);
+                                listen_slot = j;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        let _ = writeln!(con, "[net] client disconnected \u{2014} re-listening");
-
-        unsafe {
-            if let Some(sockets) = &mut *NET_SOCKETS.0.get() {
-                let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
-                let socket = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-                socket.abort();
-            }
-        }
-
-        net_poll();
+        core::hint::spin_loop();
     }
 }
 
@@ -1080,7 +1279,7 @@ fn write_user_list(w: &mut dyn core::fmt::Write) {
 // Multi-user callbacks
 // ---------------------------------------------------------------------------
 
-#[cfg(all(feature = "shell", feature = "multi-user"))]
+#[cfg(all(feature = "shell", feature = "net"))]
 fn do_login(username: &str, password: &[u8]) -> u32 {
     unsafe {
         let users = &mut *USERS.0.get();

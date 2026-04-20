@@ -28,6 +28,6 @@ multi-user = ["microkernel/multi-user", "shell/multi-user"]
 arch = { path = "../../arch" }
 microkernel = { path = "../../microkernel", default-features = false }
 soc-raspi5 = { path = "../../soc/raspi5" }
-shell = { path = "../../shell", optional = true }
+shell = { path = "../../shell", optional = true, features = ["large-vi"] }
 userlib = { path = "../../userlib", optional = true }
 panic-halt = "1.0"

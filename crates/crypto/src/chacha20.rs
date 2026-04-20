@@ -27,6 +27,7 @@ fn quarter_round(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
 /// Generate one 64-byte ChaCha20 keystream block.
 ///
 /// Public so that `rng` module can use this for the ChaCha20-based DRBG.
+#[inline(never)]
 pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     let mut s = [0u32; 16];
     s[0] = SIGMA[0]; s[1] = SIGMA[1]; s[2] = SIGMA[2]; s[3] = SIGMA[3];
@@ -61,6 +62,7 @@ pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64
 }
 
 /// Apply ChaCha20 keystream XOR to `data`, starting from block `counter`.
+#[inline(never)]
 pub fn chacha20_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], data: &mut [u8]) {
     let mut ctr = counter;
     let mut off = 0;
@@ -85,6 +87,7 @@ struct Poly1305 {
 }
 
 impl Poly1305 {
+    #[inline(never)]
     fn new(key: &[u8; 32]) -> Self {
         // Clamp r (RFC 8439 §2.5)
         let mut rb = [0u8; 16];
@@ -113,6 +116,7 @@ impl Poly1305 {
 
     /// Process one block (1–16 bytes). Hibit is placed at byte `len`,
     /// i.e. the number n = le(block) + 2^(8·len) per RFC 8439 §2.5.1.
+    #[inline(never)]
     fn block(&mut self, msg: &[u8]) {
         let mut n = [0u8; 17];
         let len = msg.len().min(16);
@@ -171,6 +175,7 @@ impl Poly1305 {
         self.h = [h0, h1, h2, h3, h4];
     }
 
+    #[inline(never)]
     fn update(&mut self, data: &[u8]) {
         let mut off = 0;
         while off < data.len() {
@@ -180,6 +185,7 @@ impl Poly1305 {
         }
     }
 
+    #[inline(never)]
     fn finalize(self) -> [u8; 16] {
         let (mut h0, mut h1, mut h2, mut h3, mut h4) =
             (self.h[0], self.h[1], self.h[2], self.h[3], self.h[4]);
@@ -241,6 +247,7 @@ pub struct ChaCha20Poly1305 {
 }
 
 /// Compute the Poly1305 tag for AEAD construction (RFC 8439 §2.8).
+#[inline(never)]
 fn poly1305_aead_tag(
     poly_key: &[u8; 32],
     aad: &[u8],
@@ -278,6 +285,7 @@ impl Aead for ChaCha20Poly1305 {
     const NONCE_LEN: usize = 12;
     const TAG_LEN: usize = 16;
 
+    #[inline(never)]
     fn new(key: &[u8]) -> Self {
         let mut k = [0u8; 32];
         let copy_len = key.len().min(32);
@@ -285,6 +293,7 @@ impl Aead for ChaCha20Poly1305 {
         Self { key: k }
     }
 
+    #[inline(never)]
     fn seal_in_place(
         &self,
         nonce: &[u8],
@@ -318,6 +327,7 @@ impl Aead for ChaCha20Poly1305 {
         Ok(plaintext_len + Self::TAG_LEN)
     }
 
+    #[inline(never)]
     fn open_in_place(
         &self,
         nonce: &[u8],

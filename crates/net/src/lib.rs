@@ -271,6 +271,34 @@ impl<D: NetworkDevice> NetStack<D> {
         socket.is_active()
     }
 
+    /// Add a new TCP socket to the socket set using the provided storage.
+    /// Returns the socket handle for the new socket.
+    pub fn add_tcp_socket(
+        &self,
+        sockets: &mut SocketSet<'_>,
+        storage: &'static mut NetStorage,
+    ) -> SocketHandle {
+        let rx_buf = SocketBuffer::new(&mut storage.tcp_rx_buf[..]);
+        let tx_buf = SocketBuffer::new(&mut storage.tcp_tx_buf[..]);
+        let tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        sockets.add(tcp_socket)
+    }
+
+    /// Start listening on a specific socket handle.
+    pub fn listen_handle(&mut self, sockets: &mut SocketSet<'_>, handle: SocketHandle, port: u16) {
+        let socket = sockets.get_mut::<TcpSocket>(handle);
+        if socket.is_open() {
+            socket.abort();
+        }
+        socket.listen(port).ok();
+    }
+
+    /// Check if a specific socket handle has an active connection.
+    pub fn is_connected_handle(&self, sockets: &SocketSet<'_>, handle: SocketHandle) -> bool {
+        let socket = sockets.get::<TcpSocket>(handle);
+        socket.is_active()
+    }
+
     /// Return a mutable reference to the smoltcp interface context.
     ///
     /// Needed for TCP `connect()` calls (outbound connections).

@@ -98,8 +98,13 @@ pub fn client_handshake(stream: &TcpStream) -> Option<SecureChannel> {
 
     // Read 36-byte server hello.
     let mut hello = [0u8; 36];
-    reader.read_exact(&mut hello).ok()?;
+    if let Err(e) = reader.read_exact(&mut hello) {
+        eprintln!("[vsc] handshake: read server hello failed: {}", e);
+        return None;
+    }
     if hello[..4] != VSC_MAGIC {
+        eprintln!("[vsc] handshake: bad magic: {:02x} {:02x} {:02x} {:02x}",
+            hello[0], hello[1], hello[2], hello[3]);
         return None;
     }
     let mut server_pk = [0u8; 32];
@@ -121,7 +126,8 @@ pub fn client_handshake(stream: &TcpStream) -> Option<SecureChannel> {
     // Derive shared secret.
     let ss = match x25519_diffie_hellman(&sk, &server_pk) {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("[vsc] handshake: DH failed: {:?}", e);
             zeroize(&mut sk);
             return None;
         }
@@ -146,9 +152,25 @@ pub fn client_handshake(stream: &TcpStream) -> Option<SecureChannel> {
 // ── Frame I/O ───────────────────────────────────────────────────────────
 
 /// Read exactly `n` bytes from a TcpStream.
+/// Retries on `WouldBlock` (non-blocking socket).
 pub fn read_exact(stream: &TcpStream, buf: &mut [u8]) -> bool {
-    let mut reader = stream;
-    reader.read_exact(buf).is_ok()
+    let mut offset = 0;
+    while offset < buf.len() {
+        let mut reader = stream;
+        match reader.read(&mut buf[offset..]) {
+            Ok(0) => return false,
+            Ok(n) => offset += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(ref e) => {
+                eprintln!("[vsc] read error: {}", e);
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Receive and decrypt one frame. Returns plaintext in `buf[..len]`.
@@ -156,21 +178,32 @@ pub fn recv_frame(stream: &TcpStream, ch: &mut SecureChannel, buf: &mut [u8]) ->
     // Read 2-byte length header.
     let mut hdr = [0u8; 2];
     if !read_exact(stream, &mut hdr) {
+        eprintln!("[vsc] recv: header EOF");
         return None;
     }
     let ct_len = u16::from_le_bytes(hdr) as usize;
     if ct_len < TAG_LEN || ct_len > MAX_FRAME_CT {
+        eprintln!("[vsc] recv: bad frame len {}", ct_len);
         return None;
     }
 
     // Read ciphertext+tag.
     let mut ct = [0u8; MAX_FRAME_CT];
     if !read_exact(stream, &mut ct[..ct_len]) {
+        eprintln!("[vsc] recv: body EOF ct_len={}", ct_len);
         return None;
     }
 
     // Decrypt in-place.
-    let pt_len = ch.decrypt(&mut ct[..ct_len])?;
+    let ct_snap = [ct[0], ct[1], ct[2], ct.get(3).copied().unwrap_or(0)];
+    let pt_len = match ch.decrypt(&mut ct[..ct_len]) {
+        Some(n) => n,
+        None => {
+            eprintln!("[vsc] recv: decrypt failed rx_ctr={} ct_len={} hdr=[{:02x},{:02x}] ct[..4]={:02x?}",
+                ch.rx_counter.wrapping_sub(2), ct_len, hdr[0], hdr[1], ct_snap);
+            return None;
+        }
+    };
     buf[..pt_len].copy_from_slice(&ct[..pt_len]);
     Some(pt_len)
 }

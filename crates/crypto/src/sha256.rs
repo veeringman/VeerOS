@@ -51,6 +51,9 @@ impl Sha256 {
         }
     }
 
+    // Prevent LTO from re-optimizing this at the global opt-level ("s").
+    // SHA-256 compress is miscompiled on riscv32 when LTO applies opt-level="s".
+    #[inline(never)]
     fn compress(&mut self) {
         let mut w = [0u32; 64];
 
@@ -119,6 +122,7 @@ impl Sha256 {
 }
 
 impl Hash for Sha256 {
+    #[inline(never)]
     fn update(&mut self, data: &[u8]) {
         self.total_len += data.len() as u64;
         let mut offset = 0;
@@ -153,6 +157,7 @@ impl Hash for Sha256 {
         }
     }
 
+    #[inline(never)]
     fn finalize(mut self) -> Digest {
         // MD padding: append 1-bit, zero-pad, append 64-bit length
         let bit_len = self.total_len * 8;
@@ -177,6 +182,7 @@ impl Hash for Sha256 {
         digest
     }
 
+    #[inline(never)]
     fn digest(data: &[u8]) -> Digest {
         let mut h = Sha256::new();
         h.update(data);

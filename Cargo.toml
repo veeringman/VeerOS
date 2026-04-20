@@ -82,3 +82,18 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 #strip = "symbols"
+
+# Crypto must NOT use opt-level="s" — size optimization can miscompile
+# field arithmetic on riscv32 (u32 multiply/carry chains).
+# SHA-256 also broken at opt-level=2 on riscv32; use opt-level=3.
+[profile.release.package.crypto]
+opt-level = 3
+
+[profile.release.package.curve25519-dalek]
+opt-level = 2
+
+[profile.release.package.ed25519-dalek]
+opt-level = 2
+
+[profile.release.package.sha2]
+opt-level = 2

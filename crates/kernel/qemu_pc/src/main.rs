@@ -400,9 +400,9 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 4096]);
 
 #[cfg(feature = "shell")]
 #[repr(align(16))]
-struct ShellStack([u8; 32768]);
+struct ShellStack([u8; 98304]);
 #[cfg(feature = "shell")]
-static SHELL_STACK: ShellStack = ShellStack([0u8; 32768]);
+static SHELL_STACK: ShellStack = ShellStack([0u8; 98304]);
 
 // ---------------------------------------------------------------------------
 // Sample task stacks (userlib tests)

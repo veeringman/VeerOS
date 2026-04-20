@@ -495,7 +495,7 @@ static mut IDLE_STACK: IdleStack = IdleStack([0u8; 2048]);
 // Shell task
 // ---------------------------------------------------------------------------
 
-/// Stack for the shell task (4 KiB — needs room for the line buffer, etc.).
+/// Stack for the shell task.
 #[cfg(feature = "shell")]
 #[repr(align(16))]
 struct ShellStack([u8; 4096]);

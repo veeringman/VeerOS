@@ -218,9 +218,9 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 1024]);
 
 #[cfg(feature = "shell")]
 #[repr(align(16))]
-struct ShellStack([u8; 16384]);
+struct ShellStack([u8; 98304]);
 #[cfg(feature = "shell")]
-static SHELL_STACK: ShellStack = ShellStack([0u8; 16384]);
+static SHELL_STACK: ShellStack = ShellStack([0u8; 98304]);
 
 #[cfg(feature = "samples")]
 #[repr(align(16))]

@@ -12,10 +12,18 @@ use arch::{Console, Serial};
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Maximum number of lines in the edit buffer.
-const MAX_LINES: usize = 256;
+#[cfg(feature = "small-vi")]
+const MAX_LINES: usize = 48;
+#[cfg(feature = "large-vi")]
+const MAX_LINES: usize = 512;
+#[cfg(not(any(feature = "small-vi", feature = "large-vi")))]
+const MAX_LINES: usize = 128;
 
 /// Maximum bytes per line (excluding terminator).
+#[cfg(feature = "large-vi")]
 const MAX_COLS: usize = 120;
+#[cfg(not(feature = "large-vi"))]
+const MAX_COLS: usize = 80;
 
 /// Terminal height (rows) — conservative default for serial consoles.
 const TERM_ROWS: usize = 24;

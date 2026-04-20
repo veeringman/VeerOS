@@ -48,6 +48,22 @@ pub fn login_prompt<S: Serial>(
     con: &mut Console<S>,
     password_hash: u32,
 ) -> bool {
+    login_prompt_full(con, password_hash, None)
+}
+
+/// Run the login prompt with optional username/password callback.
+///
+/// If `login_fn` is provided, asks for both username and password,
+/// and authenticates via the callback (returns session token >0 on
+/// success). If `login_fn` is `None`, falls back to password-only
+/// authentication against `password_hash`.
+///
+/// Returns `true` if authentication succeeded.
+pub fn login_prompt_full<S: Serial>(
+    con: &mut Console<S>,
+    password_hash: u32,
+    login_fn: Option<fn(&str, &[u8]) -> u32>,
+) -> bool {
     let _ = writeln!(con, "");
     let _ = writeln!(con, "VeerOS remote shell");
     let _ = writeln!(con, "");
@@ -58,18 +74,39 @@ pub fn login_prompt<S: Serial>(
             let _ = writeln!(con, "  ({} attempt{} remaining)", remaining,
                 if remaining == 1 { "" } else { "s" });
         }
+
+        // Read username if callback provided.
+        let mut user_buf = [0u8; 32];
+        let mut user_len = 0;
+        if login_fn.is_some() {
+            con.write_str_raw("login: ");
+            user_len = read_line_echo(con, &mut user_buf);
+            if user_len == 0 {
+                return false;
+            }
+            let _ = writeln!(con, "");
+        }
+
         con.write_str_raw("password: ");
 
-        let mut buf = [0u8; MAX_PW_LEN];
-        let len = read_password(con, &mut buf);
+        let mut pw_buf = [0u8; MAX_PW_LEN];
+        let pw_len = read_password(con, &mut pw_buf);
 
-        if len == 0 {
-            // EOF / disconnect
+        if pw_len == 0 {
             return false;
         }
 
-        let entered_hash = fnv1a(&buf[..len]);
-        if entered_hash == password_hash {
+        let ok = if let Some(f) = login_fn {
+            if let Ok(username) = core::str::from_utf8(&user_buf[..user_len]) {
+                f(username, &pw_buf[..pw_len]) > 0
+            } else {
+                false
+            }
+        } else {
+            fnv1a(&pw_buf[..pw_len]) == password_hash
+        };
+
+        if ok {
             let _ = writeln!(con, "");
             return true;
         }
@@ -78,11 +115,11 @@ pub fn login_prompt<S: Serial>(
         let _ = writeln!(con, "  access denied");
     }
 
-    let _ = writeln!(con, "  too many failed attempts — disconnecting");
+    let _ = writeln!(con, "  too many failed attempts \u{2014} disconnecting");
     false
 }
 
-/// Read a password line (no echo).  Returns the number of bytes read.
+/// Read a password line (masked echo).  Returns the number of bytes read.
 ///
 /// Stops on CR, LF, or Ctrl-D (EOF, returns 0).
 fn read_password<S: Serial>(con: &mut Console<S>, buf: &mut [u8]) -> usize {
@@ -100,6 +137,8 @@ fn read_password<S: Serial>(con: &mut Console<S>, buf: &mut [u8]) -> usize {
             0x08 | 0x7F => {
                 if pos > 0 {
                     pos -= 1;
+                    // Erase the '*' on screen: back, space, back
+                    con.write_str_raw("\x08 \x08");
                 }
             }
             // Printable
@@ -107,8 +146,39 @@ fn read_password<S: Serial>(con: &mut Console<S>, buf: &mut [u8]) -> usize {
                 if pos < buf.len() {
                     buf[pos] = b;
                     pos += 1;
-                    // Print a dot for visual feedback
                     con.write_str_raw("*");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Read a line with echo (for username entry).  Returns the number of bytes read.
+///
+/// Stops on CR, LF, or Ctrl-D (EOF, returns 0).
+fn read_line_echo<S: Serial>(con: &mut Console<S>, buf: &mut [u8]) -> usize {
+    let mut pos = 0;
+    loop {
+        let b = con.read_byte();
+        match b {
+            0x0D | 0x0A => return pos,
+            0x04 => return 0,
+            0x03 => return 0,
+            0x08 | 0x7F => {
+                if pos > 0 {
+                    pos -= 1;
+                    con.write_str_raw("\x08 \x08");
+                }
+            }
+            0x20..=0x7E => {
+                if pos < buf.len() {
+                    buf[pos] = b;
+                    pos += 1;
+                    let ch = [b];
+                    if let Ok(s) = core::str::from_utf8(&ch) {
+                        con.write_str_raw(s);
+                    }
                 }
             }
             _ => {}

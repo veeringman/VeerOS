@@ -29,6 +29,6 @@ microkernel = { path = "../../microkernel", default-features = false }
 soc-esp32 = { path = "../../soc/esp32", default-features = false, features = ["c6"] }
 userlib = { path = "../../userlib" }
 net = { path = "../../net", optional = true }
-shell = { path = "../../shell", optional = true }
+shell = { path = "../../shell", optional = true, features = ["small-vi"] }
 smoltcp = { workspace = true, optional = true }
 panic-halt = "1.0"

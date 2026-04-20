@@ -142,13 +142,12 @@ pub fn server_handshake<S: Serial>(
     // Generate ephemeral keypair.
     let (mut sk, pk) = x25519_keypair(&mut rng);
 
-    // Send: VSC\x01 + server pubkey (36 bytes).
-    for &b in &VSC_MAGIC {
-        serial.write_byte(b);
-    }
-    for &b in &pk {
-        serial.write_byte(b);
-    }
+    // Send: VSC\x01 + server pubkey (36 bytes) as a single write.
+    let mut hello = [0u8; 36];
+    hello[..4].copy_from_slice(&VSC_MAGIC);
+    hello[4..36].copy_from_slice(&pk);
+    serial.write_bytes(&hello);
+    serial.flush();
 
     // Read client pubkey (32 bytes).
     let mut client_pk: X25519PublicKey = [0u8; 32];
@@ -238,9 +237,8 @@ impl<S: Serial> SecureSerialInner<S> {
             &self.tx_buf[..self.tx_len],
             &mut frame,
         ) {
-            for &b in data {
-                self.serial.write_byte(b);
-            }
+            self.serial.write_bytes(data);
+            self.serial.flush();
         }
         self.tx_len = 0;
     }
@@ -295,6 +293,16 @@ impl<S: Serial> Serial for SecureSerial<S> {
             s.flush_tx();
         }
     }
+
+    fn flush(&self) {
+        let s = unsafe { &mut *self.inner.get() };
+        s.flush_tx();
+    }
+
+    fn has_data(&self) -> bool {
+        let s = unsafe { &mut *self.inner.get() };
+        s.rx_pos < s.rx_len || s.serial.has_data()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -308,6 +316,9 @@ pub fn read_mode<S: Serial>(serial: &S, channel: &mut SecureChannel) -> Option<u
     let lo = serial.read_byte();
     let hi = serial.read_byte();
     let ct_len = u16::from_le_bytes([lo, hi]) as usize;
+
+    // Debug: check the length header.
+    // Expected: 17 (1 plaintext + 16 tag).
     if ct_len < TAG_LEN || ct_len > MAX_FRAME_CT {
         return None;
     }
@@ -345,9 +356,8 @@ fn recv_frame<S: Serial>(serial: &S, ch: &mut SecureChannel, buf: &mut [u8]) -> 
 fn send_frame<S: Serial>(serial: &S, ch: &mut SecureChannel, data: &[u8]) {
     let mut frame = [0u8; MAX_FRAME_CT + 2];
     if let Some(out) = ch.encrypt_frame(data, &mut frame) {
-        for &b in out {
-            serial.write_byte(b);
-        }
+        serial.write_bytes(out);
+        serial.flush();
     }
 }
 

@@ -16,7 +16,12 @@ pub fn run(stream: &TcpStream, ch: &mut SecureChannel) {
     let old_termios = match get_termios(stdin_fd) {
         Some(t) => t,
         None => {
-            eprintln!("[vsc] warning: could not get terminal settings");
+            // Non-TTY stdin (pipe, redirect). Run without raw mode.
+            stream
+                .set_nonblocking(true)
+                .expect("failed to set non-blocking");
+            let _ = terminal_loop(stream, ch);
+            stream.set_nonblocking(false).ok();
             return;
         }
     };

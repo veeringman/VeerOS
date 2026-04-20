@@ -470,7 +470,7 @@ cmd_start() {
         # ── ESP32-C6 (RISC-V 32, QEMU virt) ────────────────────────
         if [ ! -f "$VEEROS_ESP32C6_ELF" ]; then
             echo "Building ESP32-C6 kernel..."
-            "$VEEROS_ROOT/scripts/build-qemu-esp32c6.sh"
+            "$VEEROS_ROOT/scripts/build-qemu-esp32c6.sh" release
         fi
 
         qemu_bin="qemu-system-riscv32"
@@ -1254,7 +1254,7 @@ cmd_build() {
             ;;&
         esp32c6|all)
             echo "Building VeerOS ESP32-C6 kernel..."
-            "$VEEROS_ROOT/scripts/build-qemu-esp32c6.sh"
+            "$VEEROS_ROOT/scripts/build-qemu-esp32c6.sh" release
             echo "ELF ready: $VEEROS_ESP32C6_ELF"
             ;;
         *)
