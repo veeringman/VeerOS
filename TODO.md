@@ -2,6 +2,60 @@
 
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
+## VeerOS Fold Architecture (Secure Envelope)
+- [~] Fold Engine: Native, cross-platform (Linux, MacOS, Windows) secure compute envelope for VeerOS workloads (Phase 8B+)
+  - [x] Design Fold as lightweight, secure, rapidly deployable runtime unit (not a container/VM) — host crate `fold_engine` scaffolded with platform `Engine` trait + `PlatformEngine` cfg-selected backend
+  - [~] Implement Fold Engine in Rust: process isolation, namespaces, cgroups, seccomp, capabilities, overlayfs, veth, signed manifests, immutable root images
+    - [x] Linux namespaces MVP — PID/MOUNT/UTS/IPC/NET via `unshare` + double-fork (init becomes PID 1); `mount /proc`, optional `pivot_root` into rootfs, `sethostname`, `execve`; launcher reports init PID to parent over pipe; stdout/stderr captured to per-fold log
+    - [x] Structured launcher→parent error pipe (`O_CLOEXEC` tag-framed: OK=init_pid, ERR=msg); parent surfaces real unshare/mount/pivot_root failure text instead of "launcher closed pipe"
+    - [x] User namespace + uid_map/gid_map (rootless spawn) — verified running without sudo; seccomp+namespaces+hostname all functional as unprivileged user on kernels with `kernel.unprivileged_userns_clone=1`
+    - [x] cgroups v2 (cpu.max / memory.max / memory.swap.max / pids.max) — auto-detects parent from `/proc/self/cgroup`, creates `fold-<name>/`, attaches init PID after fork, removes on `fold rm`; orphan-safe error path (SIGKILLs init + cleans cgroup dir on failure); helpful `systemd-run --user --scope --property=Delegate=yes` hint on rootless EACCES
+    - [x] seccomp default-deny profile — raw BPF via `prctl(PR_SET_SECCOMP)`, `NO_NEW_PRIVS`; default denylist covers keyring, module load, `bpf`, `kexec_*`, `reboot`, `unshare`/`setns`, `mount`/`umount2`/`pivot_root`, swap, time-set, `perf_event_open`, `quotactl`, `ptrace`, `personality`, `acct`; per-fold extra `deny = [...]`; verified: `mount` inside fold returns EPERM
+    - [ ] veth pair + optional bridge attachment
+    - [ ] overlayfs rootfs layering
+    - [ ] Ed25519-signed manifests via VeerOS `crypto` crate
+    - [ ] Immutable root images (content-addressed)
+  - [~] CLI/API for fold management: spawn, list, logs, scale, move, gpu attach, sleep, refold, archive
+    - [x] `fold spawn --manifest <path>` — TOML manifest loader + validation
+    - [x] `fold list` — reads `$XDG_STATE_HOME/veeros/fold/*.json`, shows pid/status/started/cmd
+    - [x] `fold logs <name> [--follow]` — streams captured stdout/stderr, tail-f polls at 250ms
+    - [x] `fold stop <name>` — SIGTERM to init PID
+    - [x] `fold rm <name> [--force]` — refuses on live fold unless `--force`
+    - [ ] `fold scale`, `fold move`, `fold gpu attach`, `fold sleep`, `fold refold`, `fold archive`
+  - [ ] Support for resource governance, network identity, GPU/accelerator access, snapshot/migration, trust policies
+  - [ ] Ensure security by default: least privilege, default deny, signed images, verified launch, isolated secrets, minimal syscall surface, audit trails
+  - [~] Cross-platform support: Linux (namespaces/cgroups), MacOS (sandbox/launchd), Windows (job objects, containers) — Linux MVP done; macOS + Windows are compile-time `StubEngine` returning `Unsupported`
+  - [x] Track progress and update as Fold features are implemented
+
+## VeerOS microVMM (`veer-vm`) — KVM-based, Firecracker-class
+- [~] Lightweight alternative to QEMU for running VeerOS inside a Fold — crate `crates/veer_vm` producing binary `veer-vm`
+  - [x] Phase 1 — Boot VeerOS x86_64 kernel via `/dev/kvm`
+    - [x] ELF loader (PT_LOAD → `p_paddr`) using `object` crate
+    - [x] `mmap`-backed single-region guest memory registered via `KVM_SET_USER_MEMORY_REGION`
+    - [x] Firecracker-style direct entry into 32-bit protected mode — flat segments set via `KVM_SET_SREGS`, no in-memory GDT required
+    - [x] Multiboot v1 entry state: EAX=0x2BADB002, EBX=info-ptr, EIP=ELF entry, CR0.PE=1, CR0.PG=0
+    - [x] Minimal Multiboot v1 info struct (flags=0x1, mem_lower=640 KiB, mem_upper computed)
+    - [x] 16550A UART emulation on PIO 0x3F8–0x3FF → host stdout (THR/LSR/LCR/IER/SCR + DLAB latch)
+    - [x] `KVM_RUN` loop dispatching `IoIn`/`IoOut`/`MmioRead`/`MmioWrite`/`Hlt`/`Shutdown`
+    - [x] Verified: VeerOS boots through GDT/IDT/paging/SYSCALL init, prints full boot banner, enters scheduler
+  - [ ] Phase 2 — Timer interrupts + interactive shell
+    - [x] In-kernel IRQ chip via `KVM_CREATE_IRQCHIP` — PIC + IOAPIC + LAPIC handled entirely by the host kernel; all `0xFEC0_xxxx`/`0xFEE0_xxxx` MMIO disappears from userspace, `HLT` is handled in-kernel (CPU idles waiting for IRQ instead of exiting to userspace)
+    - [x] In-kernel PIT via `KVM_CREATE_PIT2` — real calibrated timer (`timer 2783 ticks/ms` vs. `4294967295` garbage in Phase 1), scheduler runs at least one task after boot
+    - [x] UART RX path — raw-mode stdin on a dedicated reader thread pushes bytes into a shared `VecDeque`, 16550 emulation reports `LSR.DR`/`IIR` correctly and asserts IRQ 4 via `KVM_IRQ_LINE` only when `IER.ERBFI` is set
+    - [x] QEMU-style `Ctrl-A x` escape sequence to quit the VMM cleanly
+    - [x] Signal handling — SIGTERM/SIGHUP flip a global `SHUTDOWN` flag; SIGUSR1 (no-op handler) breaks `KVM_RUN` via EINTR so the run loop re-checks the flag; terminal restored on drop via RAII guard
+    - [ ] Verify interactive shell end-to-end on a real TTY (typing `ls` etc.)
+  - [ ] Phase 3 — I/O via virtio-mmio
+    - [ ] virtio-mmio transport + virtio-console, virtio-blk, virtio-net
+    - [ ] Direct VeerOS ISO boot (skip ELF-only path)
+  - [~] Phase 4 — Integration with Fold
+    - [x] `fold vm spawn` subcommand — synthesizes a `veer-vm` manifest in-memory (kernel path + memory + name + optional rootless) and hands it to the Linux engine; no external TOML needed; binary auto-discovered via `target/{release,debug}/veer-vm` or `$PATH`
+    - [x] Rootless-friendly defaults — cgroup limits are opt-in (`--memory-cap`, `--pids-max`); works out of the box under `--user-ns` without needing a delegated memory controller
+    - [x] Verified end-to-end: `fold vm spawn → fold list → fold logs` shows full VeerOS boot sequence (banner through scheduler start) running inside a namespaced fold with default seccomp denylist + user+pid+mount+net+ipc+uts namespaces
+    - [ ] Default fold manifest `examples/veer-vm.toml` (declarative form for `fold spawn --manifest`)
+    - [ ] Snapshot / restore (VCPU events, memory dirty log, KVM state)
+  - [ ] Phase 5 — aarch64 KVM backend (for RPi5 guest kernels)
+
 ## V1 Scope
 - [ ] Bootable microkernel on ESP32 RISC-V (C3/C6/H2) and Xtensa (S3)
 - [ ] Multi-architecture support — ARM64 (RPi family, QEMU/KVM), x86-64 (QEMU/KVM), RISC-V 32/64

@@ -27,6 +27,8 @@ members = [
     "crates/userlib",
     # ── Host tools ──────────────────────────────────────────
     "crates/veer-connect",
+    "crates/fold_engine",
+    "crates/veer_vm",
     # ── Demo / test ──────────────────────────────────────
     "crates/veeros-demo",
 ]

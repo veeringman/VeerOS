@@ -1,0 +1,29 @@
+#
+# Hardened fold — runs as root with full isolation + seccomp denylist +
+# cgroup v2 resource limits.
+#
+
+name = "hardened"
+cmd  = "/bin/sh"
+args = ["-c", "echo hi from hardened fold; id; hostname; sleep 2"]
+hostname = "fold-hardened"
+
+[env]
+PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[namespaces]
+pid = true
+mount = true
+uts = true
+ipc = true
+net = true
+user = false
+
+[seccomp]
+profile = "default"
+deny    = ["personality"]   # example: extra denials on top of the profile
+
+[limits]
+cpu_max    = "100000 100000"  # 1 CPU
+memory_max = 536870912        # 512 MiB
+pids_max   = 256

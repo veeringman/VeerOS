@@ -1,0 +1,27 @@
+#
+# Rootless fold — runs without sudo on Linux kernels that permit
+# unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1,
+# the default on Ubuntu/Fedora/Arch). Everything inside sees uid 0 but it
+# is mapped to the caller's uid on the host.
+#
+
+name = "rootless"
+cmd  = "/bin/sh"
+args = ["-c", "id; hostname; echo 'uid 0 inside == outer uid outside'; ls /proc | head -5; sleep 2"]
+hostname = "fold-rootless"
+
+[namespaces]
+pid = true
+mount = true
+uts = true
+ipc = true
+net = true
+user = true        # ← key difference: enable user namespace
+
+[seccomp]
+profile = "default"
+
+[limits]
+cpu_max    = "50000 100000"   # 0.5 CPU
+memory_max = 268435456        # 256 MiB
+pids_max   = 64

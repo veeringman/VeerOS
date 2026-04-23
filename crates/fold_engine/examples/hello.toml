@@ -1,0 +1,15 @@
+name = "hello"
+cmd  = "/bin/sh"
+args = ["-c", "echo hi from fold; id; hostname; ls /; sleep 2"]
+hostname = "fold-hello"
+
+[env]
+PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[namespaces]
+pid = true
+mount = true
+uts = true
+ipc = true
+net = true
+user = false
