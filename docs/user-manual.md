@@ -8,6 +8,7 @@
 5. [Flashing to ESP32](#flashing-to-esp32)
 6. [Shell Reference](#shell-reference)
 7. [Distribution Feature Flags](#distribution-feature-flags)
+8. [EdgeFabric Runtime Integration](#edgefabric-runtime-integration)
 
 ---
 
@@ -148,3 +149,10 @@ cargo build -p kernel-qemu-virt \
 
 > Feature-gated components are still being implemented. The default build uses
 > the `dist-minimal` round-robin scheduler.
+
+## EdgeFabric Runtime Integration
+
+For orchestration and lifecycle management of fold + veer-vm based ESP32-C6
+virtual IoT runtimes, see:
+
+- [EdgeFabric Integration Guide: VeerOS ESP32-C6 Virtual IoT Runtime](edgefabric-esp32c6-runtime.md)
