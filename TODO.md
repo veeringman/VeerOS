@@ -44,17 +44,17 @@ This file is the persistent progress tracker for VeerOS and should be updated in
     - [x] UART RX path — raw-mode stdin on a dedicated reader thread pushes bytes into a shared `VecDeque`, 16550 emulation reports `LSR.DR`/`IIR` correctly and asserts IRQ 4 via `KVM_IRQ_LINE` only when `IER.ERBFI` is set
     - [x] QEMU-style `Ctrl-A x` escape sequence to quit the VMM cleanly
     - [x] Signal handling — SIGTERM/SIGHUP flip a global `SHUTDOWN` flag; SIGUSR1 (no-op handler) breaks `KVM_RUN` via EINTR so the run loop re-checks the flag; terminal restored on drop via RAII guard
-    - [ ] Verify interactive shell end-to-end on a real TTY (typing `ls` etc.)
+    - [x] Verify interactive shell end-to-end on a real TTY (typing `ls` etc.)
   - [ ] Phase 3 — I/O via virtio-mmio
     - [ ] virtio-mmio transport + virtio-console, virtio-net
     - [x] virtio-blk-PCI transport (legacy, I/O BAR at 0xC000) — guest driver in `soc/qemu_pc/src/virtio_blk.rs` works unmodified
     - [x] virtio-net-PCI transport (legacy, I/O BAR at 0xC100) with TAP backend — `--tap <ifname>` CLI flag, dedicated RX reader thread, F_MAC negotiation, dup(2)'d TAP fd for rx/tx separation
-    - [ ] Direct VeerOS ISO boot (skip ELF-only path)
+    - [x] Direct VeerOS ISO boot (skip ELF-only path)
   - [~] Phase 4 — Integration with Fold
     - [x] `fold vm spawn` subcommand — synthesizes a `veer-vm` manifest in-memory (kernel path + memory + name + optional rootless) and hands it to the Linux engine; no external TOML needed; binary auto-discovered via `target/{release,debug}/veer-vm` or `$PATH`
     - [x] Rootless-friendly defaults — cgroup limits are opt-in (`--memory-cap`, `--pids-max`); works out of the box under `--user-ns` without needing a delegated memory controller
     - [x] Verified end-to-end: `fold vm spawn → fold list → fold logs` shows full VeerOS boot sequence (banner through scheduler start) running inside a namespaced fold with default seccomp denylist + user+pid+mount+net+ipc+uts namespaces
-    - [ ] Default fold manifest `examples/veer-vm.toml` (declarative form for `fold spawn --manifest`)
+    - [x] Default fold manifest `examples/veer-vm.toml` (declarative form for `fold spawn --manifest`)
     - [ ] Snapshot / restore (VCPU events, memory dirty log, KVM state)
   - [ ] Phase 5 — aarch64 KVM backend (for RPi5 guest kernels)
   - [ ] Phase 6 — ESP32-C6 (RISC-V) VeerOS distribution runnable under `veer-vm`

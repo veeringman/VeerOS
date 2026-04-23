@@ -1,0 +1,28 @@
+# Declarative equivalent of `fold vm spawn` for the common VeerOS x86_64 KVM
+# workflow. Adjust `cmd`, `--kernel`, and resource knobs to match your host.
+
+name = "veeros-vm"
+cmd  = "./target/debug/veer-vm"
+args = [
+  "--kernel",
+  "./target/x86_64-unknown-none/debug/kernel-qemu-pc",
+  "--memory",
+  "128",
+]
+hostname = "veeros-vm"
+workdir = "../../.."
+
+[env]
+PATH = "/usr/local/bin:/usr/bin:/bin"
+TERM = "xterm-256color"
+
+[namespaces]
+pid = true
+mount = true
+uts = true
+ipc = true
+net = true
+user = true
+
+[seccomp]
+profile = "default"

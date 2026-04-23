@@ -15,6 +15,8 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 mod elf;
 #[cfg(target_os = "linux")]
+mod iso;
+#[cfg(target_os = "linux")]
 mod memory;
 #[cfg(target_os = "linux")]
 mod multiboot;
@@ -32,7 +34,11 @@ mod vm;
 #[derive(Parser, Debug)]
 #[command(name = "veer-vm", about = "VeerOS microVMM (KVM-based)")]
 struct Cli {
-    /// Path to the kernel ELF to boot (Multiboot v1 compatible).
+    /// Path to the boot image to load.
+    ///
+    /// Accepts either:
+    /// - a Multiboot v1-compatible kernel ELF, or
+    /// - a VeerOS ISO containing `/boot/kernel.elf`.
     #[arg(long)]
     kernel: PathBuf,
 

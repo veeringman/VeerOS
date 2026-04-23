@@ -118,10 +118,29 @@ impl Manifest {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading manifest {}", path.display()))?;
-        let m: Manifest = toml::from_str(&text)
+        let mut m: Manifest = toml::from_str(&text)
             .with_context(|| format!("parsing manifest {}", path.display()))?;
+        m.resolve_relative_paths(path);
         m.validate()?;
         Ok(m)
+    }
+
+    fn resolve_relative_paths(&mut self, manifest_path: &Path) {
+        let Some(base_dir) = manifest_path.parent() else {
+            return;
+        };
+
+        if let Some(rootfs) = self.rootfs.as_mut() {
+            if rootfs.is_relative() {
+                *rootfs = base_dir.join(&*rootfs);
+            }
+        }
+
+        if let Some(workdir) = self.workdir.as_mut() {
+            if workdir.is_relative() {
+                *workdir = base_dir.join(&*workdir);
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<()> {

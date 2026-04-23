@@ -50,9 +50,15 @@ cargo build -p veer_vm
 ./target/debug/veer-vm \
     --kernel ./target/x86_64-unknown-none/debug/kernel-qemu-pc \
     --memory 128
+
+# Or boot straight from the GRUB ISO produced by build-qemu-pc.sh
+./target/debug/veer-vm \
+  --kernel ./build/veeros.iso \
+  --memory 128
 ```
 
-`--memory` is in MiB (default 128).
+`--memory` is in MiB (default 128). `--kernel` accepts either a Multiboot
+ELF or a VeerOS ISO containing `/boot/kernel.elf`.
 
 ## Architecture
 
@@ -94,7 +100,7 @@ without needing to stage a GDT in guest memory.
 | 1 ✅  | Boot + 16550 serial TX.                                           |
 | 2 ✅  | In-kernel irqchip + PIT + UART RX + clean shutdown.               |
 | 3     | Virtio-mmio transport + virtio-console / virtio-blk / virtio-net. |
-| 3     | Boot image format: load VeerOS ISO directly (instead of ELF).     |
+| 3 ✅  | Boot image format: load VeerOS ISO directly (instead of ELF).     |
 | 4 ✅  | Fold × VMM fusion: `fold vm spawn` wraps `veer-vm` in a fold.     |
 | 4     | Snapshot / restore (KVM_GET_VCPU_EVENTS etc.).                    |
 | 5     | aarch64 KVM backend for RPi5 guest kernels.                       |

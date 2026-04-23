@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::elf;
+use crate::iso;
 use crate::memory::GuestMem;
 use crate::multiboot;
 use crate::pci::{self, PciHost};
@@ -97,9 +98,17 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     unsafe { vm.set_user_memory_region(region) }
         .context("KVM_SET_USER_MEMORY_REGION")?;
 
-    // ── 4. Load kernel ELF and place Multiboot info ──────────
-    let loaded = elf::load(&cfg.kernel_path, guest.as_ref())
-        .with_context(|| format!("loading {}", cfg.kernel_path.display()))?;
+    // ── 4. Load kernel image and place Multiboot info ────────
+    let loaded = if is_iso_path(&cfg.kernel_path) {
+        let kernel = iso::extract_boot_kernel(&cfg.kernel_path)
+            .with_context(|| format!("extracting kernel from {}", cfg.kernel_path.display()))?;
+        let image_name = format!("{}:/boot/kernel.elf", cfg.kernel_path.display());
+        elf::load_bytes(&kernel, &image_name, guest.as_ref())
+            .with_context(|| format!("loading {image_name}"))?
+    } else {
+        elf::load(&cfg.kernel_path, guest.as_ref())
+            .with_context(|| format!("loading {}", cfg.kernel_path.display()))?
+    };
     eprintln!(
         "[veer-vm] loaded kernel {}: entry={:#x} end={:#x} memory={} MiB",
         cfg.kernel_path.display(),
@@ -275,6 +284,13 @@ pub fn run(cfg: VmConfig) -> Result<()> {
             }
         }
     }
+}
+
+fn is_iso_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("iso"))
+        .unwrap_or(false)
 }
 
 /// Configure segment / system registers for a flat 32-bit PM entry.

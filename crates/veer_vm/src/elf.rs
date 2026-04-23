@@ -26,8 +26,12 @@ pub struct LoadedKernel {
 pub fn load(path: &Path, guest: &GuestMem) -> Result<LoadedKernel> {
     let bytes = fs::read(path)
         .with_context(|| format!("reading kernel ELF {}", path.display()))?;
+    load_bytes(&bytes, &path.display().to_string(), guest)
+}
+
+pub fn load_bytes(bytes: &[u8], image_name: &str, guest: &GuestMem) -> Result<LoadedKernel> {
     let elf: ElfFile64 = ElfFile64::parse(&*bytes)
-        .with_context(|| format!("parsing ELF {}", path.display()))?;
+        .with_context(|| format!("parsing ELF {image_name}"))?;
 
     match elf.kind() {
         ObjectKind::Executable => {}
