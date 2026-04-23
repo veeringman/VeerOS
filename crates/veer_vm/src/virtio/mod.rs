@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::memory::GuestMem;
 
 pub mod blk;
+pub mod net;
 
 // ── Legacy register offsets (within the I/O BAR) ─────────────────────────
 pub const REG_DEVICE_FEATURES: u16 = 0x00; // 32-bit, RO

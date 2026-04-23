@@ -31,7 +31,7 @@ use crate::multiboot;
 use crate::pci::{self, PciHost};
 use crate::serial::{Serial16550, SerialShared};
 use crate::termios_guard::RawMode;
-use crate::virtio::{blk::VirtioBlk, VirtioDevice, REG_DEVICE_CONFIG, REG_QUEUE_NOTIFY};
+use crate::virtio::{blk::VirtioBlk, net::VirtioNet, VirtioDevice, REG_DEVICE_CONFIG, REG_QUEUE_NOTIFY};
 
 /// Global shutdown flag. Flipped by:
 ///   * SIGTERM / SIGHUP handlers
@@ -48,6 +48,10 @@ pub struct VmConfig {
     pub memory_bytes: usize,
     pub disk_path: Option<std::path::PathBuf>,
     pub disk_read_only: bool,
+    /// Name of a pre-created TAP interface to attach as virtio-net-pci.
+    pub tap_name: Option<String>,
+    /// MAC address advertised to the guest.
+    pub mac: [u8; 6],
 }
 
 pub fn run(cfg: VmConfig) -> Result<()> {
@@ -77,7 +81,11 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     vm.create_pit2(pit_cfg).context("KVM_CREATE_PIT2")?;
 
     // ── 3. Guest memory region ───────────────────────────────
-    let guest = GuestMem::new(cfg.memory_bytes)?;
+    // Wrapped in Arc so the RX reader thread (for virtio-net) can copy
+    // frames directly into guest physical memory without coordinating
+    // with the vCPU thread. `GuestMem::slice_mut` already takes `&self`
+    // and is safe for concurrent use (no aliasing by construction).
+    let guest = Arc::new(GuestMem::new(cfg.memory_bytes)?);
     let region = kvm_userspace_memory_region {
         slot: 0,
         flags: 0,
@@ -90,7 +98,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         .context("KVM_SET_USER_MEMORY_REGION")?;
 
     // ── 4. Load kernel ELF and place Multiboot info ──────────
-    let loaded = elf::load(&cfg.kernel_path, &guest)
+    let loaded = elf::load(&cfg.kernel_path, guest.as_ref())
         .with_context(|| format!("loading {}", cfg.kernel_path.display()))?;
     eprintln!(
         "[veer-vm] loaded kernel {}: entry={:#x} end={:#x} memory={} MiB",
@@ -99,7 +107,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         loaded.end,
         cfg.memory_bytes / (1024 * 1024),
     );
-    let mb_info = multiboot::write_info(&guest, MBINFO_GPA, cfg.memory_bytes as u64)?;
+    let mb_info = multiboot::write_info(guest.as_ref(), MBINFO_GPA, cfg.memory_bytes as u64)?;
 
     // ── 5. vCPU + CPUID ──────────────────────────────────────
     let mut vcpu: VcpuFd = vm.create_vcpu(0).context("KVM_CREATE_VCPU")?;
@@ -120,7 +128,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         vm.clone(),
     )));
 
-    // PCI host bridge + optional virtio-blk.
+    // PCI host bridge + optional virtio-blk + optional virtio-net.
     let pci = Arc::new(Mutex::new(PciHost::new()));
     let blk: Option<Arc<Mutex<VirtioBlk>>> = if let Some(path) = cfg.disk_path.as_deref() {
         let dev = VirtioBlk::open(path, cfg.disk_read_only)
@@ -134,6 +142,33 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         );
         let dev = Arc::new(Mutex::new(dev));
         pci.lock().unwrap().set_blk(dev.clone());
+        Some(dev)
+    } else {
+        None
+    };
+    let net: Option<Arc<Mutex<VirtioNet>>> = if let Some(name) = cfg.tap_name.as_deref() {
+        let dev = VirtioNet::open_tap(name, cfg.mac)
+            .with_context(|| format!("attaching TAP interface {name}"))?;
+        let tap_rx_fd = dev.dup_tap_fd()?;
+        eprintln!(
+            "[veer-vm] virtio-net-pci: tap={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            dev.tap_name(),
+            cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5],
+        );
+        let dev = Arc::new(Mutex::new(dev));
+        pci.lock().unwrap().set_net(dev.clone());
+
+        // Spawn the RX reader thread: blocks on TAP `read(2)` and hands
+        // each frame to the net device, which places it into the guest's
+        // receiveq. Frames that arrive while no RX descriptor is posted
+        // are dropped.
+        let guest_rx = guest.clone();
+        let dev_rx = dev.clone();
+        thread::Builder::new()
+            .name("veer-vm-net-rx".into())
+            .spawn(move || net_rx_thread(tap_rx_fd, dev_rx, guest_rx))
+            .context("spawn virtio-net rx thread")?;
+
         Some(dev)
     } else {
         None
@@ -177,8 +212,10 @@ pub fn run(cfg: VmConfig) -> Result<()> {
                     uart.lock().unwrap().io_in(port, data);
                 } else if pio_is_pci_config(port) {
                     handle_pci_in(&pci, port, data);
-                } else if let Some(off) = pio_bar0_offset(&pci, port) {
-                    handle_bar0_in(off, data, blk.as_ref());
+                } else if let Some(off) = pio_blk_bar0_offset(&pci, port) {
+                    handle_blk_bar0_in(off, data, blk.as_ref());
+                } else if let Some(off) = pio_net_bar0_offset(&pci, port) {
+                    handle_net_bar0_in(off, data, net.as_ref());
                 } else {
                     for b in data.iter_mut() { *b = 0xFF; }
                 }
@@ -188,8 +225,10 @@ pub fn run(cfg: VmConfig) -> Result<()> {
                     uart.lock().unwrap().io_out(port, data);
                 } else if pio_is_pci_config(port) {
                     handle_pci_out(&pci, port, data);
-                } else if let Some(off) = pio_bar0_offset(&pci, port) {
-                    handle_bar0_out(off, data, blk.as_ref(), &guest)?;
+                } else if let Some(off) = pio_blk_bar0_offset(&pci, port) {
+                    handle_blk_bar0_out(off, data, blk.as_ref(), guest.as_ref())?;
+                } else if let Some(off) = pio_net_bar0_offset(&pci, port) {
+                    handle_net_bar0_out(off, data, net.as_ref(), guest.as_ref())?;
                 }
                 // else: silently drop writes to unmapped PIO.
             }
@@ -413,24 +452,25 @@ fn pio_is_pci_config(port: u16) -> bool {
 
 /// If `port` falls inside the currently-programmed virtio-blk BAR0
 /// window, return the offset within that BAR; else `None`.
-fn pio_bar0_offset(pci: &Arc<Mutex<PciHost>>, port: u16) -> Option<u16> {
-    let base = pci.lock().unwrap().bar0_base();
-    if base == 0 {
-        return None;
-    }
+fn pio_blk_bar0_offset(pci: &Arc<Mutex<PciHost>>, port: u16) -> Option<u16> {
+    let base = pci.lock().unwrap().blk_bar0_base();
+    if base == 0 { return None; }
     let end = base.saturating_add(pci::VIRTIO_BLK_PIO_SIZE);
-    if port >= base && port < end {
-        Some(port - base)
-    } else {
-        None
-    }
+    if port >= base && port < end { Some(port - base) } else { None }
+}
+
+/// If `port` falls inside the currently-programmed virtio-net BAR0
+/// window, return the offset within that BAR; else `None`.
+fn pio_net_bar0_offset(pci: &Arc<Mutex<PciHost>>, port: u16) -> Option<u16> {
+    let base = pci.lock().unwrap().net_bar0_base();
+    if base == 0 { return None; }
+    let end = base.saturating_add(pci::VIRTIO_NET_PIO_SIZE);
+    if port >= base && port < end { Some(port - base) } else { None }
 }
 
 fn handle_pci_in(pci: &Arc<Mutex<PciHost>>, port: u16, data: &mut [u8]) {
     let host = pci.lock().unwrap();
     if (pci::PCI_CONFIG_ADDR..pci::PCI_CONFIG_ADDR + 4).contains(&port) {
-        // Only 32-bit aligned reads of CONFIG_ADDRESS are meaningful;
-        // anything else returns 0xFF..FF. Guest driver only does 4-byte.
         let val = host.read_addr();
         let bytes = val.to_le_bytes();
         let byte_off = (port - pci::PCI_CONFIG_ADDR) as usize;
@@ -438,8 +478,6 @@ fn handle_pci_in(pci: &Arc<Mutex<PciHost>>, port: u16, data: &mut [u8]) {
         data[..n].copy_from_slice(&bytes[byte_off..byte_off + n]);
         for b in &mut data[n..] { *b = 0xFF; }
     } else {
-        // CONFIG_DATA — width is the access width; PciHost honours the
-        // low two bits of the latched address to pick the right byte.
         host.read_data(data.len(), data);
     }
 }
@@ -447,8 +485,6 @@ fn handle_pci_in(pci: &Arc<Mutex<PciHost>>, port: u16, data: &mut [u8]) {
 fn handle_pci_out(pci: &Arc<Mutex<PciHost>>, port: u16, data: &[u8]) {
     let mut host = pci.lock().unwrap();
     if (pci::PCI_CONFIG_ADDR..pci::PCI_CONFIG_ADDR + 4).contains(&port) {
-        // Accept a full-dword write at the base, or patch sub-dword
-        // fragments by read-modify-write.
         let mut bytes = host.read_addr().to_le_bytes();
         let byte_off = (port - pci::PCI_CONFIG_ADDR) as usize;
         let n = data.len().min(4 - byte_off);
@@ -459,7 +495,7 @@ fn handle_pci_out(pci: &Arc<Mutex<PciHost>>, port: u16, data: &[u8]) {
     }
 }
 
-fn handle_bar0_in(
+fn handle_blk_bar0_in(
     offset: u16,
     data: &mut [u8],
     blk: Option<&Arc<Mutex<VirtioBlk>>>,
@@ -472,12 +508,11 @@ fn handle_bar0_in(
     if offset < REG_DEVICE_CONFIG {
         dev.transport_mut().read_reg(offset, data);
     } else {
-        let cfg_off = offset - REG_DEVICE_CONFIG;
-        dev.config_read(cfg_off, data);
+        dev.config_read(offset - REG_DEVICE_CONFIG, data);
     }
 }
 
-fn handle_bar0_out(
+fn handle_blk_bar0_out(
     offset: u16,
     data: &[u8],
     blk: Option<&Arc<Mutex<VirtioBlk>>>,
@@ -485,9 +520,6 @@ fn handle_bar0_out(
 ) -> Result<()> {
     let Some(dev) = blk else { return Ok(()); };
     if offset < REG_DEVICE_CONFIG {
-        // QUEUE_NOTIFY is special: the write value is the queue index
-        // to kick. All other common-header writes are straight register
-        // updates handled by the transport.
         if offset == REG_QUEUE_NOTIFY {
             let mut bytes = [0u8; 2];
             let n = data.len().min(2);
@@ -498,6 +530,98 @@ fn handle_bar0_out(
             dev.lock().unwrap().transport_mut().write_reg(offset, data);
         }
     }
-    // Device config area is read-only for virtio-blk; ignore writes.
     Ok(())
+}
+
+fn handle_net_bar0_in(
+    offset: u16,
+    data: &mut [u8],
+    net: Option<&Arc<Mutex<VirtioNet>>>,
+) {
+    let Some(dev) = net else {
+        for b in data.iter_mut() { *b = 0xFF; }
+        return;
+    };
+    let mut dev = dev.lock().unwrap();
+    if offset < REG_DEVICE_CONFIG {
+        dev.transport_mut().read_reg(offset, data);
+    } else {
+        dev.config_read(offset - REG_DEVICE_CONFIG, data);
+    }
+}
+
+fn handle_net_bar0_out(
+    offset: u16,
+    data: &[u8],
+    net: Option<&Arc<Mutex<VirtioNet>>>,
+    mem: &GuestMem,
+) -> Result<()> {
+    let Some(dev) = net else { return Ok(()); };
+    if offset < REG_DEVICE_CONFIG {
+        if offset == REG_QUEUE_NOTIFY {
+            let mut bytes = [0u8; 2];
+            let n = data.len().min(2);
+            bytes[..n].copy_from_slice(&data[..n]);
+            let qidx = u16::from_le_bytes(bytes);
+            dev.lock().unwrap().notify(qidx, mem)?;
+        } else {
+            dev.lock().unwrap().transport_mut().write_reg(offset, data);
+        }
+    }
+    Ok(())
+}
+
+/// RX reader thread for virtio-net. Blocks on the TAP fd (dup'd from the
+/// device) and hands each Ethernet frame to `VirtioNet::deliver_rx_frame`,
+/// which places it into the guest's receiveq. Frames that arrive with no
+/// posted RX descriptor are dropped.
+fn net_rx_thread(
+    tap_fd: libc::c_int,
+    dev: Arc<Mutex<VirtioNet>>,
+    mem: Arc<GuestMem>,
+) {
+    // TAP was opened O_NONBLOCK in the VMM; use poll(2) to block cheaply.
+    let mut buf = vec![0u8; 2048];
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            unsafe { libc::close(tap_fd); }
+            return;
+        }
+        // Wait up to 200ms for TAP readability, then re-check SHUTDOWN.
+        let mut pfd = libc::pollfd { fd: tap_fd, events: libc::POLLIN, revents: 0 };
+        let rc = unsafe { libc::poll(&mut pfd as *mut _, 1, 200) };
+        if rc < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+            eprintln!("[veer-vm] virtio-net rx: poll: {e}");
+            unsafe { libc::close(tap_fd); }
+            return;
+        }
+        if rc == 0 || (pfd.revents & libc::POLLIN) == 0 { continue; }
+
+        loop {
+            let n = unsafe {
+                libc::read(tap_fd, buf.as_mut_ptr() as _, buf.len())
+            };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK)) {
+                    break;
+                }
+                if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+                eprintln!("[veer-vm] virtio-net rx: read: {e}");
+                unsafe { libc::close(tap_fd); }
+                return;
+            }
+            if n == 0 { break; }
+            if std::env::var_os("VEER_VM_NET_TRACE").is_some() {
+                eprintln!("[veer-vm/net] rx-read: {n} bytes from tap");
+            }
+            let frame = &buf[..n as usize];
+            let mut dev = dev.lock().unwrap();
+            if let Err(e) = dev.deliver_rx_frame(mem.as_ref(), frame) {
+                eprintln!("[veer-vm] virtio-net rx: deliver: {e:#}");
+            }
+        }
+    }
 }

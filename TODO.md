@@ -46,7 +46,9 @@ This file is the persistent progress tracker for VeerOS and should be updated in
     - [x] Signal handling — SIGTERM/SIGHUP flip a global `SHUTDOWN` flag; SIGUSR1 (no-op handler) breaks `KVM_RUN` via EINTR so the run loop re-checks the flag; terminal restored on drop via RAII guard
     - [ ] Verify interactive shell end-to-end on a real TTY (typing `ls` etc.)
   - [ ] Phase 3 — I/O via virtio-mmio
-    - [ ] virtio-mmio transport + virtio-console, virtio-blk, virtio-net
+    - [ ] virtio-mmio transport + virtio-console, virtio-net
+    - [x] virtio-blk-PCI transport (legacy, I/O BAR at 0xC000) — guest driver in `soc/qemu_pc/src/virtio_blk.rs` works unmodified
+    - [x] virtio-net-PCI transport (legacy, I/O BAR at 0xC100) with TAP backend — `--tap <ifname>` CLI flag, dedicated RX reader thread, F_MAC negotiation, dup(2)'d TAP fd for rx/tx separation
     - [ ] Direct VeerOS ISO boot (skip ELF-only path)
   - [~] Phase 4 — Integration with Fold
     - [x] `fold vm spawn` subcommand — synthesizes a `veer-vm` manifest in-memory (kernel path + memory + name + optional rootless) and hands it to the Linux engine; no external TOML needed; binary auto-discovered via `target/{release,debug}/veer-vm` or `$PATH`
@@ -55,6 +57,11 @@ This file is the persistent progress tracker for VeerOS and should be updated in
     - [ ] Default fold manifest `examples/veer-vm.toml` (declarative form for `fold spawn --manifest`)
     - [ ] Snapshot / restore (VCPU events, memory dirty log, KVM state)
   - [ ] Phase 5 — aarch64 KVM backend (for RPi5 guest kernels)
+  - [ ] Phase 6 — ESP32-C6 (RISC-V) VeerOS distribution runnable under `veer-vm`
+    - [ ] Build-support glue: pick/produce a flat ELF image of the `kernel-qemu-esp32c6` / `kernel-xiao-esp32c6` distribution consumable by the VMM (no ESP-IDF bootloader, no flash layout)
+    - [ ] Minimal RISC-V KVM guest backend in `veer-vm` (rv32imc M-mode: CLINT timer, PLIC stub, 16550-compatible UART or virtio-console)
+    - [ ] `fold vm spawn --arch riscv32 --kernel <esp32c6.elf>` wiring
+    - [ ] Verified boot through scheduler + shell under `veer-vm` on Linux host (no real hardware)
 
 ## V1 Scope
 - [ ] Bootable microkernel on ESP32 RISC-V (C3/C6/H2) and Xtensa (S3)

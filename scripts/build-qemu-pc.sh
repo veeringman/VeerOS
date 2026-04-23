@@ -21,11 +21,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${1:-debug}"
 
+# The stock `x86_64-unknown-none` target in rustc >=1.95 ships `core.rlib`
+# built with `code-model=kernel` (high-half kernel). VeerOS is loaded by
+# Multiboot at 1 MiB (low 2 GiB) and is compiled with `code-model=small`.
+# LLVM now hard-errors on module-flag mismatches, so we must rebuild
+# `core` with our rustflags via `-Z build-std`. This is a nightly-only
+# flag, so we set `RUSTC_BOOTSTRAP=1` to enable it on the stable toolchain
+# pinned in `rust-toolchain.toml`.
+export RUSTC_BOOTSTRAP=1
+BUILD_STD=(-Z build-std=core,compiler_builtins -Z build-std-features=compiler-builtins-mem)
+
 if [ "$PROFILE" = "release" ]; then
-    cargo build --release -p kernel-qemu-pc --target x86_64-unknown-none
+    cargo build --release -p kernel-qemu-pc --target x86_64-unknown-none "${BUILD_STD[@]}"
     BINARY="$ROOT/target/x86_64-unknown-none/release/kernel-qemu-pc"
 else
-    cargo build -p kernel-qemu-pc --target x86_64-unknown-none
+    cargo build -p kernel-qemu-pc --target x86_64-unknown-none "${BUILD_STD[@]}"
     BINARY="$ROOT/target/x86_64-unknown-none/debug/kernel-qemu-pc"
 fi
 

@@ -28,12 +28,29 @@ impl RawMode {
             return Ok(Self { original: dummy, active: false });
         }
 
-        let original = termios::tcgetattr(fd)
-            .context("tcgetattr(stdin)")?;
+        let original = loop {
+            match termios::tcgetattr(fd) {
+                Ok(t) => break t,
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => return Err(e).context("tcgetattr(stdin)"),
+            }
+        };
         let mut raw = original.clone();
         termios::cfmakeraw(&mut raw);
-        termios::tcsetattr(fd, SetArg::TCSANOW, &raw)
-            .context("tcsetattr(stdin, raw)")?;
+        loop {
+            match termios::tcsetattr(fd, SetArg::TCSANOW, &raw) {
+                Ok(()) => break,
+                Err(nix::errno::Errno::EINTR) => continue,
+                // EIO/ENOTTY/TTOU — stdin belongs to a different process
+                // group (e.g. we were launched in a background shell job);
+                // fall back to leaving stdin alone rather than aborting.
+                Err(nix::errno::Errno::EIO)
+                | Err(nix::errno::Errno::ENOTTY) => {
+                    return Ok(Self { original, active: false });
+                }
+                Err(e) => return Err(e).context("tcsetattr(stdin, raw)"),
+            }
+        }
         Ok(Self { original, active: true })
     }
 }
