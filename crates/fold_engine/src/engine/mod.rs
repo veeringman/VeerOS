@@ -33,7 +33,12 @@ mod seccomp;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxEngine as PlatformEngine;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::MacosEngine as PlatformEngine;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod stub;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use stub::StubEngine as PlatformEngine;

@@ -73,7 +73,16 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     }
 
     let snapshot_meta = match &cfg.boot {
-        BootSource::Snapshot(path) => Some(snapshot::load_meta(path)?),
+        BootSource::Snapshot(path) => {
+            let meta = snapshot::load_meta(path)?;
+            if meta.backend != "kvm" {
+                bail!(
+                    "snapshot backend '{}' is not compatible with KVM backend",
+                    meta.backend
+                );
+            }
+            Some(meta)
+        }
         BootSource::Kernel(_) => None,
     };
     // ── 1. Open /dev/kvm ─────────────────────────────────────

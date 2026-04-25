@@ -107,6 +107,29 @@ struct Cli {
     /// into the running VeerOS guest without a network connection.
     #[arg(long)]
     sensor_feed: Option<PathBuf>,
+
+    /// Run macOS Hypervisor.framework readiness checks and exit.
+    #[arg(long, default_value_t = false)]
+    hvf_preflight: bool,
+
+    /// Run a minimal Hypervisor.framework VM create/destroy probe and exit.
+    ///
+    /// macOS-only diagnostic aid to distinguish host-level HVF contention
+    /// from veer-vm runtime wiring.
+    #[arg(long, default_value_t = false)]
+    hvf_probe: bool,
+
+    /// Run a single HVF vCPU cycle and print the decoded VM-exit reason.
+    ///
+    /// macOS-only diagnostic aid for backend bring-up.
+    #[arg(long, default_value_t = false)]
+    hvf_run_once: bool,
+
+    /// Enable experimental LAPIC timer interrupt injection in HVF run-once mode.
+    ///
+    /// macOS-only bring-up knob; has no effect unless `--hvf-run-once` is set.
+    #[arg(long, default_value_t = false)]
+    hvf_inject_timer: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -161,6 +184,18 @@ fn default_mac() -> [u8; 6] {
 fn main() -> Result<()> {
     use anyhow::Context;
     let cli = Cli::parse();
+    if cli.hvf_preflight {
+        anyhow::bail!("--hvf-preflight is macOS-only");
+    }
+    if cli.hvf_probe {
+        anyhow::bail!("--hvf-probe is macOS-only");
+    }
+    if cli.hvf_run_once {
+        anyhow::bail!("--hvf-run-once is macOS-only");
+    }
+    if cli.hvf_inject_timer {
+        anyhow::bail!("--hvf-inject-timer is macOS-only");
+    }
     let restore_path = cli.restore.clone();
     let boot = match (cli.kernel, cli.restore) {
         (Some(kernel), None) => config::BootSource::Kernel(kernel),
@@ -203,8 +238,52 @@ fn main() -> Result<()> {
     vm::run(cfg)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    if cli.hvf_preflight {
+        return backend::hvf::preflight();
+    }
+    if cli.hvf_probe {
+        return backend::hvf::probe();
+    }
+    if cli.hvf_run_once {
+        std::env::set_var("VEER_VM_HVF_RUN_ONCE", "1");
+    }
+    if cli.hvf_inject_timer {
+        std::env::set_var("VEER_VM_HVF_INJECT_TIMER", "1");
+    }
+    if let Some(path) = &cli.sensor_feed {
+        std::env::set_var("VEER_VM_HVF_UART_RX_FILE", path);
+    }
+    let boot = match (cli.kernel, cli.restore) {
+        (Some(kernel), None) => config::BootSource::Kernel(kernel),
+        (None, Some(_)) => anyhow::bail!("--restore is not implemented for the macOS HVF skeleton"),
+        (Some(_), Some(_)) => anyhow::bail!("pass either --kernel or --restore, not both"),
+        (None, None) => anyhow::bail!("one of --kernel or --restore is required"),
+    };
+    let mac = match &cli.mac {
+        Some(s) => parse_mac(s).context("parsing --mac")?,
+        None => default_mac(),
+    };
+
+    let cfg = config::VmConfig {
+        boot,
+        guest_arch: cli.arch.to_guest_arch(),
+        memory_bytes: cli.memory * 1024 * 1024,
+        disk_path: cli.disk,
+        disk_read_only: cli.disk_ro,
+        tap_name: cli.tap,
+        mac,
+        snapshot_save: cli.snapshot_save,
+        cpu_throttle_ms: cli.cpu_throttle_ms,
+        sensor_feed: cli.sensor_feed,
+    };
+    backend::hvf::run(cfg)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() -> Result<()> {
     let _ = Cli::parse();
-    anyhow::bail!("veer-vm currently requires Linux + KVM");
+    anyhow::bail!("veer-vm currently supports Linux (KVM) and macOS (HVF skeleton)");
 }

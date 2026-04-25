@@ -189,6 +189,7 @@ not a userspace framework.
 `memory_query`, `fabric_status`, `sched_stats`, `agent_count`.
 
 ➡️ **Full design:** [Architecture Documentation](docs/architecture.md)
+➡️ **macOS HVF dev loop:** [macOS Development Guide](docs/macos-dev.md)
 
 ---
 

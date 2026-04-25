@@ -18,3 +18,6 @@ pub trait Backend {
 
 #[cfg(target_os = "linux")]
 pub mod kvm;
+
+#[cfg(target_os = "macos")]
+pub mod hvf;

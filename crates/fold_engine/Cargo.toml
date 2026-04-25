@@ -22,3 +22,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["sched", "mount", "process", "user", "fs", "signal", "hostname"] }
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

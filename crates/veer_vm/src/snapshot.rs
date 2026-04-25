@@ -33,6 +33,7 @@ struct MetaHeader {
 
 pub struct SnapshotMeta {
     pub memory_bytes: usize,
+    pub backend: String,
 }
 
 pub fn load_meta(dir: &Path) -> Result<SnapshotMeta> {
@@ -47,8 +48,22 @@ pub fn load_meta(dir: &Path) -> Result<SnapshotMeta> {
             meta.version
         );
     }
+    let backend_path = dir.join("backend.txt");
+    let backend = if backend_path.exists() {
+        String::from_utf8(
+            fs::read(&backend_path)
+                .with_context(|| format!("reading {}", backend_path.display()))?,
+        )
+        .context("parsing backend.txt as utf-8")?
+        .trim()
+        .to_string()
+    } else {
+        // Backward-compatible default for older snapshots.
+        "kvm".to_string()
+    };
     Ok(SnapshotMeta {
         memory_bytes: meta.memory_bytes as usize,
+        backend,
     })
 }
 
@@ -96,6 +111,8 @@ pub fn save(
         memory_bytes: guest.size() as u64,
     };
     write_pod(&dir.join("meta.bin"), &meta)?;
+    fs::write(dir.join("backend.txt"), b"kvm\n")
+        .with_context(|| format!("writing {}/backend.txt", dir.display()))?;
     fs::write(dir.join("memory.bin"), guest.as_slice())
         .with_context(|| format!("writing {}/memory.bin", dir.display()))?;
 
@@ -142,6 +159,11 @@ pub fn restore(
     mac: [u8; 6],
 ) -> Result<()> {
     let meta = load_meta(dir)?;
+    anyhow::ensure!(
+        meta.backend == "kvm",
+        "snapshot backend '{}' is not supported by this restore path",
+        meta.backend
+    );
     anyhow::ensure!(
         meta.memory_bytes == guest.size(),
         "snapshot memory size {} does not match VM memory size {}",
