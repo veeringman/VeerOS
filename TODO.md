@@ -2,6 +2,14 @@
 
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
+## [2026-04-25] Session Sync
+- Fold: cgroups v2, seccomp, rootless mode, TOML manifest, state registry, CLI improvements, integration with veer-vm, roadmap updated (see fold_engine/README.md)
+- veer-vm: KVM-based microVMM, snapshot/restore, virtio-mmio, direct ISO boot, sensor feed, integration with fold, see veer_vm/README.md
+- ESP32C6 dist sensors: Virtual sensor subsystem, shell commands for sensor list/read/set, device files under /dev/sensor/, integration in QEMU and Xiao targets, see kernel/qemu_esp32c6 and kernel/xiao_esp32c6
+- veer-connect: Secure shell/file transfer (push/pull), X25519 handshake, VSC protocol, CLI and Python client, see veer-connect crate and scripts/veeros-connect
+- Programming model: Shell scripts (build-esp32c6.sh, build-qemu-esp32c6.sh) support dist profiles, WiFi/BLE/802.15.4, auto-flash/monitor, and remote shell via veer-connect
+
+
 ## VeerOS Fold Architecture (Secure Envelope)
 - [~] Fold Engine: Native, cross-platform (Linux, MacOS, Windows) secure compute envelope for VeerOS workloads (Phase 8B+)
   - [x] Design Fold as lightweight, secure, rapidly deployable runtime unit (not a container/VM) — host crate `fold_engine` scaffolded with platform `Engine` trait + `PlatformEngine` cfg-selected backend
@@ -26,6 +34,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - [ ] Ensure security by default: least privilege, default deny, signed images, verified launch, isolated secrets, minimal syscall surface, audit trails
   - [~] Cross-platform support: Linux (namespaces/cgroups), MacOS (sandbox/launchd), Windows (job objects, containers) — Linux MVP done; macOS + Windows are compile-time `StubEngine` returning `Unsupported`
   - [x] Track progress and update as Fold features are implemented
+  - [x] cgroups v2, seccomp, rootless mode, TOML manifest, state registry, CLI improvements, integration with veer-vm, see fold_engine/README.md
 
 ## VeerOS microVMM (`veer-vm`) — KVM-based, Firecracker-class
 - [~] Lightweight alternative to QEMU for running VeerOS inside a Fold — crate `crates/veer_vm` producing binary `veer-vm`
@@ -55,12 +64,14 @@ This file is the persistent progress tracker for VeerOS and should be updated in
     - [x] Rootless-friendly defaults — cgroup limits are opt-in (`--memory-cap`, `--pids-max`); works out of the box under `--user-ns` without needing a delegated memory controller
     - [x] Verified end-to-end: `fold vm spawn → fold list → fold logs` shows full VeerOS boot sequence (banner through scheduler start) running inside a namespaced fold with default seccomp denylist + user+pid+mount+net+ipc+uts namespaces
     - [x] Default fold manifest `examples/veer-vm.toml` (declarative form for `fold spawn --manifest`)
-    - [ ] Snapshot / restore (VCPU events, memory dirty log, KVM state)
-  - [ ] Phase 5 — aarch64 KVM backend (for RPi5 guest kernels)
+    - [~] Snapshot / restore (RAM + vCPU/irqchip/PIT/UART + virtio-blk + virtio-net transport/device state done; dirty-log/live migration remain)
+    - [x] Sensor feed (UART FIFO) for EdgeFabric/IoT integration
+    - [x] Integration with fold (see fold_engine/README.md)
+    - [ ] Phase 5 — aarch64 KVM backend (for RPi5 guest kernels)
   - [ ] Phase 6 — ESP32-C6 (RISC-V) VeerOS distribution runnable under `veer-vm`
-    - [ ] Build-support glue: pick/produce a flat ELF image of the `kernel-qemu-esp32c6` / `kernel-xiao-esp32c6` distribution consumable by the VMM (no ESP-IDF bootloader, no flash layout)
-    - [ ] Minimal RISC-V KVM guest backend in `veer-vm` (rv32imc M-mode: CLINT timer, PLIC stub, 16550-compatible UART or virtio-console)
-    - [ ] `fold vm spawn --arch riscv32 --kernel <esp32c6.elf>` wiring
+    - [x] Build-support glue: pick/produce a flat ELF image of the `kernel-qemu-esp32c6` / `kernel-xiao-esp32c6` distribution consumable by the VMM (no ESP-IDF bootloader, no flash layout)
+    - [~] Minimal RISC-V guest backend in `veer-vm` (cross-host virtualizer available: QEMU riscv32 on x86_64/AArch64, riscv64-host KVM scaffolded; PLIC/timer interrupt delivery + riscv64-host runtime validation pending)
+    - [x] `fold vm spawn --arch riscv32 --kernel <esp32c6.elf>` wiring
     - [ ] Verified boot through scheduler + shell under `veer-vm` on Linux host (no real hardware)
 
 ## V1 Scope
@@ -892,6 +903,11 @@ cargo build -p kernel-qemu-pc   --features dist-cluster,accel                   
 ```
 
 ### 4I — Distribution Implementation Tasks (Planned)
+#### ESP32C6 dist sensors
+- [x] Virtual sensor subsystem in QEMU and Xiao ESP32C6 targets
+- [x] Shell commands: `sensor list`, `sensor read <name>`, `sensor set <name> <value>`
+- [x] Device files under `/dev/sensor/` for host/EdgeFabric injection
+- [x] Default sensors: temperature, humidity, pressure, light
 
 #### Crate + Feature Gate Updates
 - [ ] **`distributions/src/lib.rs` expansion** — add `Distribution::Edge`, `Ai`, `Cluster`, `Cloud`, `Firewall`, `Gateway`, `ExtendedRealTime`, `Desktop` variants; update `active_distribution()` priority chain
@@ -3260,6 +3276,11 @@ Result: Inter-org communication without API gateways, VPNs, or shared networks.
 ---
 
 ## Phase 25 — Fabric Client / VeerFlow (Next-Generation User Interface)
+### 25M — veer-connect (Secure Connect)
+- [x] Secure shell and file transfer (push/pull) for VeerOS nodes
+- [x] X25519 handshake, VSC protocol, encrypted session
+- [x] CLI (Rust) and Python client (scripts/veeros-connect)
+- [x] Used for ESP32C6 remote shell and file access
 _The browser is dead. VeerOS replaces it with a fabric-native runtime that binds directly to `invoke()`, State Fabric, and identity — no URLs, no REST, no cookies, no origin policy. The Fabric Client is simultaneously an OS shell, application runtime, and composable UI surface. It renders adaptively from serial ASCII to rich pixel framebuffer based on device capabilities. Feature-gated: `fabric-client` (core runtime), `fc-views` (composable views), `fc-render` (pixel rendering), `fc-remote` (remote Fabric Client protocol)._
 
 _Product naming: **VeerFlow** (user-facing brand — "Don't browse. Flow."), **Fabric Client** (architecture term), **FC** (code prefix), **VFCR** (VeerFlow Client Runtime). Design principles: invoke-first, live-by-default, identity-native, composable, context-preserving, zero-chrome._
@@ -3655,6 +3676,10 @@ Phase 25L (dist-desktop)        ← Phase 4 (Distribution Profiles), Phase 7D (U
 ---
 
 ## Phase 26 — Living Systems / Integrity Engine
+### 26H — Programming Model: Shell Scripts for ESP32C6
+- [x] `build-esp32c6.sh` and `build-qemu-esp32c6.sh` support dist profiles, WiFi/BLE/802.15.4, auto-flash/monitor
+- [x] Remote shell via veer-connect
+- [x] Usage: see script headers and docs/wifi-bringup-esp32c6.md
 _VeerOS replaces "bugs", "defects", and "QA" with a continuous, real-time behavioral integrity system. Every component continuously evaluates its own correctness, confidence, and alignment with declared intent. Deviations produce integrity signals — not stack traces — that form a living graph of system health. The system self-observes, self-explains, self-repairs, and self-learns. No QA environments, no defect backlogs, no release gates. Feature-gated: `integrity` (core primitive), `integrity-observe` (self-observation), `integrity-explain` (causal reasoning), `integrity-repair` (autonomous fix), `integrity-learn` (feedback loop)._
 
 _**Determinism guarantee**: all observation, scoring, anomaly detection, repair ranking, and knowledge distillation are deterministic — same history → same decision, always. LLM assistance (self-explanation text, fix proposal generation) is opt-in and always validated in simulation before deployment. The integrity engine operates correctly without LLMs; they accelerate human comprehension, they don't make autonomous decisions._
