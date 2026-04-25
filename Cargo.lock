@@ -438,6 +438,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel-fold-esp32c6"
+version = "0.1.0"
+dependencies = [
+ "arch",
+ "microkernel",
+ "net",
+ "panic-halt",
+ "shell",
+ "smoltcp",
+ "soc-qemu-virt",
+ "userlib",
+]
+
+[[package]]
 name = "kernel-qemu-esp32c6"
 version = "0.1.0"
 dependencies = [

@@ -620,6 +620,8 @@ fn shell_task() -> ! {
         zigbee_cmd: Some(zigbee_command),
         #[cfg(not(feature = "ieee802154"))]
         zigbee_cmd: None,
+        sensor_cmd: None,
+        sensor_cmd: None,
         get_current_user: Some(get_current_user),
         get_user_list: Some(write_user_list),
         vfs_list_dir: Some(vfs_list_dir),
@@ -943,6 +945,8 @@ fn net_task() -> ! {
                         zigbee_cmd: Some(zigbee_command),
                         #[cfg(not(feature = "ieee802154"))]
                         zigbee_cmd: None,
+        sensor_cmd: None,
+        sensor_cmd: None,
                         get_current_user: Some(get_current_user),
                         get_user_list: Some(write_user_list),
                         vfs_list_dir: Some(vfs_list_dir),

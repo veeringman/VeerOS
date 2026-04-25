@@ -11,6 +11,7 @@ use arch::{Console, Serial};
 
 pub mod vi;
 mod line_ed;
+pub mod script;
 
 pub use line_ed::{History, LineEditor, LineResult};
 
@@ -44,6 +45,8 @@ pub struct ShellEnv {
     pub bt_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
     /// Optional callback: handle `zigbee <subcommand> <args>` and write output.
     pub zigbee_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
+    /// Optional callback: handle `sensor <subcommand> <args>` and write output.
+    pub sensor_cmd: Option<fn(&str, &str, &mut dyn core::fmt::Write)>,
     /// Optional callback: get current UID and username.
     /// Returns (uid, username).
     pub get_current_user: Option<fn() -> (u16, &'static str)>,
@@ -168,6 +171,9 @@ pub struct ShellEnv {
     /// Handle `hostname [new-name]` — get/set system hostname.
     /// Callback: fn(args, writer). If args is empty, print current; else set.
     pub hostname_cmd: Option<fn(&str, &mut dyn core::fmt::Write)>,
+
+    /// Blocking sleep in milliseconds (used by script `sleep N` builtin).
+    pub sleep_ms: Option<fn(u64)>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -181,6 +187,10 @@ pub struct Shell {
     env: ShellEnv,
     /// Shell variables (set command).
     vars: ShellVars,
+    /// Script variables ($var).
+    script_vars: script::VarStore,
+    /// Script execution context (nesting, buffering, loop state).
+    script_ctx: script::ScriptCtx,
 }
 
 /// Shell variables configurable via `set`.
@@ -212,6 +222,8 @@ impl Shell {
                 prompt_str: [0u8; 32],
                 prompt_len: 0,
             },
+            script_vars: script::VarStore::new(),
+            script_ctx: script::ScriptCtx::new(),
         }
     }
 
@@ -317,12 +329,357 @@ impl Shell {
             return false;
         }
 
-        // Split into command + rest-of-line arguments.
-        let (cmd, args) = match line.find(' ') {
-            Some(i) => (&line[..i], line[i + 1..].trim()),
-            None => (line, ""),
-        };
+        // Split on top-level ';' for one-liners and run each statement.
+        let mut exit = false;
+        for seg in line.split(';') {
+            let s = seg.trim();
+            if s.is_empty() { continue; }
+            if self.run_stmt(con, s) { exit = true; break; }
+            if self.script_ctx.script_exit {
+                self.script_ctx.script_exit = false;
+                exit = true;
+                break;
+            }
+        }
+        exit
+    }
 
+    /// Execute a single statement through the script runtime.
+    /// Handles control flow, variable expansion, and then dispatches to commands.
+    fn run_stmt<S: Serial>(&mut self, con: &mut Console<S>, line: &str) -> bool {
+        // ── Buffering mode (inside while/for body) ──────────────────────
+        if self.script_ctx.buffering {
+            let (kw, _) = split_first_word(line);
+            match kw {
+                "while" | "for" => {
+                    self.script_ctx.buf_nest += 1;
+                    self.script_ctx.push_line(line);
+                    return false;
+                }
+                "done" => {
+                    if self.script_ctx.buf_nest > 0 {
+                        self.script_ctx.buf_nest -= 1;
+                        self.script_ctx.push_line(line);
+                        return false;
+                    }
+                    // Matched outer `done` — run the loop now.
+                    self.script_ctx.buffering = false;
+                    return self.run_buffered_loop(con);
+                }
+                _ => {
+                    self.script_ctx.push_line(line);
+                    return false;
+                }
+            }
+        }
+
+        // ── Control-flow keywords ───────────────────────────────────────
+        let (cmd, args) = split_first_word(line);
+        match cmd {
+            "if" => {
+                let parent_active = self.script_ctx.is_active();
+                let cond = parent_active && self.eval_condition(con, args);
+                let _ = self.script_ctx.push_block(script::BlockKind::If);
+                if let Some(bs) = self.script_ctx.current_mut() {
+                    bs.active = cond;
+                    bs.if_taken = cond;
+                }
+                return false;
+            }
+            "then" | "do" => return false, // syntax sugar, no-op
+            "elif" => {
+                let parent_active = {
+                    let d = self.script_ctx.depth;
+                    if d < 2 { true } else { self.script_ctx.blocks[d - 2].active }
+                };
+                let already_taken = match self.script_ctx.current() {
+                    Some(b) if matches!(b.kind, script::BlockKind::If) => b.if_taken,
+                    _ => {
+                        let _ = writeln!(con, "elif: not in if block");
+                        return false;
+                    }
+                };
+                if already_taken {
+                    if let Some(bs) = self.script_ctx.current_mut() { bs.active = false; }
+                    return false;
+                }
+                let cond = parent_active && self.eval_condition(con, args);
+                if let Some(bs) = self.script_ctx.current_mut() {
+                    bs.active = cond;
+                    if cond { bs.if_taken = true; }
+                }
+                return false;
+            }
+            "else" => {
+                let parent_active = {
+                    let d = self.script_ctx.depth;
+                    if d < 2 { true } else { self.script_ctx.blocks[d - 2].active }
+                };
+                if let Some(bs) = self.script_ctx.current_mut() {
+                    if !matches!(bs.kind, script::BlockKind::If) {
+                        let _ = writeln!(con, "else: not in if block");
+                        return false;
+                    }
+                    bs.active = parent_active && !bs.if_taken;
+                }
+                return false;
+            }
+            "fi" => {
+                self.script_ctx.pop_block();
+                return false;
+            }
+            "while" => {
+                let parent_active = self.script_ctx.is_active();
+                let _ = self.script_ctx.push_block(script::BlockKind::While);
+                self.script_ctx.buffering = true;
+                self.script_ctx.buf_nest = 0;
+                self.script_ctx.reset_lines();
+                if let Some(bs) = self.script_ctx.current_mut() {
+                    bs.active = parent_active;
+                    let b = args.as_bytes();
+                    let n = b.len().min(bs.cond.len());
+                    bs.cond[..n].copy_from_slice(&b[..n]);
+                    bs.cond_len = n;
+                }
+                return false;
+            }
+            "for" => {
+                let parent_active = self.script_ctx.is_active();
+                // Parse: VAR in w1 w2 ...
+                let (var, rest) = split_first_word(args);
+                let (in_kw, list) = split_first_word(rest);
+                if in_kw != "in" {
+                    let _ = writeln!(con, "for: syntax: for VAR in WORD...");
+                    return false;
+                }
+                let _ = self.script_ctx.push_block(script::BlockKind::For);
+                self.script_ctx.buffering = true;
+                self.script_ctx.buf_nest = 0;
+                self.script_ctx.reset_lines();
+                if let Some(bs) = self.script_ctx.current_mut() {
+                    bs.active = parent_active;
+                    let vb = var.as_bytes();
+                    let vn = vb.len().min(bs.for_var.len());
+                    bs.for_var[..vn].copy_from_slice(&vb[..vn]);
+                    bs.for_var_len = vn;
+                    // Expand variables in list now so iteration is stable.
+                    let mut exp = [0u8; 128];
+                    let en = script::expand_vars(list, &self.script_vars, &mut exp);
+                    let take = en.min(bs.for_list.len());
+                    bs.for_list[..take].copy_from_slice(&exp[..take]);
+                    bs.for_list_len = take;
+                    bs.for_idx = 0;
+                }
+                return false;
+            }
+            "done" => {
+                // Stray `done` outside buffering: close a loop block.
+                self.script_ctx.pop_block();
+                return false;
+            }
+            "break" => {
+                self.script_ctx.loop_break = true;
+                return false;
+            }
+            "continue" => {
+                self.script_ctx.loop_continue = true;
+                return false;
+            }
+            _ => {}
+        }
+
+        // ── Skip if we're in an inactive branch ─────────────────────────
+        if !self.script_ctx.is_active() {
+            return false;
+        }
+
+        // ── Bare NAME=value assignment ──────────────────────────────────
+        if is_assignment_line(line) {
+            self.handle_assignment(line);
+            self.script_vars.last_status = 0;
+            return false;
+        }
+
+        // ── Variable expansion, then dispatch ───────────────────────────
+        let mut exp_buf = [0u8; 256];
+        let n = script::expand_vars(line, &self.script_vars, &mut exp_buf);
+        let expanded = match core::str::from_utf8(&exp_buf[..n]) {
+            Ok(s) => s,
+            Err(_) => line,
+        };
+        let (xcmd, xargs) = split_first_word(expanded);
+        self.dispatch(con, xcmd, xargs)
+    }
+
+    /// Evaluate a condition (used by `if`, `elif`, `while`).
+    /// Accepts `test ...`, `[ ... ]`, `true`, `false`, or any command
+    /// whose exit status (via `last_status`) determines the result.
+    fn eval_condition<S: Serial>(&mut self, con: &mut Console<S>, args: &str) -> bool {
+        let mut exp = [0u8; 256];
+        let n = script::expand_vars(args, &self.script_vars, &mut exp);
+        let expanded = core::str::from_utf8(&exp[..n]).unwrap_or(args);
+        let expanded = expanded.trim();
+        if expanded.is_empty() { return false; }
+        let (cmd, rest) = split_first_word(expanded);
+        match cmd {
+            "true" | ":" => true,
+            "false" => false,
+            "test" => script::eval_test(rest, None),
+            "[" => {
+                let t = rest.trim_end();
+                let inner = t.strip_suffix(']').unwrap_or(t).trim_end();
+                script::eval_test(inner, None)
+            }
+            _ => {
+                self.script_vars.last_status = 0;
+                self.dispatch(con, cmd, rest);
+                self.script_vars.last_status == 0
+            }
+        }
+    }
+
+    /// Run the buffered body of a while/for loop.
+    fn run_buffered_loop<S: Serial>(&mut self, con: &mut Console<S>) -> bool {
+        let kind = match self.script_ctx.current() {
+            Some(b) => b.kind,
+            None => return false,
+        };
+        let active = self.script_ctx.current().map(|b| b.active).unwrap_or(false);
+        let mut exit = false;
+        if !active {
+            // Inactive parent — drop body.
+            self.script_ctx.pop_block();
+            self.script_ctx.reset_lines();
+            return false;
+        }
+
+        match kind {
+            script::BlockKind::While => {
+                let mut iters: u32 = 0;
+                'outer: loop {
+                    iters += 1;
+                    if iters > 10_000 {
+                        let _ = writeln!(con, "while: iteration limit exceeded");
+                        break;
+                    }
+                    // Snapshot condition.
+                    let mut cond_buf = [0u8; script::MAX_LINE];
+                    let cond_len = {
+                        let bs = match self.script_ctx.current() {
+                            Some(b) => b,
+                            None => break,
+                        };
+                        let n = bs.cond_len;
+                        cond_buf[..n].copy_from_slice(&bs.cond[..n]);
+                        n
+                    };
+                    let cond_str = core::str::from_utf8(&cond_buf[..cond_len]).unwrap_or("");
+                    if !self.eval_condition(con, cond_str) { break; }
+
+                    let n_lines = self.script_ctx.line_count;
+                    for i in 0..n_lines {
+                        let mut line_buf = [0u8; script::MAX_LINE];
+                        let ln = {
+                            let b = self.script_ctx.lines[i].as_str().as_bytes();
+                            let m = b.len().min(line_buf.len());
+                            line_buf[..m].copy_from_slice(&b[..m]);
+                            m
+                        };
+                        let l = core::str::from_utf8(&line_buf[..ln]).unwrap_or("");
+                        if self.run_stmt(con, l) { exit = true; break 'outer; }
+                        if self.script_ctx.script_exit { exit = true; break 'outer; }
+                        if self.script_ctx.loop_break {
+                            self.script_ctx.loop_break = false;
+                            break 'outer;
+                        }
+                        if self.script_ctx.loop_continue {
+                            self.script_ctx.loop_continue = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            script::BlockKind::For => {
+                'outer2: loop {
+                    // Pull name / list / idx.
+                    let mut var_buf = [0u8; script::MAX_NAME];
+                    let mut list_buf = [0u8; script::MAX_VAL];
+                    let (var_len, list_len, idx) = {
+                        let bs = match self.script_ctx.current() {
+                            Some(b) => b,
+                            None => break,
+                        };
+                        let vn = bs.for_var_len;
+                        var_buf[..vn].copy_from_slice(&bs.for_var[..vn]);
+                        let ln = bs.for_list_len;
+                        list_buf[..ln].copy_from_slice(&bs.for_list[..ln]);
+                        (vn, ln, bs.for_idx)
+                    };
+                    let var_name = core::str::from_utf8(&var_buf[..var_len]).unwrap_or("");
+                    let list_str = core::str::from_utf8(&list_buf[..list_len]).unwrap_or("");
+                    let mut word: Option<&str> = None;
+                    for (ci, w) in list_str.split_whitespace().enumerate() {
+                        if ci == idx { word = Some(w); break; }
+                    }
+                    let Some(w) = word else { break; };
+                    self.script_vars.set(var_name, w);
+                    if let Some(bs) = self.script_ctx.current_mut() { bs.for_idx += 1; }
+
+                    let n_lines = self.script_ctx.line_count;
+                    for i in 0..n_lines {
+                        let mut line_buf = [0u8; script::MAX_LINE];
+                        let ln = {
+                            let b = self.script_ctx.lines[i].as_str().as_bytes();
+                            let m = b.len().min(line_buf.len());
+                            line_buf[..m].copy_from_slice(&b[..m]);
+                            m
+                        };
+                        let l = core::str::from_utf8(&line_buf[..ln]).unwrap_or("");
+                        if self.run_stmt(con, l) { exit = true; break 'outer2; }
+                        if self.script_ctx.script_exit { exit = true; break 'outer2; }
+                        if self.script_ctx.loop_break {
+                            self.script_ctx.loop_break = false;
+                            break 'outer2;
+                        }
+                        if self.script_ctx.loop_continue {
+                            self.script_ctx.loop_continue = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        self.script_ctx.pop_block();
+        self.script_ctx.reset_lines();
+        exit
+    }
+
+    /// Handle `NAME=value` or `NAME="value with $vars"` assignment.
+    fn handle_assignment(&mut self, line: &str) {
+        if let Some(eq) = line.find('=') {
+            let name = &line[..eq];
+            let raw_val = &line[eq + 1..];
+            let mut exp = [0u8; 256];
+            let n = script::expand_vars(raw_val, &self.script_vars, &mut exp);
+            let expanded = core::str::from_utf8(&exp[..n]).unwrap_or(raw_val);
+            // Strip surrounding quotes if balanced.
+            let bytes = expanded.as_bytes();
+            let clean = if bytes.len() >= 2
+                && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+                    || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+            {
+                &expanded[1..expanded.len() - 1]
+            } else {
+                expanded
+            };
+            let _ = self.script_vars.set(name, clean);
+        }
+    }
+
+    /// Main command dispatcher — runs a single (cmd, args) pair.
+    fn dispatch<S: Serial>(&mut self, con: &mut Console<S>, cmd: &str, args: &str) -> bool {
         match cmd {
             "help" | "?" => self.cmd_help(con),
             "version" => self.cmd_version(con),
@@ -334,6 +691,7 @@ impl Shell {
             "wifi" => self.cmd_wifi(con, args),
             "bt" | "ble" => self.cmd_bt(con, args),
             "zigbee" | "thread" | "802154" => self.cmd_zigbee(con, args),
+            "sensor" => self.cmd_sensor(con, args),
             "clear" | "cls" => self.cmd_clear(con),
             "echo" => self.cmd_echo(con, args),
             "logo" => self.cmd_logo(con),
@@ -407,20 +765,175 @@ impl Shell {
             "demo" => self.cmd_demo(con, args),
             "reboot" => self.cmd_reboot(con),
             "shutdown" | "halt" | "poweroff" => self.cmd_shutdown(con),
+            // ── scripting builtins ──────────────────────
+            "sleep" => self.cmd_sleep(con, args),
+            "let" => self.cmd_let(con, args),
+            "test" => {
+                self.script_vars.last_status = if script::eval_test(args, None) { 0 } else { 1 };
+            }
+            "[" => {
+                let t = args.trim_end();
+                let inner = t.strip_suffix(']').unwrap_or(t).trim_end();
+                self.script_vars.last_status = if script::eval_test(inner, None) { 0 } else { 1 };
+            }
+            "true" | ":" => { self.script_vars.last_status = 0; }
+            "false" => { self.script_vars.last_status = 1; }
+            "unset" => self.cmd_unset(con, args),
+            "vars" | "env" => self.cmd_vars(con),
+            "export" => self.cmd_export(con, args),
+            "source" | "." => self.cmd_source(con, args),
+            "return" => {
+                let code = args.trim().parse::<u8>().unwrap_or(0);
+                self.script_vars.last_status = code;
+                self.script_ctx.script_exit = true;
+            }
             "exit" | "quit" => {
+                let code = args.trim().parse::<u8>().unwrap_or(0);
+                self.script_vars.last_status = code;
                 let _ = writeln!(con, "Goodbye.");
                 return true;
             }
             _ => {
                 let _ = writeln!(con, "unknown command: '{}'", cmd);
                 let _ = writeln!(con, "Type 'help' for available commands.");
+                self.script_vars.last_status = 127;
             }
         }
 
         false
     }
 
+    // ── scripting builtins ───────────────────────────────────────────────
+
+    fn cmd_sleep<S: Serial>(&mut self, con: &mut Console<S>, args: &str) {
+        let a = args.trim();
+        // Accept "500", "500ms", "2s"
+        let (num_str, mult): (&str, u64) = if let Some(n) = a.strip_suffix("ms") {
+            (n.trim(), 1)
+        } else if let Some(n) = a.strip_suffix('s') {
+            (n.trim(), 1000)
+        } else {
+            (a, 1)
+        };
+        match num_str.parse::<u64>() {
+            Ok(n) => {
+                let ms = n.saturating_mul(mult);
+                if let Some(f) = self.env.sleep_ms {
+                    f(ms);
+                    self.script_vars.last_status = 0;
+                } else {
+                    let _ = writeln!(con, "sleep: not supported on this platform");
+                    self.script_vars.last_status = 1;
+                }
+            }
+            Err(_) => {
+                let _ = writeln!(con, "sleep: invalid duration '{}'", args);
+                self.script_vars.last_status = 2;
+            }
+        }
+    }
+
+    fn cmd_let<S: Serial>(&mut self, con: &mut Console<S>, args: &str) {
+        let a = args.trim();
+        let Some(eq) = a.find('=') else {
+            let _ = writeln!(con, "let: usage: let NAME=EXPR");
+            self.script_vars.last_status = 2;
+            return;
+        };
+        let name = a[..eq].trim();
+        let raw_expr = &a[eq + 1..];
+        let mut exp = [0u8; 128];
+        let n = script::expand_vars(raw_expr, &self.script_vars, &mut exp);
+        let expr = core::str::from_utf8(&exp[..n]).unwrap_or(raw_expr);
+        let v = script::eval_arith(expr);
+        let mut nbuf = [0u8; 12];
+        let nn = script::fmt_i32(&mut nbuf, v);
+        let vs = core::str::from_utf8(&nbuf[..nn]).unwrap_or("0");
+        let _ = self.script_vars.set(name, vs);
+        self.script_vars.last_status = 0;
+    }
+
+    fn cmd_unset<S: Serial>(&mut self, _con: &mut Console<S>, args: &str) {
+        for name in args.split_whitespace() {
+            self.script_vars.unset(name);
+        }
+        self.script_vars.last_status = 0;
+    }
+
+    fn cmd_vars<S: Serial>(&self, con: &mut Console<S>) {
+        for (name, val) in self.script_vars.iter() {
+            let _ = writeln!(con, "{}={}", name, val);
+        }
+        let _ = writeln!(con, "?={}", self.script_vars.last_status);
+    }
+
+    fn cmd_export<S: Serial>(&mut self, con: &mut Console<S>, args: &str) {
+        // `export NAME=value` behaves like plain assignment here (no env separation).
+        let a = args.trim();
+        if a.is_empty() {
+            self.cmd_vars(con);
+            return;
+        }
+        if a.find('=').is_some() {
+            self.handle_assignment(a);
+            self.script_vars.last_status = 0;
+        } else {
+            // Just re-affirm existing var (no-op if unset).
+            self.script_vars.last_status = 0;
+        }
+    }
+
+    fn cmd_source<S: Serial>(&mut self, con: &mut Console<S>, args: &str) {
+        let path = args.trim();
+        if path.is_empty() {
+            let _ = writeln!(con, "source: missing file");
+            self.script_vars.last_status = 2;
+            return;
+        }
+        let Some(read_fn) = self.env.vfs_read_file else {
+            let _ = writeln!(con, "source: VFS not available");
+            self.script_vars.last_status = 1;
+            return;
+        };
+        // Use a fixed-size buffer; scripts must fit.
+        let mut buf = [0u8; 4096];
+        let n = read_fn(path, &mut buf);
+        if n == 0 {
+            let _ = writeln!(con, "source: cannot read '{}'", path);
+            self.script_vars.last_status = 1;
+            return;
+        }
+        let content = match core::str::from_utf8(&buf[..n]) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = writeln!(con, "source: '{}' is not valid UTF-8", path);
+                self.script_vars.last_status = 1;
+                return;
+            }
+        };
+        // Copy content out so we don't borrow buf across run_stmt calls that may
+        // mutate internal buffers (buf is on our stack, safe to alias immutably).
+        // We iterate line-by-line and run each through run_stmt.
+        for raw_line in content.lines() {
+            // Strip comments (# at start of a trimmed line).
+            let line = raw_line.trim();
+            if line.is_empty() { continue; }
+            if line.starts_with('#') { continue; }
+            // Still honor ; separators by running through run_stmt per segment.
+            for seg in line.split(';') {
+                let s = seg.trim();
+                if s.is_empty() { continue; }
+                if self.run_stmt(con, s) {
+                    self.script_ctx.script_exit = true;
+                    return;
+                }
+                if self.script_ctx.script_exit { return; }
+            }
+        }
+    }
+
     // ── built-in commands ────────────────────────────────────────────────
+
 
     fn cmd_help<S: Serial>(&self, con: &mut Console<S>) {
         let _ = writeln!(con, "");
@@ -437,6 +950,7 @@ impl Shell {
         let _ = writeln!(con, "  wifi       Wi-Fi (scan/list/set/connect/status)");
         let _ = writeln!(con, "  bt         Bluetooth LE (scan/list/advertise/stop/status)");
         let _ = writeln!(con, "  zigbee     ZigBee/Thread 802.15.4 (init/scan/channel/send/status)");
+        let _ = writeln!(con, "  sensor     Virtual sensors (list/read/set/status)");
         let _ = writeln!(con, "  clear      Clear the screen");
         let _ = writeln!(con, "  echo       Echo arguments");
         let _ = writeln!(con, "  logo       Display VeerOS logo");
@@ -633,6 +1147,18 @@ impl Shell {
             f(sub, rest, con as &mut dyn core::fmt::Write);
         } else {
             let _ = writeln!(con, "  zigbee: not available on this platform");
+        }
+    }
+
+    fn cmd_sensor<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        if let Some(f) = self.env.sensor_cmd {
+            let (sub, rest) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => (args, ""),
+            };
+            f(sub, rest, con as &mut dyn core::fmt::Write);
+        } else {
+            let _ = writeln!(con, "  sensor: not available on this platform");
         }
     }
 
@@ -2017,6 +2543,24 @@ fn split_first_word(s: &str) -> (&str, &str) {
         Some(i) => (s[..i].trim(), s[i + 1..].trim()),
         None => (s, ""),
     }
+}
+
+/// Return true if the line is a bare shell assignment of the form `NAME=value`.
+/// The identifier must start with a letter or underscore and contain only
+/// alphanumerics or underscores, followed by `=`.
+fn is_assignment_line(line: &str) -> bool {
+    let b = line.as_bytes();
+    if b.is_empty() { return false; }
+    let first = b[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') { return false; }
+    let mut i = 1;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'=' { return i > 0; }
+        if !(c.is_ascii_alphanumeric() || c == b'_') { return false; }
+        i += 1;
+    }
+    false
 }
 
 /// Simple no_std usize parser.

@@ -55,10 +55,37 @@ cargo build -p veer_vm
 ./target/debug/veer-vm \
   --kernel ./build/veeros.iso \
   --memory 128
+
+# Save a snapshot directory on clean shutdown (Ctrl-A x, SIGTERM)
+./target/debug/veer-vm \
+  --kernel ./build/veeros.iso \
+  --snapshot-save /tmp/veeros.snap
+
+# Restore from that snapshot later
+./target/debug/veer-vm \
+  --restore /tmp/veeros.snap
+
+# RISC-V 32-bit kernel image loading path (build support)
+./target/debug/veer-vm \
+  --arch riscv32 \
+  --kernel ./target/riscv32imc-unknown-none-elf/debug/kernel-qemu-esp32c6 \
+  --memory 128
 ```
 
 `--memory` is in MiB (default 128). `--kernel` accepts either a Multiboot
-ELF or a VeerOS ISO containing `/boot/kernel.elf`.
+ELF or a VeerOS ISO containing `/boot/kernel.elf` for `--arch x86_64`.
+`--arch riscv32` supports two execution paths:
+
+- Linux riscv64 host: native RISC-V KVM backend path in `veer-vm`.
+- x86_64/AArch64 hosts: QEMU TCG virtualizer path via `qemu-system-riscv32`.
+
+Install `qemu-system-riscv32` on non-riscv64 hosts for the riscv32 path.
+
+Automated smoke check for this path:
+
+```bash
+bash ./scripts/veer-vm-snapshot-smoke.sh
+```
 
 ## Architecture
 
@@ -101,8 +128,9 @@ without needing to stage a GDT in guest memory.
 | 2 ✅  | In-kernel irqchip + PIT + UART RX + clean shutdown.               |
 | 3     | Virtio-mmio transport + virtio-console / virtio-blk / virtio-net. |
 | 3 ✅  | Boot image format: load VeerOS ISO directly (instead of ELF).     |
+| 4 ~   | Snapshot / restore foundation: save and restore RAM + vCPU + irqchip/PIT + UART + virtio-blk transport state. |
 | 4 ✅  | Fold × VMM fusion: `fold vm spawn` wraps `veer-vm` in a fold.     |
-| 4     | Snapshot / restore (KVM_GET_VCPU_EVENTS etc.).                    |
+| 6 ~   | ESP32-C6 support: riscv32 ELF loading + `--arch riscv32` wiring + cross-host virtualizer path (QEMU on x86_64/AArch64, KVM on riscv64). |
 | 5     | aarch64 KVM backend for RPi5 guest kernels.                       |
 
 ## Fold integration

@@ -1,0 +1,40 @@
+[package]
+name = "kernel-fold-esp32c6"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VeerOS kernel for fold runtime ESP32-C6 target (RISC-V 32-bit virtual IoT node)"
+
+[features]
+default = ["dist-app"]
+
+# ── Distribution profiles ────────────────────────────────────
+dist-minimal = ["microkernel/dist-minimal"]
+dist-app     = ["microkernel/dist-app", "shell", "net", "userlib", "wifi", "ble", "ieee802154", "gpio-sim"]
+dist-rt      = ["microkernel/dist-rt"]
+dist-full    = ["dist-app", "dist-rt"]
+
+# ── Optional components ──────────────────────────────────────
+shell      = ["dep:shell"]
+net        = ["dep:net", "dep:smoltcp"]
+userlib    = ["dep:userlib"]
+wifi       = ["net"]
+ble        = []
+ieee802154 = []
+# Simulated GPIO subsystem: adds an in-memory pin array, wires the `gpio`
+# shell command, and emits `[actuator]` sentinel lines so EdgeFabric can
+# broadcast GPIO state changes to its dashboard Live Viewer.
+gpio-sim   = ["shell"]
+multi-user = ["microkernel/multi-user", "shell/multi-user"]
+
+[dependencies]
+arch = { path = "../../arch" }
+microkernel = { path = "../../microkernel", default-features = false }
+soc-qemu-virt = { path = "../../soc/qemu_virt" }
+net = { path = "../../net", optional = true, features = ["secure-connect"] }
+shell = { path = "../../shell", optional = true }
+userlib = { path = "../../userlib", optional = true }
+smoltcp = { workspace = true, optional = true }
+panic-halt = "1.0"

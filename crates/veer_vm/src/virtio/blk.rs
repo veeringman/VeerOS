@@ -19,6 +19,7 @@ use std::path::Path;
 use crate::memory::GuestMem;
 use super::{
     push_used, pop_avail, walk_chain, DescItem, VirtioDevice, VirtioTransport,
+    VirtioTransportSnapshot,
     STATUS_DRIVER_OK,
 };
 
@@ -47,6 +48,13 @@ pub struct VirtioBlk {
     capacity: u64,
     /// Whether we should surface as read-only to the guest (F_RO).
     read_only: bool,
+}
+
+#[derive(Clone)]
+pub struct VirtioBlkSnapshot {
+    pub transport: VirtioTransportSnapshot,
+    pub capacity: u64,
+    pub read_only: bool,
 }
 
 impl VirtioBlk {
@@ -80,6 +88,32 @@ impl VirtioBlk {
     pub fn capacity_sectors(&self) -> u64 { self.capacity }
     pub fn driver_ok(&self) -> bool {
         self.transport.device_status & STATUS_DRIVER_OK != 0
+    }
+
+    pub fn snapshot_state(&self) -> VirtioBlkSnapshot {
+        VirtioBlkSnapshot {
+            transport: self.transport.snapshot(),
+            capacity: self.capacity,
+            read_only: self.read_only,
+        }
+    }
+
+    pub fn restore_state(&mut self, snap: &VirtioBlkSnapshot) -> Result<()> {
+        if self.capacity != snap.capacity {
+            bail!(
+                "virtio-blk capacity mismatch: snapshot={} sectors device={} sectors",
+                snap.capacity,
+                self.capacity
+            );
+        }
+        if self.read_only != snap.read_only {
+            bail!(
+                "virtio-blk read_only mismatch: snapshot={} device={}",
+                snap.read_only,
+                self.read_only
+            );
+        }
+        self.transport.restore(&snap.transport)
     }
 }
 

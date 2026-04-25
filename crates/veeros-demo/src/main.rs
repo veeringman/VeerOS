@@ -609,6 +609,8 @@ fn main() {
         wifi_cmd: None,
         bt_cmd: None,
         zigbee_cmd: None,
+        sensor_cmd: None,
+        sensor_cmd: None,
         get_current_user: None,
         get_user_list: None,
         vfs_list_dir: None,

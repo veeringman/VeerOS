@@ -20,10 +20,21 @@
 //! assert IRQ 4 on the guest's in-kernel IRQ chip. When RBR is read and
 //! the queue empties, the line is deasserted.
 
-use kvm_ioctls::VmFd;
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
+
+use crate::irq::IrqLine;
+
+pub struct SerialSnapshot {
+    pub ier: u8,
+    pub lcr: u8,
+    pub mcr: u8,
+    pub scr: u8,
+    pub dll: u8,
+    pub dlm: u8,
+    pub rx: Vec<u8>,
+}
 
 const LSR_DR:   u8 = 1 << 0; // data ready
 const LSR_THRE: u8 = 1 << 5; // transmit holding register empty
@@ -55,21 +66,25 @@ pub struct Serial16550 {
     dlm: u8,
 
     shared: Arc<SerialShared>,
-    vm: Arc<VmFd>,
+    irq: Arc<dyn IrqLine + Send + Sync>,
     irq_asserted: bool,
 }
 
 impl Serial16550 {
-    pub fn new(out: Box<dyn Write + Send>, shared: Arc<SerialShared>, vm: Arc<VmFd>) -> Self {
+    pub fn new(
+        out: Box<dyn Write + Send>,
+        shared: Arc<SerialShared>,
+        irq: Arc<dyn IrqLine + Send + Sync>,
+    ) -> Self {
         Self {
             out,
             ier: 0, lcr: 0, mcr: 0, scr: 0, dll: 0, dlm: 0,
-            shared, vm, irq_asserted: false,
+            shared, irq, irq_asserted: false,
         }
     }
 
-    pub fn stdout(shared: Arc<SerialShared>, vm: Arc<VmFd>) -> Self {
-        Self::new(Box::new(io::stdout()), shared, vm)
+    pub fn stdout(shared: Arc<SerialShared>, irq: Arc<dyn IrqLine + Send + Sync>) -> Self {
+        Self::new(Box::new(io::stdout()), shared, irq)
     }
 
     fn dlab(&self) -> bool { (self.lcr & 0x80) != 0 }
@@ -83,7 +98,7 @@ impl Serial16550 {
     fn update_irq(&mut self) {
         let want = (self.ier & IER_ERBFI) != 0 && self.has_rx();
         if want != self.irq_asserted {
-            let _ = self.vm.set_irq_line(COM1_IRQ, want);
+            self.irq.set_irq_line(COM1_IRQ, want);
             self.irq_asserted = want;
         }
     }
@@ -156,4 +171,31 @@ impl Serial16550 {
 
     /// Re-evaluate IRQ after external RX queue change.
     pub fn kick_rx(&mut self) { self.update_irq(); }
+
+    pub fn snapshot(&self) -> SerialSnapshot {
+        let rx = self.shared.rx.lock().unwrap().iter().copied().collect();
+        SerialSnapshot {
+            ier: self.ier,
+            lcr: self.lcr,
+            mcr: self.mcr,
+            scr: self.scr,
+            dll: self.dll,
+            dlm: self.dlm,
+            rx,
+        }
+    }
+
+    pub fn restore(&mut self, state: &SerialSnapshot) {
+        self.ier = state.ier;
+        self.lcr = state.lcr;
+        self.mcr = state.mcr;
+        self.scr = state.scr;
+        self.dll = state.dll;
+        self.dlm = state.dlm;
+        let mut rx = self.shared.rx.lock().unwrap();
+        *rx = state.rx.iter().copied().collect::<VecDeque<_>>();
+        drop(rx);
+        self.irq_asserted = false;
+        self.update_irq();
+    }
 }

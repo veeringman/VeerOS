@@ -9,17 +9,17 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Maximum number of user variables.
-const MAX_VARS: usize = 32;
+pub const MAX_VARS: usize = 32;
 /// Maximum length of a variable name.
-const MAX_NAME: usize = 16;
+pub const MAX_NAME: usize = 16;
 /// Maximum length of a variable value.
-const MAX_VAL: usize = 64;
+pub const MAX_VAL: usize = 64;
 /// Maximum nesting depth for if/while/for.
-const MAX_NEST: usize = 8;
+pub const MAX_NEST: usize = 8;
 /// Maximum number of lines in a script (for while/for buffering).
-const MAX_SCRIPT_LINES: usize = 128;
+pub const MAX_SCRIPT_LINES: usize = 128;
 /// Maximum line length in a script.
-const MAX_LINE: usize = 128;
+pub const MAX_LINE: usize = 128;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Variable store
@@ -332,24 +332,24 @@ fn eval_expr(expr: &str, file_exists: Option<fn(&str) -> bool>) -> bool {
 
 /// A single buffered script line.
 #[derive(Copy, Clone)]
-struct ScriptLine {
+pub struct ScriptLine {
     data: [u8; MAX_LINE],
     len: usize,
 }
 
 impl ScriptLine {
-    const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self { data: [0u8; MAX_LINE], len: 0 }
     }
 
-    fn set(&mut self, s: &str) {
+    pub fn set(&mut self, s: &str) {
         let b = s.as_bytes();
         let take = if b.len() > MAX_LINE { MAX_LINE } else { b.len() };
         self.data[..take].copy_from_slice(&b[..take]);
         self.len = take;
     }
 
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(&self.data[..self.len]) }
     }
 }
@@ -422,6 +422,14 @@ pub struct ScriptCtx {
     pub buffering: bool,
     /// Depth when buffering started.
     pub buf_start_depth: usize,
+    /// Nested while/for opens seen while buffering (0 = at outer block level).
+    pub buf_nest: usize,
+    /// Set by `break` during a loop replay; unwinds the innermost loop.
+    pub loop_break: bool,
+    /// Set by `continue` during a loop replay; skips remainder of body.
+    pub loop_continue: bool,
+    /// Set by `return`/`exit`; terminates script execution.
+    pub script_exit: bool,
 }
 
 impl ScriptCtx {
@@ -436,6 +444,10 @@ impl ScriptCtx {
             pc: 0,
             buffering: false,
             buf_start_depth: 0,
+            buf_nest: 0,
+            loop_break: false,
+            loop_continue: false,
+            script_exit: false,
         }
     }
 

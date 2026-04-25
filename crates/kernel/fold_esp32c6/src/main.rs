@@ -575,6 +575,94 @@ struct SensorCell(UnsafeCell<SensorArray>);
 unsafe impl Sync for SensorCell {}
 static SENSORS: SensorCell = SensorCell(UnsafeCell::new(SensorArray::new()));
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Virtual GPIO Subsystem (fold-specific, feature = "gpio-sim")
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Mirrors the virtual sensor subsystem. Provides `gpio` shell commands and
+// emits `[actuator]` sentinel lines on writes so the EdgeFabric API can
+// broadcast GPIO state changes to the dashboard Live Viewer in real-time.
+//
+// Layout chosen to match the Seeed Xiao ESP32-C6 (30 logical GPIOs, though
+// only pins 0..23 are exposed on the module). Pin 15 is the onboard LED.
+
+#[cfg(feature = "gpio-sim")]
+const MAX_GPIO_PINS: usize = 30;
+#[cfg(feature = "gpio-sim")]
+const ONBOARD_LED_PIN: usize = 15;
+
+#[cfg(feature = "gpio-sim")]
+#[derive(Copy, Clone, PartialEq)]
+enum GpioMode { Input, Output }
+#[cfg(feature = "gpio-sim")]
+#[derive(Copy, Clone, PartialEq)]
+enum GpioPull { None, Up, Down }
+
+#[cfg(feature = "gpio-sim")]
+struct GpioPinState {
+    mode: GpioMode,
+    level: u8,    // 0 or 1
+    pull: GpioPull,
+}
+
+#[cfg(feature = "gpio-sim")]
+impl GpioPinState {
+    const fn new() -> Self {
+        Self { mode: GpioMode::Input, level: 0, pull: GpioPull::None }
+    }
+}
+
+#[cfg(feature = "gpio-sim")]
+struct GpioArray {
+    pins: [GpioPinState; MAX_GPIO_PINS],
+}
+
+#[cfg(feature = "gpio-sim")]
+impl GpioArray {
+    const fn new() -> Self {
+        const P: GpioPinState = GpioPinState::new();
+        Self { pins: [P; MAX_GPIO_PINS] }
+    }
+
+    fn init_defaults(&mut self) {
+        // Onboard LED: output, level 0.
+        self.pins[ONBOARD_LED_PIN].mode = GpioMode::Output;
+        self.pins[ONBOARD_LED_PIN].level = 0;
+    }
+
+    fn write_list(&self, w: &mut dyn core::fmt::Write) {
+        let _ = writeln!(w, "  PIN  MODE  LEVEL  PULL   NOTE");
+        let _ = writeln!(w, "  ───  ────  ─────  ─────  ────");
+        for (i, p) in self.pins.iter().enumerate() {
+            let mode = match p.mode { GpioMode::Input => "in ", GpioMode::Output => "out" };
+            let pull = match p.pull { GpioPull::None => "none", GpioPull::Up => "up  ", GpioPull::Down => "down" };
+            let note = if i == ONBOARD_LED_PIN { "onboard LED" } else { "" };
+            let _ = writeln!(w, "  {:>3}  {}   {:>3}    {}   {}", i, mode, p.level, pull, note);
+        }
+    }
+
+    fn parse_pin(s: &str) -> Option<usize> {
+        let mut n: usize = 0;
+        let mut any = false;
+        for b in s.trim().bytes() {
+            if b.is_ascii_digit() {
+                n = n.wrapping_mul(10).wrapping_add((b - b'0') as usize);
+                any = true;
+            } else {
+                return None;
+            }
+        }
+        if any && n < MAX_GPIO_PINS { Some(n) } else { None }
+    }
+}
+
+#[cfg(feature = "gpio-sim")]
+struct GpioCell(UnsafeCell<GpioArray>);
+#[cfg(feature = "gpio-sim")]
+unsafe impl Sync for GpioCell {}
+#[cfg(feature = "gpio-sim")]
+static GPIOS: GpioCell = GpioCell(UnsafeCell::new(GpioArray::new()));
+
 // ---------------------------------------------------------------------------
 // Idle task
 // ---------------------------------------------------------------------------
@@ -963,9 +1051,12 @@ fn build_shell_env(pre_auth: bool) -> ShellEnv {
         input_status: Some(input_status),
         usb_list: None,
         ble_hid_list: None,
+        #[cfg(feature = "gpio-sim")]
+        gpio_cmd: Some(gpio_command),
+        #[cfg(not(feature = "gpio-sim"))]
         gpio_cmd: None,
-        i2c_cmd: None,
-        spi_cmd: None,
+        i2c_cmd: Some(i2c_command),
+        spi_cmd: Some(spi_command),
         hw_info: Some(hw_info),
         get_temp_millic: Some(get_temp_millic),
         dmesg: Some(dmesg_info),
@@ -1009,6 +1100,7 @@ fn build_shell_env(pre_auth: bool) -> ShellEnv {
         mesh_cmd: None,
         zkp_cmd: None,
         hostname_cmd: None,
+        sleep_ms: Some(sleep_ms_impl),
     }
 }
 
@@ -1559,6 +1651,475 @@ fn sensor_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "    sensor set <name> <value>  Inject value (value*100)");
             let _ = writeln!(w, "    sensor status              Subsystem status");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPIO shell command (feature = "gpio-sim")
+// ---------------------------------------------------------------------------
+//
+// Wired into `ShellEnv.gpio_cmd`. All subcommands operate on the in-memory
+// GpioArray. On writes, we also emit a single `[actuator]` line to stdout.
+// The EdgeFabric API sniffs this prefix on the shell WS bridge and publishes
+// a SensorFrame so the dashboard Live Viewer animates in real-time.
+
+#[cfg(all(feature = "shell", feature = "gpio-sim"))]
+fn gpio_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    let gpios = unsafe { &mut *GPIOS.0.get() };
+
+    match sub {
+        "" | "list" | "ls" => { gpios.write_list(w); }
+
+        "read" => {
+            let pin = match GpioArray::parse_pin(args) {
+                Some(p) => p,
+                None => { let _ = writeln!(w, "  usage: gpio read <pin>"); return; }
+            };
+            let _ = writeln!(w, "  gpio{} = {}", pin, gpios.pins[pin].level);
+        }
+
+        "write" => {
+            // gpio write <pin> <0|1>
+            let (pin_s, val_s) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => { let _ = writeln!(w, "  usage: gpio write <pin> <0|1>"); return; }
+            };
+            let pin = match GpioArray::parse_pin(pin_s) {
+                Some(p) => p,
+                None => { let _ = writeln!(w, "  invalid pin '{}'", pin_s); return; }
+            };
+            let val: u8 = match val_s {
+                "0" | "low" | "LOW"   => 0,
+                "1" | "high" | "HIGH" => 1,
+                _ => { let _ = writeln!(w, "  invalid level '{}' (expected 0 or 1)", val_s); return; }
+            };
+            if gpios.pins[pin].mode != GpioMode::Output {
+                let _ = writeln!(w, "  warning: gpio{} is not in output mode (auto-switching)", pin);
+                gpios.pins[pin].mode = GpioMode::Output;
+            }
+            gpios.pins[pin].level = val;
+            let _ = writeln!(w, "  gpio{} <- {}", pin, val);
+            // Actuator sentinel — the host sniffs this on the shell stream.
+            let _ = writeln!(w, "[actuator] gpio.{}={}", pin, val);
+        }
+
+        "mode" => {
+            // gpio mode <pin> <in|out>
+            let (pin_s, mode_s) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => { let _ = writeln!(w, "  usage: gpio mode <pin> <in|out>"); return; }
+            };
+            let pin = match GpioArray::parse_pin(pin_s) {
+                Some(p) => p,
+                None => { let _ = writeln!(w, "  invalid pin '{}'", pin_s); return; }
+            };
+            let mode = match mode_s {
+                "in"  | "input"  => GpioMode::Input,
+                "out" | "output" => GpioMode::Output,
+                _ => { let _ = writeln!(w, "  invalid mode '{}' (expected in|out)", mode_s); return; }
+            };
+            gpios.pins[pin].mode = mode;
+            let _ = writeln!(w, "  gpio{} mode={}", pin, mode_s);
+        }
+
+        "pull" => {
+            let (pin_s, pull_s) = match args.find(' ') {
+                Some(i) => (&args[..i], args[i + 1..].trim()),
+                None => { let _ = writeln!(w, "  usage: gpio pull <pin> <none|up|down>"); return; }
+            };
+            let pin = match GpioArray::parse_pin(pin_s) {
+                Some(p) => p,
+                None => { let _ = writeln!(w, "  invalid pin '{}'", pin_s); return; }
+            };
+            let pull = match pull_s {
+                "none" => GpioPull::None,
+                "up"   => GpioPull::Up,
+                "down" => GpioPull::Down,
+                _ => { let _ = writeln!(w, "  invalid pull '{}' (expected none|up|down)", pull_s); return; }
+            };
+            gpios.pins[pin].pull = pull;
+            let _ = writeln!(w, "  gpio{} pull={}", pin, pull_s);
+        }
+
+        "toggle" => {
+            let pin = match GpioArray::parse_pin(args) {
+                Some(p) => p,
+                None => { let _ = writeln!(w, "  usage: gpio toggle <pin>"); return; }
+            };
+            if gpios.pins[pin].mode != GpioMode::Output {
+                gpios.pins[pin].mode = GpioMode::Output;
+            }
+            gpios.pins[pin].level ^= 1;
+            let v = gpios.pins[pin].level;
+            let _ = writeln!(w, "  gpio{} <- {}", pin, v);
+            let _ = writeln!(w, "[actuator] gpio.{}={}", pin, v);
+        }
+
+        _ => {
+            let _ = writeln!(w, "  gpio subcommands:");
+            let _ = writeln!(w, "    gpio list                         List all pins");
+            let _ = writeln!(w, "    gpio read <pin>                   Read pin level");
+            let _ = writeln!(w, "    gpio write <pin> <0|1>            Drive output pin");
+            let _ = writeln!(w, "    gpio toggle <pin>                 Toggle output pin");
+            let _ = writeln!(w, "    gpio mode <pin> <in|out>          Set direction");
+            let _ = writeln!(w, "    gpio pull <pin> <none|up|down>    Set pull resistor");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sleep_ms — blocking wait via CLINT mtime
+// ---------------------------------------------------------------------------
+
+/// CLINT timer frequency (QEMU virt). Must match soc/qemu_virt clint.rs.
+const SLEEP_CLINT_FREQ_HZ: u64 = 10_000_000;
+
+/// Blocking sleep by spinning on mtime. Caps at 60 s to avoid kernel hang.
+fn sleep_ms_impl(ms: u64) {
+    let ms = ms.min(60_000);
+    if ms == 0 { return; }
+    let timer = unsafe { &*TIMER.0.get() };
+    let ticks_per_ms = SLEEP_CLINT_FREQ_HZ / 1000;
+    let target = timer.mtime().wrapping_add(ms.saturating_mul(ticks_per_ms));
+    // Busy-wait. Cooperative tasks on other cores keep running; on a
+    // single-core QEMU, this blocks the shell task until expiry.
+    while timer.mtime() < target {
+        core::hint::spin_loop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simulated I2C bus (shell `i2c` command)
+// ---------------------------------------------------------------------------
+//
+// Emulates up to 2 I2C buses, each with a handful of "devices" at the
+// common addresses used by public sensors/chips. Reads/writes hit a small
+// register bank so scripts can drive deterministic behaviour.
+
+const I2C_N_BUSES: usize = 2;
+const I2C_N_DEVS: usize = 8;
+const I2C_N_REGS: usize = 256;
+
+struct I2cDev {
+    addr: u8,
+    present: bool,
+    regs: [u8; I2C_N_REGS],
+    name: &'static str,
+}
+
+impl I2cDev {
+    const fn empty() -> Self {
+        Self { addr: 0, present: false, regs: [0u8; I2C_N_REGS], name: "" }
+    }
+}
+
+struct I2cBus {
+    freq_hz: u32,
+    devs: [I2cDev; I2C_N_DEVS],
+}
+
+impl I2cBus {
+    const fn empty() -> Self {
+        const E: I2cDev = I2cDev::empty();
+        Self { freq_hz: 100_000, devs: [E; I2C_N_DEVS] }
+    }
+}
+
+struct I2cSim {
+    buses: [I2cBus; I2C_N_BUSES],
+    initialised: bool,
+}
+
+impl I2cSim {
+    const fn new() -> Self {
+        const B: I2cBus = I2cBus::empty();
+        Self { buses: [B; I2C_N_BUSES], initialised: false }
+    }
+
+    fn init_defaults(&mut self) {
+        if self.initialised { return; }
+        // Bus 0: populate typical sensor suite.
+        let defaults: &[(u8, &str)] = &[
+            (0x48, "tmp102"),   // temperature
+            (0x68, "mpu6050"),  // IMU
+            (0x76, "bme280"),   // env sensor
+            (0x3c, "ssd1306"),  // OLED
+        ];
+        for (i, (addr, name)) in defaults.iter().enumerate() {
+            if i >= I2C_N_DEVS { break; }
+            let d = &mut self.buses[0].devs[i];
+            d.addr = *addr;
+            d.present = true;
+            d.name = name;
+            // Preload a distinctive pattern.
+            for r in 0..I2C_N_REGS {
+                d.regs[r] = addr.wrapping_add(r as u8);
+            }
+        }
+        self.initialised = true;
+    }
+
+    fn find<'a>(&'a self, bus: usize, addr: u8) -> Option<&'a I2cDev> {
+        if bus >= I2C_N_BUSES { return None; }
+        self.buses[bus].devs.iter().find(|d| d.present && d.addr == addr)
+    }
+
+    fn find_mut<'a>(&'a mut self, bus: usize, addr: u8) -> Option<&'a mut I2cDev> {
+        if bus >= I2C_N_BUSES { return None; }
+        self.buses[bus].devs.iter_mut().find(|d| d.present && d.addr == addr)
+    }
+}
+
+struct I2cCell(UnsafeCell<I2cSim>);
+unsafe impl Sync for I2cCell {}
+static I2C: I2cCell = I2cCell(UnsafeCell::new(I2cSim::new()));
+
+fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    let sim = unsafe { &mut *I2C.0.get() };
+    sim.init_defaults();
+
+    // Helpers.
+    let parse_u8_any = |s: &str| -> Option<u8> {
+        let s = s.trim();
+        if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u8::from_str_radix(h, 16).ok()
+        } else {
+            s.parse::<u8>().ok()
+        }
+    };
+    let parse_usize_any = |s: &str| -> Option<usize> {
+        let s = s.trim();
+        if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            usize::from_str_radix(h, 16).ok()
+        } else {
+            s.parse::<usize>().ok()
+        }
+    };
+
+    match sub {
+        "" | "help" => {
+            let _ = writeln!(w, "i2c commands:");
+            let _ = writeln!(w, "  i2c scan [bus]                 List devices on bus (default 0)");
+            let _ = writeln!(w, "  i2c list                       Same as scan (bus 0)");
+            let _ = writeln!(w, "  i2c read <bus> <addr> <reg>    Read one register (addr/reg hex OK)");
+            let _ = writeln!(w, "  i2c write <bus> <addr> <reg> <val>   Write register");
+            let _ = writeln!(w, "  i2c probe <bus> <addr>         Check if a device answers");
+            let _ = writeln!(w, "  i2c freq <bus> <hz>            Set bus clock");
+            let _ = writeln!(w, "  i2c status                     Show bus summary");
+        }
+        "scan" | "list" => {
+            let bus = args.trim().parse::<usize>().unwrap_or(0);
+            if bus >= I2C_N_BUSES {
+                let _ = writeln!(w, "i2c: invalid bus {}", bus);
+                return;
+            }
+            let _ = writeln!(w, "bus {}: freq {} Hz", bus, sim.buses[bus].freq_hz);
+            let _ = writeln!(w, "   addr  name");
+            let _ = writeln!(w, "   ----  --------");
+            let mut n = 0;
+            for d in sim.buses[bus].devs.iter() {
+                if d.present {
+                    let _ = writeln!(w, "   0x{:02x}  {}", d.addr, d.name);
+                    n += 1;
+                }
+            }
+            let _ = writeln!(w, "({} device{} found)", n, if n == 1 { "" } else { "s" });
+        }
+        "probe" => {
+            let mut it = args.split_whitespace();
+            let bus = it.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            let addr = it.next().and_then(parse_u8_any);
+            match addr {
+                Some(a) if sim.find(bus, a).is_some() => {
+                    let _ = writeln!(w, "i2c bus {}: 0x{:02x} ACK", bus, a);
+                }
+                Some(a) => {
+                    let _ = writeln!(w, "i2c bus {}: 0x{:02x} NAK", bus, a);
+                }
+                None => { let _ = writeln!(w, "i2c probe: need <bus> <addr>"); }
+            }
+        }
+        "read" => {
+            let mut it = args.split_whitespace();
+            let bus = it.next().and_then(|s| s.parse::<usize>().ok());
+            let addr = it.next().and_then(parse_u8_any);
+            let reg = it.next().and_then(parse_usize_any);
+            match (bus, addr, reg) {
+                (Some(b), Some(a), Some(r)) => {
+                    if r >= I2C_N_REGS {
+                        let _ = writeln!(w, "i2c read: reg 0x{:x} out of range", r);
+                        return;
+                    }
+                    match sim.find(b, a) {
+                        Some(d) => {
+                            let _ = writeln!(w, "0x{:02x}", d.regs[r]);
+                        }
+                        None => { let _ = writeln!(w, "i2c read: no device at bus {} addr 0x{:02x}", b, a); }
+                    }
+                }
+                _ => { let _ = writeln!(w, "i2c read: usage: i2c read <bus> <addr> <reg>"); }
+            }
+        }
+        "write" => {
+            let mut it = args.split_whitespace();
+            let bus = it.next().and_then(|s| s.parse::<usize>().ok());
+            let addr = it.next().and_then(parse_u8_any);
+            let reg = it.next().and_then(parse_usize_any);
+            let val = it.next().and_then(parse_u8_any);
+            match (bus, addr, reg, val) {
+                (Some(b), Some(a), Some(r), Some(v)) => {
+                    if r >= I2C_N_REGS {
+                        let _ = writeln!(w, "i2c write: reg 0x{:x} out of range", r);
+                        return;
+                    }
+                    match sim.find_mut(b, a) {
+                        Some(d) => {
+                            d.regs[r] = v;
+                            let _ = writeln!(w, "[actuator] i2c.{}.0x{:02x}.0x{:02x}=0x{:02x}", b, a, r, v);
+                        }
+                        None => { let _ = writeln!(w, "i2c write: no device at bus {} addr 0x{:02x}", b, a); }
+                    }
+                }
+                _ => { let _ = writeln!(w, "i2c write: usage: i2c write <bus> <addr> <reg> <val>"); }
+            }
+        }
+        "freq" => {
+            let mut it = args.split_whitespace();
+            let bus = it.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            let hz = it.next().and_then(|s| s.parse::<u32>().ok());
+            match hz {
+                Some(h) if bus < I2C_N_BUSES => {
+                    sim.buses[bus].freq_hz = h;
+                    let _ = writeln!(w, "i2c bus {} freq = {} Hz", bus, h);
+                }
+                _ => { let _ = writeln!(w, "i2c freq: usage: i2c freq <bus> <hz>"); }
+            }
+        }
+        "status" => {
+            for (i, b) in sim.buses.iter().enumerate() {
+                let present: usize = b.devs.iter().filter(|d| d.present).count();
+                let _ = writeln!(w, "  bus {}: {} Hz, {} device(s)", i, b.freq_hz, present);
+            }
+        }
+        _ => { let _ = writeln!(w, "i2c: unknown subcommand '{}'", sub); }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simulated SPI bus (shell `spi` command)
+// ---------------------------------------------------------------------------
+
+const SPI_N_BUSES: usize = 2;
+
+struct SpiBus {
+    mode: u8,      // 0..=3
+    freq_hz: u32,
+    bits: u8,      // 8 or 16
+    /// Loopback MISO pattern: what the "slave" returns on xfer.
+    /// Default: echo the outgoing byte XOR 0xAA.
+    echo_xor: u8,
+}
+
+impl SpiBus {
+    const fn empty() -> Self {
+        Self { mode: 0, freq_hz: 1_000_000, bits: 8, echo_xor: 0xAA }
+    }
+}
+
+struct SpiSim {
+    buses: [SpiBus; SPI_N_BUSES],
+}
+
+impl SpiSim {
+    const fn new() -> Self {
+        const B: SpiBus = SpiBus::empty();
+        Self { buses: [B; SPI_N_BUSES] }
+    }
+}
+
+struct SpiCell(UnsafeCell<SpiSim>);
+unsafe impl Sync for SpiCell {}
+static SPI: SpiCell = SpiCell(UnsafeCell::new(SpiSim::new()));
+
+fn spi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
+    let sim = unsafe { &mut *SPI.0.get() };
+    match sub {
+        "" | "help" => {
+            let _ = writeln!(w, "spi commands:");
+            let _ = writeln!(w, "  spi status                            Show buses");
+            let _ = writeln!(w, "  spi cfg <bus> <mode> <freq> [bits]    Configure bus");
+            let _ = writeln!(w, "  spi xfer <bus> <hex-bytes>            Full-duplex transfer");
+            let _ = writeln!(w, "  spi echo <bus> <xor>                  Loopback XOR mask (hex)");
+        }
+        "status" => {
+            for (i, b) in sim.buses.iter().enumerate() {
+                let _ = writeln!(w, "  bus {}: mode={} freq={} Hz bits={} echo_xor=0x{:02x}",
+                    i, b.mode, b.freq_hz, b.bits, b.echo_xor);
+            }
+        }
+        "cfg" => {
+            let mut it = args.split_whitespace();
+            let bus = it.next().and_then(|s| s.parse::<usize>().ok());
+            let mode = it.next().and_then(|s| s.parse::<u8>().ok());
+            let freq = it.next().and_then(|s| s.parse::<u32>().ok());
+            let bits = it.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(8);
+            match (bus, mode, freq) {
+                (Some(b), Some(m), Some(f)) if b < SPI_N_BUSES && m <= 3 && (bits == 8 || bits == 16) => {
+                    sim.buses[b].mode = m;
+                    sim.buses[b].freq_hz = f;
+                    sim.buses[b].bits = bits;
+                    let _ = writeln!(w, "spi bus {}: mode {} freq {} bits {}", b, m, f, bits);
+                }
+                _ => { let _ = writeln!(w, "spi cfg: usage: spi cfg <bus> <mode 0..3> <freq> [bits 8|16]"); }
+            }
+        }
+        "echo" => {
+            let mut it = args.split_whitespace();
+            let bus = it.next().and_then(|s| s.parse::<usize>().ok());
+            let xor = it.next().and_then(|s| {
+                let t = s.trim_start_matches("0x").trim_start_matches("0X");
+                u8::from_str_radix(t, 16).ok()
+            });
+            match (bus, xor) {
+                (Some(b), Some(x)) if b < SPI_N_BUSES => {
+                    sim.buses[b].echo_xor = x;
+                    let _ = writeln!(w, "spi bus {} echo_xor = 0x{:02x}", b, x);
+                }
+                _ => { let _ = writeln!(w, "spi echo: usage: spi echo <bus> <hex-mask>"); }
+            }
+        }
+        "xfer" => {
+            let mut it = args.split_whitespace();
+            let bus = match it.next().and_then(|s| s.parse::<usize>().ok()) {
+                Some(b) if b < SPI_N_BUSES => b,
+                _ => { let _ = writeln!(w, "spi xfer: need valid bus"); return; }
+            };
+            let hex = it.next().unwrap_or("");
+            if hex.is_empty() || hex.len() % 2 != 0 {
+                let _ = writeln!(w, "spi xfer: need even-length hex payload (e.g. 9f00ffff)");
+                return;
+            }
+            let xor = sim.buses[bus].echo_xor;
+            // Stream MOSI bytes, print MISO bytes. Cap to 64 bytes per call.
+            let max_bytes = 64usize;
+            let bytes = (hex.len() / 2).min(max_bytes);
+            let _ = write!(w, "MOSI: ");
+            let mut in_buf = [0u8; 64];
+            for i in 0..bytes {
+                let pair = &hex[i * 2..i * 2 + 2];
+                let b = u8::from_str_radix(pair, 16).unwrap_or(0);
+                in_buf[i] = b;
+                let _ = write!(w, "{:02x}", b);
+            }
+            let _ = writeln!(w, "");
+            let _ = write!(w, "MISO: ");
+            for i in 0..bytes {
+                let _ = write!(w, "{:02x}", in_buf[i] ^ xor);
+            }
+            let _ = writeln!(w, "");
+            let _ = writeln!(w, "[actuator] spi.{}.xfer={}B", bus, bytes);
+        }
+        _ => { let _ = writeln!(w, "spi: unknown subcommand '{}'", sub); }
     }
 }
 
@@ -2240,6 +2801,15 @@ pub extern "C" fn _rust_start() -> ! {
                         let name = core::str::from_utf8(&s.name[..s.name_len]).unwrap_or("unknown");
                         inodes.create_device_in(sensor_dir, name, 2, 0);
                     }
+                }
+
+                // Virtual GPIO subsystem: seed default pin states. Onboard LED
+                // is on GPIO 15 (Xiao ESP32-C6 convention), pre-configured as
+                // an output driving LOW.
+                #[cfg(feature = "gpio-sim")]
+                {
+                    let gpios = &mut *GPIOS.0.get();
+                    gpios.init_defaults();
                 }
             }
         }

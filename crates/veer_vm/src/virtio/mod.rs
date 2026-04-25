@@ -53,7 +53,8 @@ pub struct VringDesc {
 }
 
 /// Per-queue state inside the VMM.
-#[derive(Default)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 pub struct QueueState {
     /// PFN programmed by the guest (0 = not configured).
     pub pfn: u32,
@@ -63,6 +64,16 @@ pub struct QueueState {
     pub last_avail_idx: u16,
     /// Next used.idx we will write (monotonic wrapping u16).
     pub next_used_idx: u16,
+}
+
+#[derive(Clone)]
+pub struct VirtioTransportSnapshot {
+    pub device_features: u32,
+    pub guest_features: u32,
+    pub device_status: u8,
+    pub isr_status: u8,
+    pub queue_select: u16,
+    pub queues: Vec<QueueState>,
 }
 
 impl QueueState {
@@ -163,6 +174,34 @@ impl VirtioTransport {
             REG_DEVICE_STATUS => { self.device_status = val as u8; }
             _ => { /* device_features, queue_size, isr are RO; ignore */ }
         }
+    }
+
+    pub fn snapshot(&self) -> VirtioTransportSnapshot {
+        VirtioTransportSnapshot {
+            device_features: self.device_features,
+            guest_features: self.guest_features,
+            device_status: self.device_status,
+            isr_status: self.isr_status,
+            queue_select: self.queue_select,
+            queues: self.queues.clone(),
+        }
+    }
+
+    pub fn restore(&mut self, snap: &VirtioTransportSnapshot) -> Result<()> {
+        if self.queues.len() != snap.queues.len() {
+            bail!(
+                "virtio queue count mismatch: snapshot={} device={}",
+                snap.queues.len(),
+                self.queues.len()
+            );
+        }
+        self.device_features = snap.device_features;
+        self.guest_features = snap.guest_features;
+        self.device_status = snap.device_status;
+        self.isr_status = snap.isr_status;
+        self.queue_select = snap.queue_select;
+        self.queues.copy_from_slice(&snap.queues);
+        Ok(())
     }
 }
 

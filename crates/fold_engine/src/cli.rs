@@ -1,6 +1,6 @@
 //! `fold` CLI definition (clap derive).
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -61,13 +61,24 @@ pub enum VmCmd {
     /// Spawn a VeerOS microVM inside a fresh Fold (namespaces + seccomp +
     /// cgroups) and return immediately. Stream output with `fold logs <name>`.
     Spawn {
-        /// Path to the guest kernel ELF (e.g. the qemu_pc build output).
+        /// Path to the guest boot image.
+        ///
+        /// Accepts either a Multiboot ELF or a VeerOS ISO containing
+        /// `/boot/kernel.elf`.
         #[arg(long)]
         kernel: PathBuf,
 
         /// Guest memory, in MiB.
         #[arg(long, default_value_t = 128)]
         memory: usize,
+
+        /// Guest architecture passed through to `veer-vm --arch`.
+        #[arg(long, value_enum, default_value_t = VmArchArg::X8664)]
+        arch: VmArchArg,
+
+        /// Host TAP interface passed through to `veer-vm --tap`.
+        #[arg(long)]
+        tap: Option<String>,
 
         /// Fold name. Defaults to `veeros-vm-<6-hex>`.
         #[arg(long, short)]
@@ -99,4 +110,72 @@ pub enum VmCmd {
         #[arg(long)]
         pids_max: Option<u64>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum VmArchArg {
+    #[value(name = "x86_64")]
+    X8664,
+    #[value(name = "riscv32")]
+    Riscv32,
+}
+
+impl VmArchArg {
+    pub fn as_cli_value(self) -> &'static str {
+        match self {
+            VmArchArg::X8664 => "x86_64",
+            VmArchArg::Riscv32 => "riscv32",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vm_spawn_parses_tap_flag() {
+        let cli = Cli::try_parse_from([
+            "fold",
+            "vm",
+            "spawn",
+            "--kernel",
+            "/tmp/kernel.elf",
+            "--arch",
+            "riscv32",
+            "--memory",
+            "256",
+            "--tap",
+            "tap0",
+        ])
+        .unwrap();
+
+        match cli.cmd {
+            Cmd::Vm { cmd: VmCmd::Spawn { tap, arch, memory, .. } } => {
+                assert_eq!(tap.as_deref(), Some("tap0"));
+                assert_eq!(arch, VmArchArg::Riscv32);
+                assert_eq!(memory, 256);
+            }
+            _ => panic!("parsed wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn vm_spawn_defaults_tap_to_none() {
+        let cli = Cli::try_parse_from([
+            "fold",
+            "vm",
+            "spawn",
+            "--kernel",
+            "/tmp/kernel.elf",
+        ])
+        .unwrap();
+
+        match cli.cmd {
+            Cmd::Vm { cmd: VmCmd::Spawn { tap, .. } } => {
+                assert!(tap.is_none());
+            }
+            _ => panic!("parsed wrong command variant"),
+        }
+    }
 }

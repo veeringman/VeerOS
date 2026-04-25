@@ -9,8 +9,12 @@
 //!           --memory 128
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+
+mod backend;
+mod config;
+mod irq;
 
 #[cfg(target_os = "linux")]
 mod elf;
@@ -25,9 +29,13 @@ mod pci;
 #[cfg(target_os = "linux")]
 mod serial;
 #[cfg(target_os = "linux")]
+mod snapshot;
+#[cfg(target_os = "linux")]
 mod termios_guard;
 #[cfg(target_os = "linux")]
 mod virtio;
+#[cfg(target_os = "linux")]
+mod rv32_soft;
 #[cfg(target_os = "linux")]
 mod vm;
 
@@ -40,7 +48,15 @@ struct Cli {
     /// - a Multiboot v1-compatible kernel ELF, or
     /// - a VeerOS ISO containing `/boot/kernel.elf`.
     #[arg(long)]
-    kernel: PathBuf,
+    kernel: Option<PathBuf>,
+
+    /// Restore from a snapshot directory created by `--snapshot-save`.
+    #[arg(long, conflicts_with = "kernel")]
+    restore: Option<PathBuf>,
+
+    /// Save a snapshot directory when the VM shuts down cleanly.
+    #[arg(long)]
+    snapshot_save: Option<PathBuf>,
 
     /// Guest memory size, in MiB.
     #[arg(long, default_value_t = 128)]
@@ -64,8 +80,50 @@ struct Cli {
 
     /// MAC address to advertise to the guest (format `aa:bb:cc:dd:ee:ff`).
     /// Defaults to a locally-administered, randomly-seeded address.
+    /// When restoring with `--tap` and no `--mac`, the MAC saved in the
+    /// snapshot is reused automatically.
     #[arg(long)]
     mac: Option<String>,
+
+    /// Guest architecture.
+    #[arg(long, value_enum, default_value_t = ArchArg::X8664)]
+    arch: ArchArg,
+
+    /// Busy-loop throttle sleep (milliseconds) for riscv32 software mode.
+    ///
+    /// Applies only to `--arch riscv32` on non-riscv64 hosts (rv32-soft).
+    /// When the guest stays runnable and does not block in WFI, veer-vm
+    /// sleeps this long per throttle cycle to reduce host CPU usage.
+    ///
+    /// `0` disables the busy-loop throttle.
+    #[arg(long, default_value_t = 4)]
+    cpu_throttle_ms: u64,
+
+    /// Path to a named pipe (FIFO) for sensor injection.
+    ///
+    /// When provided, a background thread reads lines from this FIFO and
+    /// forwards them to the guest UART RX queue (as if typed at the console).
+    /// This lets EdgeFabric inject `sensor set <name> <value>\n` commands
+    /// into the running VeerOS guest without a network connection.
+    #[arg(long)]
+    sensor_feed: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ArchArg {
+    #[value(name = "x86_64")]
+    X8664,
+    #[value(name = "riscv32")]
+    Riscv32,
+}
+
+impl ArchArg {
+    fn to_guest_arch(self) -> config::GuestArch {
+        match self {
+            ArchArg::X8664 => config::GuestArch::X86_64,
+            ArchArg::Riscv32 => config::GuestArch::Riscv32,
+        }
+    }
 }
 
 fn parse_mac(s: &str) -> Result<[u8; 6]> {
@@ -103,17 +161,44 @@ fn default_mac() -> [u8; 6] {
 fn main() -> Result<()> {
     use anyhow::Context;
     let cli = Cli::parse();
+    let restore_path = cli.restore.clone();
+    let boot = match (cli.kernel, cli.restore) {
+        (Some(kernel), None) => config::BootSource::Kernel(kernel),
+        (None, Some(snapshot)) => config::BootSource::Snapshot(snapshot),
+        (Some(_), Some(_)) => anyhow::bail!("pass either --kernel or --restore, not both"),
+        (None, None) => anyhow::bail!("one of --kernel or --restore is required"),
+    };
     let mac = match &cli.mac {
         Some(s) => parse_mac(s).context("parsing --mac")?,
-        None => default_mac(),
+        None => {
+            if cli.tap.is_some() {
+                if let Some(path) = restore_path.as_deref() {
+                    if let Some(snapshot_mac) = snapshot::load_net_mac(path)
+                        .with_context(|| format!("reading snapshot net MAC from {}", path.display()))?
+                    {
+                        snapshot_mac
+                    } else {
+                        default_mac()
+                    }
+                } else {
+                    default_mac()
+                }
+            } else {
+                default_mac()
+            }
+        }
     };
-    let cfg = vm::VmConfig {
-        kernel_path: cli.kernel,
+    let cfg = config::VmConfig {
+        boot,
+        guest_arch: cli.arch.to_guest_arch(),
         memory_bytes: cli.memory * 1024 * 1024,
         disk_path: cli.disk,
         disk_read_only: cli.disk_ro,
         tap_name: cli.tap,
         mac,
+        snapshot_save: cli.snapshot_save,
+        cpu_throttle_ms: cli.cpu_throttle_ms,
+        sensor_feed: cli.sensor_feed,
     };
     vm::run(cfg)
 }

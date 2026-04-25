@@ -19,6 +19,7 @@ use std::os::unix::io::RawFd;
 use crate::memory::GuestMem;
 use super::{
     pop_avail, push_used, walk_chain, VirtioDevice, VirtioTransport,
+    VirtioTransportSnapshot,
 };
 
 /// Legacy virtio_net_hdr (10 bytes — no VIRTIO_NET_F_MRG_RXBUF).
@@ -36,6 +37,13 @@ pub struct VirtioNet {
     tap_fd: RawFd,
     /// Name of the TAP interface (for logging).
     tap_name: String,
+}
+
+#[derive(Clone)]
+pub struct VirtioNetSnapshot {
+    pub transport: VirtioTransportSnapshot,
+    pub mac: [u8; 6],
+    pub tap_name: String,
 }
 
 impl Drop for VirtioNet {
@@ -100,6 +108,33 @@ impl VirtioNet {
 
     pub fn mac(&self) -> [u8; 6] { self.mac }
     pub fn tap_name(&self) -> &str { &self.tap_name }
+
+    pub fn snapshot_state(&self) -> VirtioNetSnapshot {
+        VirtioNetSnapshot {
+            transport: self.transport.snapshot(),
+            mac: self.mac,
+            tap_name: self.tap_name.clone(),
+        }
+    }
+
+    pub fn restore_state(&mut self, snap: &VirtioNetSnapshot) -> Result<()> {
+        if self.mac != snap.mac {
+            bail!(
+                "virtio-net MAC mismatch: snapshot={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} \
+device={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                snap.mac[0], snap.mac[1], snap.mac[2], snap.mac[3], snap.mac[4], snap.mac[5],
+                self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5],
+            );
+        }
+        if self.tap_name != snap.tap_name {
+            bail!(
+                "virtio-net tap mismatch: snapshot={} device={}",
+                snap.tap_name,
+                self.tap_name
+            );
+        }
+        self.transport.restore(&snap.transport)
+    }
 
     /// Clone the underlying TAP fd (via `dup(2)`) so the RX reader thread
     /// can own its own reference independent of the device's lifetime.

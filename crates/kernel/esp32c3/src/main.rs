@@ -523,6 +523,8 @@ fn shell_task() -> ! {
         #[cfg(not(feature = "ble"))]
         bt_cmd: None,
         zigbee_cmd: None,
+        sensor_cmd: None,
+        sensor_cmd: None,
         get_current_user: Some(get_current_user),
         get_user_list: Some(write_user_list),
         vfs_list_dir: Some(vfs_list_dir),
@@ -743,6 +745,8 @@ fn net_task() -> ! {
                         #[cfg(not(feature = "ble"))]
                         bt_cmd: None,
                         zigbee_cmd: None,
+        sensor_cmd: None,
+        sensor_cmd: None,
                         get_current_user: Some(get_current_user),
                         get_user_list: Some(write_user_list),
                         vfs_list_dir: Some(vfs_list_dir),

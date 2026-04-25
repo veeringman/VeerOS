@@ -9,11 +9,14 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::cli::VmArchArg;
 use crate::manifest::{Limits, Manifest, Namespaces, Seccomp};
 
 pub struct VmSpawnOpts {
     pub kernel: PathBuf,
     pub memory: usize,
+    pub arch: VmArchArg,
+    pub tap: Option<String>,
     pub name: Option<String>,
     pub vmm: Option<PathBuf>,
     pub user_ns: bool,
@@ -22,9 +25,9 @@ pub struct VmSpawnOpts {
 }
 
 pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
-    // ── 1. Resolve absolute kernel path ──────────────────────
+    // ── 1. Resolve absolute boot image path ──────────────────
     let kernel = opts.kernel.canonicalize()
-        .with_context(|| format!("kernel path not found: {}", opts.kernel.display()))?;
+        .with_context(|| format!("boot image path not found: {}", opts.kernel.display()))?;
 
     // ── 2. Locate `veer-vm` binary ───────────────────────────
     let vmm = match opts.vmm {
@@ -81,10 +84,15 @@ pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
     env.insert("TERM".into(), std::env::var("TERM").unwrap_or_else(|_| "dumb".into()));
 
     // ── 8. Arguments to veer-vm ──────────────────────────────
-    let args = vec![
+    let mut args = vec![
+        "--arch".into(), opts.arch.as_cli_value().into(),
         "--kernel".into(), kernel.to_string_lossy().into_owned(),
         "--memory".into(), opts.memory.to_string(),
     ];
+    if let Some(tap) = opts.tap {
+        args.push("--tap".into());
+        args.push(tap);
+    }
 
     Ok(Manifest {
         name,
@@ -101,15 +109,15 @@ pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
 }
 
 /// Hunt for the `veer-vm` binary in (in order):
-///   1. `$CARGO_WORKSPACE/target/release/veer-vm`
-///   2. `$CARGO_WORKSPACE/target/debug/veer-vm`
+///   1. `$CARGO_WORKSPACE/target/debug/veer-vm`
+///   2. `$CARGO_WORKSPACE/target/release/veer-vm`
 ///   3. `$PATH`
 fn locate_veer_vm() -> Result<PathBuf> {
     // (1) + (2): walk up from CWD looking for a `target/` sibling of a
     // Cargo.toml with `veer_vm` in the workspace.
     if let Ok(cwd) = std::env::current_dir() {
         for ancestor in cwd.ancestors() {
-            for sub in ["target/release/veer-vm", "target/debug/veer-vm"] {
+            for sub in ["target/debug/veer-vm", "target/release/veer-vm"] {
                 let p = ancestor.join(sub);
                 if p.is_file() {
                     return p.canonicalize()
@@ -154,4 +162,73 @@ fn random_vm_name() -> String {
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn mk_test_files() -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "fold-engine-vm-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&base).unwrap();
+
+        let kernel = base.join("kernel.elf");
+        let vmm = base.join("veer-vm");
+        fs::write(&kernel, b"k").unwrap();
+        fs::write(&vmm, b"v").unwrap();
+        (base, kernel, vmm)
+    }
+
+    #[test]
+    fn build_manifest_includes_tap_when_provided() {
+        let (base, kernel, vmm) = mk_test_files();
+        let manifest = build_manifest(VmSpawnOpts {
+            kernel,
+            memory: 128,
+            arch: VmArchArg::Riscv32,
+            tap: Some("tap0".to_string()),
+            name: Some("vm-test".to_string()),
+            vmm: Some(vmm),
+            user_ns: true,
+            memory_cap: None,
+            pids_max: None,
+        })
+        .unwrap();
+
+        assert!(manifest
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--tap" && w[1] == "tap0"));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn build_manifest_omits_tap_when_not_provided() {
+        let (base, kernel, vmm) = mk_test_files();
+        let manifest = build_manifest(VmSpawnOpts {
+            kernel,
+            memory: 128,
+            arch: VmArchArg::Riscv32,
+            tap: None,
+            name: Some("vm-test".to_string()),
+            vmm: Some(vmm),
+            user_ns: true,
+            memory_cap: None,
+            pids_max: None,
+        })
+        .unwrap();
+
+        assert!(!manifest.args.iter().any(|a| a == "--tap"));
+
+        let _ = fs::remove_dir_all(base);
+    }
 }

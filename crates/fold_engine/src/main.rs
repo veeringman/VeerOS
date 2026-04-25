@@ -116,15 +116,19 @@ fn cmd_rm(name: &str, force: bool) -> Result<()> {
 
 fn cmd_vm(cmd: VmCmd) -> Result<()> {
     match cmd {
-        VmCmd::Spawn { kernel, memory, name, vmm, user_ns, memory_cap, pids_max } => {
+        VmCmd::Spawn { kernel, memory, arch, tap, name, vmm, user_ns, memory_cap, pids_max } => {
             let manifest = vm::build_manifest(vm::VmSpawnOpts {
-                kernel, memory, name, vmm, user_ns, memory_cap, pids_max,
+                kernel, memory, arch, tap, name, vmm, user_ns, memory_cap, pids_max,
             })?;
             let engine = PlatformEngine::new();
             let rec = engine.spawn(manifest)?;
             println!("microVM {} spawned (pid {})", rec.name, rec.pid);
+            println!("  arch   : {}", arch_arg(&rec));
             println!("  kernel : {}", kernel_arg(&rec));
             println!("  memory : {} MiB", memory_arg(&rec));
+            if let Some(tap) = tap_arg(&rec) {
+                println!("  tap    : {}", tap);
+            }
             println!("  log    : {}", rec.log_path.display());
             println!();
             println!("Stream boot output:  fold logs {} --follow", rec.name);
@@ -132,6 +136,16 @@ fn cmd_vm(cmd: VmCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn arch_arg(rec: &state::FoldRecord) -> String {
+    let mut it = rec.manifest.args.iter();
+    while let Some(a) = it.next() {
+        if a == "--arch" {
+            if let Some(v) = it.next() { return v.clone(); }
+        }
+    }
+    "x86_64".into()
 }
 
 /// Pick the `--kernel` value out of a fold record's argv for pretty-print.
@@ -153,4 +167,14 @@ fn memory_arg(rec: &state::FoldRecord) -> String {
         }
     }
     "<unknown>".into()
+}
+
+fn tap_arg(rec: &state::FoldRecord) -> Option<String> {
+    let mut it = rec.manifest.args.iter();
+    while let Some(a) = it.next() {
+        if a == "--tap" {
+            return it.next().cloned();
+        }
+    }
+    None
 }

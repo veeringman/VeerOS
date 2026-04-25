@@ -54,6 +54,25 @@ unprivileged user namespaces and expose `/dev/kvm` to the current user.
 Relative `workdir` and `rootfs` manifest paths are resolved from the manifest
 file's own directory.
 
+`fold vm spawn --kernel ...` now accepts either the direct Multiboot ELF build
+output or the GRUB ISO at `build/veeros.iso`; both are passed through to
+`veer-vm`, which extracts `/boot/kernel.elf` from the ISO when needed.
+
+`fold vm spawn` also supports explicit guest architecture selection:
+
+```bash
+# x86_64 path (default)
+./target/debug/fold vm spawn --arch x86_64 --kernel ./build/veeros.iso --memory 128
+
+# riscv32 path (ESP32-C6 qemu distribution ELF)
+./target/debug/fold vm spawn --arch riscv32 \
+  --kernel ./target/riscv32imc-unknown-none-elf/debug/kernel-qemu-esp32c6 \
+  --memory 128
+```
+
+Use `scripts/build-veer-vm-esp32c6.sh` to build the riscv32 kernel image plus
+the host `veer-vm` and `fold` binaries together.
+
 ## Manifest (TOML)
 
 ```toml
