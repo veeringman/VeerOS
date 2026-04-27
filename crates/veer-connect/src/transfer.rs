@@ -19,6 +19,7 @@
 //! 5. Server sends file data in encrypted frames
 
 use crate::vsc::{self, SecureChannel, MODE_PUSH, MODE_PULL, MAX_FRAME_PT};
+use libc::{self, termios};
 
 use std::fs;
 use std::io::{self, Write};
@@ -78,13 +79,13 @@ fn authenticate(stream: &TcpStream, ch: &mut SecureChannel) -> bool {
 fn read_password() -> String {
     // Save terminal state, disable echo.
     let stdin_fd = 0i32;
-    let old = unsafe {
-        let mut t = std::mem::zeroed::<Termios>();
-        tcgetattr(stdin_fd, &mut t);
+    let old: termios = unsafe {
+        let mut t: termios = std::mem::zeroed();
+        libc::tcgetattr(stdin_fd, &mut t);
         let old = t;
         // Disable echo.
-        t.c_lflag &= !(ECHO);
-        tcsetattr(stdin_fd, 0, &t);
+        t.c_lflag &= !libc::ECHO;
+        libc::tcsetattr(stdin_fd, libc::TCSANOW, &t);
         old
     };
 
@@ -92,31 +93,10 @@ fn read_password() -> String {
     io::stdin().read_line(&mut password).ok();
 
     // Restore terminal.
-    unsafe { tcsetattr(stdin_fd, 0, &old); }
+    unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old); }
     eprintln!(); // newline after hidden input
 
     password.trim_end().to_string()
-}
-
-// Minimal termios for password reading.
-const ECHO: u32 = 0x0008;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Termios {
-    c_iflag: u32,
-    c_oflag: u32,
-    c_cflag: u32,
-    c_lflag: u32,
-    c_line: u8,
-    c_cc: [u8; 32],
-    c_ispeed: u32,
-    c_ospeed: u32,
-}
-
-extern "C" {
-    fn tcgetattr(fd: i32, termios: *mut Termios) -> i32;
-    fn tcsetattr(fd: i32, action: i32, termios: *const Termios) -> i32;
 }
 
 /// Upload a local file to the VeerOS machine.

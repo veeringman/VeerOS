@@ -6,10 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "VeerOS microVMM — a lightweight KVM/HVF alternative to QEMU for running VeerOS kernels"
+include = ["src/**/*.rs", "Cargo.toml", "build.rs", "veer-vm.entitlements", "README.md"]
 
 [[bin]]
 name = "veer-vm"
 path = "src/main.rs"
+
+[build-dependencies]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-ioctls = "0.19"

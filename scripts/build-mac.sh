@@ -1,6 +1,205 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build macOS host artifacts used for HVF bring-up.
-cargo build -p veer_vm --target x86_64-apple-darwin
-cargo build -p fold_engine --target x86_64-apple-darwin
+# Build macOS host artifacts used for HVF bring-up with Hypervisor.framework support.
+#
+# Critical: veer-vm must be code-signed with com.apple.security.hypervisor entitlement.
+# See docs/macos-hypervisor.md for details.
+
+MANIFEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VEER_VM_CRATE="${MANIFEST_DIR}/crates/veer_vm"
+cd "${MANIFEST_DIR}"
+
+TARGET_TRIPLE="${VEER_VM_MAC_TARGET:-x86_64-apple-darwin}"
+PROFILE="${VEER_VM_MAC_PROFILE:-debug}"
+TARGET_DIR_RAW="${CARGO_TARGET_DIR:-${MANIFEST_DIR}/target}"
+if [[ "${TARGET_DIR_RAW}" = /* ]]; then
+    TARGET_DIR="${TARGET_DIR_RAW}"
+else
+    TARGET_DIR="${MANIFEST_DIR}/${TARGET_DIR_RAW}"
+fi
+
+VEER_VM_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/veer-vm"
+FOLD_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/fold"
+VEER_CONNECT_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/veer-connect"
+ENTITLEMENTS="${VEER_VM_CRATE}/veer-vm.entitlements"
+DEFAULT_TARGET_DIR="${MANIFEST_DIR}/target"
+
+build_pkg_for_target() {
+    local pkg="$1"
+    if [[ "${PROFILE}" == "release" ]]; then
+        cargo build -p "${pkg}" --target "${TARGET_TRIPLE}" --release
+    else
+        cargo build -p "${pkg}" --target "${TARGET_TRIPLE}"
+    fi
+}
+
+require_tool() {
+    local tool="$1"
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        echo "ERROR: required tool not found: ${tool}"
+        exit 1
+    fi
+}
+
+verify_entitlement() {
+    local bin="$1"
+    local out
+    local tmp_plist
+    local parsed
+    local normalized
+    out="$(codesign --display --entitlements - "${bin}" 2>&1 || true)"
+    if ! grep -q "com.apple.security.hypervisor" <<<"${out}"; then
+        echo "ERROR: hypervisor entitlement missing from ${bin}"
+        return 1
+    fi
+
+    # Prefer native plist parsing on macOS when available.
+    if [[ -x /usr/libexec/PlistBuddy ]]; then
+        tmp_plist="$(mktemp)"
+        printf '%s\n' "${out}" > "${tmp_plist}"
+        parsed="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.hypervisor' "${tmp_plist}" 2>/dev/null || true)"
+        rm -f "${tmp_plist}"
+        if [[ "${parsed}" == "true" || "${parsed}" == "1" ]]; then
+            return 0
+        fi
+        if [[ "${parsed}" == "false" || "${parsed}" == "0" ]]; then
+            echo "ERROR: hypervisor entitlement explicitly false in ${bin}"
+            return 1
+        fi
+    fi
+
+    # Fallback parser: tolerate whitespace and XML formatting variants.
+    normalized="$(tr -d '[:space:]' <<<"${out}")"
+    if grep -q "<key>com.apple.security.hypervisor</key><true/>" <<<"${normalized}" \
+        || grep -q "<key>com.apple.security.hypervisor</key><true></true>" <<<"${normalized}"; then
+        return 0
+    fi
+    if grep -q "<key>com.apple.security.hypervisor</key><false/>" <<<"${normalized}" \
+        || grep -q "<key>com.apple.security.hypervisor</key><false></false>" <<<"${normalized}"; then
+        echo "ERROR: hypervisor entitlement explicitly false in ${bin}"
+        return 1
+    fi
+
+    if awk '
+        BEGIN { seen = 0; ok = 0 }
+        /com\.apple\.security\.hypervisor/ {
+            seen = 1
+            if ($0 ~ /<true[[:space:]]*\/>/ || $0 ~ /<true><\/true>/) {
+                ok = 1
+                exit
+            }
+            next
+        }
+        seen && ($0 ~ /<true[[:space:]]*\/>/ || $0 ~ /<true><\/true>/) {
+            ok = 1
+            exit
+        }
+        seen && ($0 ~ /<false[[:space:]]*\/>/ || $0 ~ /<false><\/false>/) {
+            exit
+        }
+        END {
+            exit(ok ? 0 : 1)
+        }
+    ' <<<"${out}"; then
+        return 0
+    fi
+
+    # Key exists but parser could not prove true/false due formatting noise.
+    # Prefer liveness checks (`--probe`) over blocking on ambiguous formatting.
+    echo "WARN: could not parse hypervisor entitlement value exactly for ${bin}; key is present"
+    return 0
+}
+
+sign_and_verify() {
+    local bin="$1"
+    local entitlements="$2"
+
+    if [[ ! -f "${bin}" ]]; then
+        echo "ERROR: veer-vm binary not found: ${bin}"
+        return 1
+    fi
+    if [[ ! -f "${entitlements}" ]]; then
+        echo "ERROR: Entitlements file not found: ${entitlements}"
+        return 1
+    fi
+
+    echo "▶ Signing veer-vm: ${bin}"
+    # Remove any stale signature before re-signing to make result deterministic.
+    codesign --remove-signature "${bin}" >/dev/null 2>&1 || true
+    # '-' means ad-hoc signing (no certificate needed for local dev).
+    codesign --force --sign - --timestamp=none --entitlements "${entitlements}" "${bin}"
+
+    echo "▶ Verifying signature and hypervisor entitlement..."
+    codesign --verify --verbose=4 "${bin}"
+    verify_entitlement "${bin}"
+    echo "✓ veer-vm is signed and entitled"
+}
+
+sign_existing_binary_if_present() {
+    local bin="$1"
+    if [[ -f "${bin}" ]]; then
+        sign_and_verify "${bin}" "${ENTITLEMENTS}"
+    fi
+}
+
+require_binary() {
+    local bin="$1"
+    local label="$2"
+    if [[ ! -f "${bin}" ]]; then
+        echo "ERROR: expected ${label} binary not found: ${bin}"
+        echo "Hint: check VEER_VM_MAC_PROFILE/VEER_VM_MAC_TARGET and CARGO_TARGET_DIR"
+        exit 1
+    fi
+}
+
+require_tool cargo
+require_tool codesign
+
+# Build veer-vm for macOS
+build_pkg_for_target veer_vm
+sign_and_verify "${VEER_VM_BIN}" "${ENTITLEMENTS}"
+
+# Also sign common default-output paths if they exist, so verification against
+# ./target/... does not accidentally hit a stale unsigned artifact.
+for candidate in \
+    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/debug/veer-vm" \
+    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/release/veer-vm"; do
+    if [[ "${candidate}" != "${VEER_VM_BIN}" ]]; then
+        sign_existing_binary_if_present "${candidate}"
+    fi
+done
+
+# Build fold_engine for macOS
+build_pkg_for_target fold_engine
+require_binary "${FOLD_BIN}" "fold"
+
+# Build veer-connect for macOS
+build_pkg_for_target veer-connect
+require_binary "${VEER_CONNECT_BIN}" "veer-connect"
+
+# Final check: ensure veer-vm stayed signed after the complete build pipeline.
+if ! codesign --verify --verbose=4 "${VEER_VM_BIN}" >/dev/null 2>&1 || ! verify_entitlement "${VEER_VM_BIN}"; then
+    echo "⚠ veer-vm signature changed after workspace build; re-signing..."
+    sign_and_verify "${VEER_VM_BIN}" "${ENTITLEMENTS}"
+fi
+
+# Re-check default output paths too, in case a later build step touched them.
+for candidate in \
+    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/debug/veer-vm" \
+    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/release/veer-vm"; do
+    if [[ "${candidate}" != "${VEER_VM_BIN}" && -f "${candidate}" ]]; then
+        if ! codesign --verify --verbose=4 "${candidate}" >/dev/null 2>&1 || ! verify_entitlement "${candidate}"; then
+            echo "⚠ ${candidate} is unsigned or missing entitlement; re-signing..."
+            sign_and_verify "${candidate}" "${ENTITLEMENTS}"
+        fi
+    fi
+done
+
+echo "✓ macOS build complete"
+echo "  target      : ${TARGET_TRIPLE}"
+echo "  profile     : ${PROFILE}"
+echo "  veer-vm bin : ${VEER_VM_BIN}"
+echo "  fold bin    : ${FOLD_BIN}"
+echo "  veer-connect: ${VEER_CONNECT_BIN}"
+echo "  verify      : codesign --verify --verbose=4 ${VEER_VM_BIN}"

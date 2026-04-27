@@ -13,3 +13,4 @@ path = "src/main.rs"
 
 [dependencies]
 crypto = { path = "../crypto", default-features = false, features = ["sha256", "chacha20", "x25519"] }
+libc = "0.2"

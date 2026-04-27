@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build the VeerOS x86-64 kernel + veer-vm VMM for the veer-vm launch path.
+# Build the VeerOS x86-64 kernel + veer-vm VMM for the veer-vm/fold launch path.
 #
 # Unlike `build-qemu-pc.sh`, this script does NOT build a GRUB ISO —
 # veer-vm loads the kernel ELF directly via its Multiboot v1 header.
@@ -33,20 +33,37 @@ if [ "$PROFILE" = "release" ]; then
     cargo build --release -p kernel-qemu-pc --target x86_64-unknown-none "${BUILD_STD[@]}"
     cargo build --release -p veer_vm
     KERNEL="$ROOT/target/x86_64-unknown-none/release/kernel-qemu-pc"
+    KERNEL_TARGET_ALIAS="$ROOT/target/x86_64-unknown-none/release/kernel-x86_64-pc"
     VMM="$ROOT/target/release/veer-vm"
 else
     cargo build -p kernel-qemu-pc --target x86_64-unknown-none "${BUILD_STD[@]}"
     cargo build -p veer_vm
     KERNEL="$ROOT/target/x86_64-unknown-none/debug/kernel-qemu-pc"
+    KERNEL_TARGET_ALIAS="$ROOT/target/x86_64-unknown-none/debug/kernel-x86_64-pc"
     VMM="$ROOT/target/debug/veer-vm"
 fi
 
+# Also provide a target/ alias without "qemu" in the filename.
+cp "$KERNEL" "$KERNEL_TARGET_ALIAS"
+
+# Provide a neutral artifact name for veer-vm/fold workflows.
+KERNEL_ALIAS_DIR="$ROOT/build/veer-vm"
+mkdir -p "$KERNEL_ALIAS_DIR"
+if [ "$PROFILE" = "release" ]; then
+    KERNEL_ALIAS="$KERNEL_ALIAS_DIR/kernel-x86_64-release.elf"
+else
+    KERNEL_ALIAS="$KERNEL_ALIAS_DIR/kernel-x86_64-debug.elf"
+fi
+cp "$KERNEL" "$KERNEL_ALIAS"
+
 echo ""
 echo "Built kernel: $KERNEL"
+echo "Kernel target alias: $KERNEL_TARGET_ALIAS"
+echo "Kernel alias: $KERNEL_ALIAS"
 echo "Built VMM:    $VMM"
 echo ""
 echo "Smoke-test with:"
 echo "  ./scripts/veer-vm-net-smoke.sh"
 echo ""
 echo "Or run directly (requires tap0 pre-configured on the host):"
-echo "  $VMM --kernel $KERNEL --memory 128 --tap tap0"
+echo "  $VMM --kernel $KERNEL_ALIAS --memory 128 --tap tap0"

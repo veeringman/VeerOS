@@ -113,11 +113,23 @@ pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
 ///   2. `$CARGO_WORKSPACE/target/release/veer-vm`
 ///   3. `$PATH`
 fn locate_veer_vm() -> Result<PathBuf> {
+    let host_target = std::env::var("HOST").ok().or_else(detect_rust_host_target);
+
     // (1) + (2): walk up from CWD looking for a `target/` sibling of a
     // Cargo.toml with `veer_vm` in the workspace.
     if let Ok(cwd) = std::env::current_dir() {
         for ancestor in cwd.ancestors() {
-            for sub in ["target/debug/veer-vm", "target/release/veer-vm"] {
+            let mut candidates = vec![
+                "target/debug/veer-vm".to_string(),
+                "target/release/veer-vm".to_string(),
+            ];
+
+            if let Some(host) = &host_target {
+                candidates.push(format!("target/{host}/debug/veer-vm"));
+                candidates.push(format!("target/{host}/release/veer-vm"));
+            }
+
+            for sub in candidates {
                 let p = ancestor.join(sub);
                 if p.is_file() {
                     return p.canonicalize()
@@ -135,6 +147,23 @@ fn locate_veer_vm() -> Result<PathBuf> {
          \n    cargo build -p veer_vm\n\
          \n or pass an explicit --vmm <path>."
     );
+}
+
+fn detect_rust_host_target() -> Option<String> {
+    let out = std::process::Command::new("rustc")
+        .args(["-vV"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("host: ") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
 }
 
 fn which_in_path(name: &str) -> Option<PathBuf> {

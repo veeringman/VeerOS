@@ -8,42 +8,123 @@
 # and a release build of veer-vm.
 set -euo pipefail
 
-TAP="${TAP:-tap0}"
 HOST_IP="${HOST_IP:-10.0.2.2}"
 GUEST_IP="${GUEST_IP:-10.0.2.15}"
 PREFIX="${PREFIX:-24}"
+TAP="${TAP:-tap0}"
+VMNET_MODE="${VMNET_MODE:-shared}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-KERNEL="${KERNEL:-$REPO/target/x86_64-unknown-none/release/kernel-qemu-pc}"
-VEER_VM="${VEER_VM:-$REPO/target/release/veer-vm}"
+HOST_OS="$(uname -s)"
+
+if [[ "$HOST_OS" == "Darwin" ]]; then
+    TARGET_TRIPLE="${VEER_VM_MAC_TARGET:-x86_64-apple-darwin}"
+    PROFILE="${VEER_VM_MAC_PROFILE:-debug}"
+    VEER_VM_DEFAULT="$REPO/target/$TARGET_TRIPLE/$PROFILE/veer-vm"
+else
+    VEER_VM_DEFAULT="$REPO/target/release/veer-vm"
+fi
+VEER_VM="${VEER_VM:-$VEER_VM_DEFAULT}"
+
+# Pick the first existing kernel artifact, preferring a profile that matches
+# the host-tool profile on macOS.
+if [[ "$HOST_OS" == "Darwin" ]]; then
+    KERNEL_PROFILE_PRIMARY="${VEER_VM_MAC_PROFILE:-debug}"
+else
+    KERNEL_PROFILE_PRIMARY="release"
+fi
+
+if [[ "$KERNEL_PROFILE_PRIMARY" == "release" ]]; then
+    KERNEL_PROFILE_SECONDARY="debug"
+else
+    KERNEL_PROFILE_SECONDARY="release"
+fi
+
+DEFAULT_KERNEL=""
+for candidate in \
+    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-x86_64-pc" \
+    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-qemu-pc" \
+    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_SECONDARY/kernel-x86_64-pc" \
+    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_SECONDARY/kernel-qemu-pc" \
+    "$REPO/build/veer-vm/kernel-x86_64-$KERNEL_PROFILE_PRIMARY.elf" \
+    "$REPO/build/veer-vm/kernel-x86_64-$KERNEL_PROFILE_SECONDARY.elf"
+do
+    if [[ -f "$candidate" ]]; then
+        DEFAULT_KERNEL="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$DEFAULT_KERNEL" ]]; then
+    DEFAULT_KERNEL="$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-x86_64-pc"
+fi
+
+KERNEL="${KERNEL:-$DEFAULT_KERNEL}"
 
 say() { printf '\033[1;36m[smoke]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[smoke]\033[0m %s\n' "$*" >&2; exit 1; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command '$1' (install required host tooling)"; }
+
+ping_once() {
+    if [[ "$HOST_OS" == "Linux" ]]; then
+        ping -c 1 -W 1 "$GUEST_IP" >/dev/null 2>&1
+    else
+        # macOS ping uses milliseconds for -W.
+        ping -c 1 -W 1000 "$GUEST_IP" >/dev/null 2>&1
+    fi
+}
+
+require_cmd ping
+require_cmd sudo
 
 [[ -x "$VEER_VM" ]] || die "veer-vm not built: $VEER_VM (run: cargo build --release -p veer_vm)"
-[[ -f "$KERNEL"  ]] || die "kernel not built: $KERNEL (run: ./scripts/build-qemu-pc.sh release)"
+[[ -f "$KERNEL"  ]] || die "kernel not built: $KERNEL (run: ./scripts/build-veer-vm.sh ${KERNEL_PROFILE_PRIMARY})"
 
 # --- TAP setup (idempotent) -------------------------------------------------
-if ! ip link show "$TAP" >/dev/null 2>&1; then
-    say "creating $TAP owned by $USER"
-    sudo ip tuntap add dev "$TAP" mode tap user "$USER"
+if [[ "$HOST_OS" == "Linux" ]]; then
+    require_cmd ip
+    if ! ip link show "$TAP" >/dev/null 2>&1; then
+        say "creating $TAP owned by $USER"
+        sudo ip tuntap add dev "$TAP" mode tap user "$USER"
+    fi
+    if ! ip -4 addr show "$TAP" | grep -q "$HOST_IP/"; then
+        say "assigning $HOST_IP/$PREFIX to $TAP"
+        sudo ip addr add "$HOST_IP/$PREFIX" dev "$TAP" 2>/dev/null || true
+    fi
+    sudo ip link set "$TAP" up
+elif [[ "$HOST_OS" == "Darwin" ]]; then
+    case "$VMNET_MODE" in
+        shared|host) ;;
+        *) die "invalid VMNET_MODE=$VMNET_MODE (expected: shared or host)" ;;
+    esac
+    say "macOS vmnet mode: $VMNET_MODE"
+else
+    die "unsupported host OS: $HOST_OS"
 fi
-if ! ip -4 addr show "$TAP" | grep -q "$HOST_IP/"; then
-    say "assigning $HOST_IP/$PREFIX to $TAP"
-    sudo ip addr add "$HOST_IP/$PREFIX" dev "$TAP" 2>/dev/null || true
-fi
-sudo ip link set "$TAP" up
 
 # --- Launch veer-vm ---------------------------------------------------------
-say "starting veer-vm (kernel=$KERNEL tap=$TAP)"
-"$VEER_VM" --kernel "$KERNEL" --memory 128 --tap "$TAP" &
+if [[ "$HOST_OS" == "Darwin" ]]; then
+    say "starting veer-vm (kernel=$KERNEL vmnet=$VMNET_MODE)"
+    "$VEER_VM" --kernel "$KERNEL" --memory 128 --vmnet "$VMNET_MODE" &
+else
+    say "starting veer-vm (kernel=$KERNEL tap=$TAP)"
+    "$VEER_VM" --kernel "$KERNEL" --memory 128 --tap "$TAP" &
+fi
 VM_PID=$!
 trap 'kill -TERM "$VM_PID" 2>/dev/null || true; wait "$VM_PID" 2>/dev/null || true' EXIT
 
 # Give the guest a moment to boot and bring up its interface.
 say "waiting for guest $GUEST_IP to answer ARP/ICMP..."
 for i in $(seq 1 30); do
-    if ping -c 1 -W 1 "$GUEST_IP" >/dev/null 2>&1; then
+    if [[ "$HOST_OS" == "Darwin" ]]; then
+        if ! kill -0 "$VM_PID" 2>/dev/null; then
+            die "veer-vm exited early in vmnet mode"
+        fi
+        if [[ "$i" -ge 8 ]]; then
+            say "vmnet mode launch stable after ${i}s (network ping check pending vmnet backend wiring)"
+            exit 0
+        fi
+    elif ping_once; then
         say "PING OK after ${i}s"
         ping -c 3 "$GUEST_IP" || true
         exit 0

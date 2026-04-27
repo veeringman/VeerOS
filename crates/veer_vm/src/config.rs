@@ -11,6 +11,21 @@ pub enum GuestArch {
     Riscv32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmnetMode {
+    Shared,
+    Host,
+}
+
+impl VmnetMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VmnetMode::Shared => "shared",
+            VmnetMode::Host => "host",
+        }
+    }
+}
+
 impl GuestArch {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -28,6 +43,8 @@ pub struct VmConfig {
     pub disk_read_only: bool,
     /// Name of a pre-created TAP interface to attach as virtio-net-pci.
     pub tap_name: Option<String>,
+    /// macOS vmnet mode request.
+    pub vmnet_mode: Option<VmnetMode>,
     /// MAC address advertised to the guest.
     pub mac: [u8; 6],
     /// Save a snapshot directory when the VM shuts down cleanly.

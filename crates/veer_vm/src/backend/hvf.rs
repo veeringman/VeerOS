@@ -1,3 +1,32 @@
+//! VeerHV-Mac: macOS Hypervisor.framework Backend
+//!
+//! # CRITICAL REQUIREMENT: Code Signing with Hypervisor Entitlement
+//!
+//! On macOS, the veer-vm binary MUST be code-signed with the entitlement:
+//! ```xml
+//! <key>com.apple.security.hypervisor</key>
+//! <true/>
+//! ```
+//!
+//! Without this entitlement, `hv_vm_create()` fails with error `-85377017`.
+//! The build system automatically signs the binary with this entitlement during `build-mac.sh`.
+//!
+//! # Architecture
+//!
+//! This backend implements Apple's Hypervisor.framework for Intel macOS hosts, providing:
+//! - VM creation and lifecycle management
+//! - vCPU instantiation and register access
+//! - Guest memory mapping (with support for standard HVF access flags)
+//! - LAPIC, I/O APIC, and 16550 UART device models
+//! - Multiboot v1 kernel boot protocol
+//!
+//! This backend is part of the multi-platform VeerOS microVMM architecture:
+//! | Host OS      | Backend                    | Codename     |
+//! |--------------|----------------------------|--------------|
+//! | macOS Intel  | Hypervisor.framework       | VeerHV-Mac   |
+//! | Linux        | KVM (/dev/kvm)             | VeerKVM-Linux|
+//! | Windows      | WHPX                       | VeerWHPX-Win |
+
 use anyhow::{bail, Context, Result};
 use object::read::elf::{ElfFile32, ElfFile64, ProgramHeader};
 use object::{Object, ObjectKind};
@@ -9,7 +38,7 @@ use std::path::Path;
 use std::ptr;
 
 use crate::backend::ExitReason;
-use crate::config::{BootSource, GuestArch, VmConfig};
+use crate::config::{BootSource, GuestArch, VmConfig, VmnetMode};
 struct HvfLapic {
     id: u32,
     tpr: u32,
@@ -251,6 +280,8 @@ impl HvfIoapic {
 
 const HV_SUCCESS: i32 = 0;
 const HV_BUSY: i32 = -85377017;
+// Observed on hosts where x86 VMX vCPU creation is unavailable for this backend.
+const HV_VCPU_CREATE_UNAVAILABLE: i32 = -85377023;
 const HV_MEMORY_READ: u64 = 1 << 0;
 const HV_MEMORY_WRITE: u64 = 1 << 1;
 const HV_MEMORY_EXEC: u64 = 1 << 2;
@@ -294,6 +325,10 @@ const VMCS_GUEST_SS_BASE: u32 = 0x0000_680A;
 const VMCS_GUEST_DS_BASE: u32 = 0x0000_680C;
 const VMCS_GUEST_FS_BASE: u32 = 0x0000_680E;
 const VMCS_GUEST_GS_BASE: u32 = 0x0000_6810;
+const VMCS_GUEST_LDTR_BASE: u32 = 0x0000_6812;
+const VMCS_GUEST_TR_BASE: u32 = 0x0000_6814;
+const VMCS_GUEST_GDTR_BASE: u32 = 0x0000_6816;
+const VMCS_GUEST_IDTR_BASE: u32 = 0x0000_6818;
 
 const VMCS_GUEST_ES_AR: u32 = 0x0000_4814;
 const VMCS_GUEST_CS_AR: u32 = 0x0000_4816;
@@ -301,6 +336,16 @@ const VMCS_GUEST_SS_AR: u32 = 0x0000_4818;
 const VMCS_GUEST_DS_AR: u32 = 0x0000_481A;
 const VMCS_GUEST_FS_AR: u32 = 0x0000_481C;
 const VMCS_GUEST_GS_AR: u32 = 0x0000_481E;
+const VMCS_GUEST_LDTR_AR: u32 = 0x0000_4820;
+const VMCS_GUEST_TR_AR: u32 = 0x0000_4822;
+
+const VMCS_GUEST_LDTR_SELECTOR: u32 = 0x0000_080C;
+const VMCS_GUEST_TR_SELECTOR: u32 = 0x0000_080E;
+
+const VMCS_GUEST_LDTR_LIMIT: u32 = 0x0000_480C;
+const VMCS_GUEST_TR_LIMIT: u32 = 0x0000_480E;
+const VMCS_GUEST_GDTR_LIMIT: u32 = 0x0000_4810;
+const VMCS_GUEST_IDTR_LIMIT: u32 = 0x0000_4812;
 
 const VMCS_RO_EXIT_REASON: u32 = 0x0000_4402;
 const VMCS_RO_EXIT_QUALIFICATION: u32 = 0x0000_6400;
@@ -308,11 +353,23 @@ const VMCS_RO_VMEXIT_INSTR_LEN: u32 = 0x0000_440C;
 const VMCS_GUEST_PHYSICAL_ADDRESS: u32 = 0x0000_2400;
 const VMCS_CTRL_VMENTRY_INTERRUPTION_INFO: u32 = 0x0000_4016;
 const VMCS_GUEST_INTERRUPTIBILITY_STATE: u32 = 0x0000_4824;
+const VMCS_GUEST_ACTIVITY_STATE: u32 = 0x0000_4826;
 
 const VMX_EXIT_REASON_CPUID: u32 = 10;
 const VMX_EXIT_REASON_HLT: u32 = 12;
 const VMX_EXIT_REASON_IO: u32 = 30;
 const VMX_EXIT_REASON_EPT_VIOLATION: u32 = 48;
+
+// Activity state values for VMCS_GUEST_ACTIVITY_STATE
+const VMCS_ACTIVITY_STATE_ACTIVE: u64 = 0;
+const VMCS_ACTIVITY_STATE_HLT: u64 = 1;
+const VMCS_ACTIVITY_STATE_SHUTDOWN: u64 = 2;
+const VMCS_ACTIVITY_STATE_WAIT_SIPI: u64 = 3;
+
+// Interrupt delivery modes for VMCS_CTRL_VMENTRY_INTERRUPTION_INFO
+const VMX_INTR_DELIVERY_MODE_EXTERNAL: u64 = 0;
+const VMX_INTR_DELIVERY_MODE_NMI: u64 = 2;
+const VMX_INTR_DELIVERY_MODE_INIT: u64 = 5;
 
 const LAPIC_BASE: u64 = 0xFEE0_0000;
 const LAPIC_END: u64 = 0xFEE0_0FFF;
@@ -334,28 +391,179 @@ unsafe extern "C" {
     fn hv_vcpu_destroy(vcpu: HvVcpuId) -> i32;
     fn hv_vcpu_write_register(vcpu: HvVcpuId, reg: u32, value: u64) -> i32;
     fn hv_vcpu_read_register(vcpu: HvVcpuId, reg: u32, value: *mut u64) -> i32;
+    fn hv_vcpu_read_msr(vcpu: HvVcpuId, msr: u32, value: *mut u64) -> i32;
     fn hv_vcpu_run(vcpu: HvVcpuId) -> i32;
     fn hv_vmx_vcpu_write_vmcs(vcpu: HvVcpuId, field: u32, value: u64) -> i32;
     fn hv_vmx_vcpu_read_vmcs(vcpu: HvVcpuId, field: u32, value: *mut u64) -> i32;
 }
 
-struct HvfVm {
+const IA32_VMX_CR0_FIXED0: u32 = 0x486;
+const IA32_VMX_CR0_FIXED1: u32 = 0x487;
+const IA32_VMX_CR4_FIXED0: u32 = 0x488;
+const IA32_VMX_CR4_FIXED1: u32 = 0x489;
+
+type HvVcpuConfigCreateFn = unsafe extern "C" fn(config: *mut *mut c_void) -> i32;
+type HvVcpuConfigDestroyFn = unsafe extern "C" fn(config: *mut c_void) -> i32;
+
+fn hv_vcpu_create_compat(vcpu: *mut HvVcpuId, exit: *mut *mut c_void) -> (i32, String) {
+    let mut diag = String::new();
+
+    // First try legacy path (works on older SDK/runtime combinations).
+    let legacy_rc = unsafe { hv_vcpu_create(vcpu, exit, 0) };
+    diag.push_str(&format!("legacy(flags=0)={legacy_rc}({})", hv_return_name(legacy_rc)));
+    if legacy_rc != HV_VCPU_CREATE_UNAVAILABLE {
+        return (legacy_rc, diag);
+    }
+
+    // Some Intel HVF runtimes do not expose or require an explicit exit pointer.
+    let legacy_no_exit_rc = unsafe { hv_vcpu_create(vcpu, ptr::null_mut(), 0) };
+    diag.push_str(&format!(
+        "; legacy(flags=0,no-exit)={legacy_no_exit_rc}({})",
+        hv_return_name(legacy_no_exit_rc)
+    ));
+    if legacy_no_exit_rc != HV_VCPU_CREATE_UNAVAILABLE {
+        return (legacy_no_exit_rc, diag);
+    }
+
+    // If unavailable, attempt config-based creation while still using the
+    // stable 3-arg hv_vcpu_create symbol, passing the config handle as arg3.
+    let cfg_create_sym = match std::ffi::CString::new("hv_vcpu_config_create") {
+        Ok(s) => s,
+        Err(_) => {
+            diag.push_str("; cfg_create_symbol_name_error");
+            return (legacy_no_exit_rc, diag);
+        }
+    };
+    let cfg_create_ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, cfg_create_sym.as_ptr()) };
+    if cfg_create_ptr.is_null() {
+        diag.push_str("; hv_vcpu_config_create=missing");
+        return (legacy_no_exit_rc, diag);
+    }
+    diag.push_str("; hv_vcpu_config_create=present");
+
+    let create_cfg: HvVcpuConfigCreateFn = unsafe { std::mem::transmute(cfg_create_ptr) };
+
+    let mut cfg: *mut c_void = ptr::null_mut();
+    let cfg_rc = unsafe { create_cfg(&mut cfg as *mut *mut c_void) };
+    diag.push_str(&format!("; config_create={cfg_rc}({})", hv_return_name(cfg_rc)));
+    if cfg_rc != HV_SUCCESS || cfg.is_null() {
+        return (legacy_no_exit_rc, diag);
+    }
+
+    let create_rc_cfg = unsafe { hv_vcpu_create(vcpu, exit, cfg as usize as u64) };
+    diag.push_str(&format!("; create(cfg,exit)={create_rc_cfg}({})", hv_return_name(create_rc_cfg)));
+    if create_rc_cfg == HV_SUCCESS {
+        if let Ok(sym) = std::ffi::CString::new("hv_vcpu_config_destroy") {
+            let destroy_ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym.as_ptr()) };
+            if !destroy_ptr.is_null() {
+                let destroy_cfg: HvVcpuConfigDestroyFn = unsafe { std::mem::transmute(destroy_ptr) };
+                let _ = unsafe { destroy_cfg(cfg) };
+            }
+        }
+        return (HV_SUCCESS, diag);
+    }
+
+    // Some runtimes may not require/return an explicit exit context pointer.
+    let create_rc_cfg_no_exit = unsafe { hv_vcpu_create(vcpu, ptr::null_mut(), cfg as usize as u64) };
+    diag.push_str(&format!(
+        "; create(cfg,no-exit)={create_rc_cfg_no_exit}({})",
+        hv_return_name(create_rc_cfg_no_exit)
+    ));
+
+    if let Ok(sym) = std::ffi::CString::new("hv_vcpu_config_destroy") {
+        let destroy_ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym.as_ptr()) };
+        if !destroy_ptr.is_null() {
+            let destroy_cfg: HvVcpuConfigDestroyFn = unsafe { std::mem::transmute(destroy_ptr) };
+            let _ = unsafe { destroy_cfg(cfg) };
+        }
+    }
+
+    (create_rc_cfg_no_exit, diag)
+}
+
+/// Per-vCPU execution state for Phase 2 engine
+#[derive(Clone)]
+struct VcpuState {
+    id: HvVcpuId,
+    halted: bool,
+    pending_interrupt: Option<u8>,  // Vector number if interrupt pending
+}
+
+struct HvfGuestMemoryRegion {
     host_mem: *mut c_void,
-    mem_size: usize,
-    vcpu_id: Option<HvVcpuId>,
+    gpa: u64,
+    size: usize,
+    current_prot: i32,
+    hv_flags: u64,
+    mapped: bool,
+}
+
+impl HvfGuestMemoryRegion {
+    fn allocate(size: usize, gpa: u64, hv_flags: u64) -> Result<Self> {
+        let host_mem = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                size,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if host_mem == libc::MAP_FAILED {
+            bail!("mmap failed while allocating guest memory");
+        }
+
+        Ok(Self {
+            host_mem,
+            gpa,
+            size,
+            current_prot: libc::PROT_NONE,
+            hv_flags,
+            mapped: false,
+        })
+    }
+
+    fn set_protection(&mut self, new_prot: i32) -> Result<()> {
+        hvf_sync_mapping_for_host_protection(
+            self.host_mem,
+            self.gpa,
+            self.size,
+            self.current_prot,
+            new_prot,
+            self.hv_flags,
+        )?;
+        self.current_prot = new_prot;
+        self.mapped = new_prot != libc::PROT_NONE;
+        Ok(())
+    }
+
+    fn teardown_best_effort(&mut self) {
+        if self.mapped {
+            let _ = unsafe { hv_vm_unmap(self.gpa, self.size) };
+            self.mapped = false;
+        }
+        if !self.host_mem.is_null() {
+            let _ = unsafe { libc::munmap(self.host_mem, self.size) };
+            self.host_mem = ptr::null_mut();
+        }
+    }
+}
+
+/// Multi-vCPU capable VM host structure
+struct HvfVm {
+    memory: HvfGuestMemoryRegion,
+    vcpus: Vec<VcpuState>,
 }
 
 impl Drop for HvfVm {
     fn drop(&mut self) {
         // Best-effort cleanup on process exit path.
-        if let Some(vcpu) = self.vcpu_id {
-            let _ = unsafe { hv_vcpu_destroy(vcpu) };
+        for vcpu_state in &self.vcpus {
+            let _ = unsafe { hv_vcpu_destroy(vcpu_state.id) };
         }
-        let _ = unsafe { hv_vm_unmap(0, self.mem_size) };
+        self.memory.teardown_best_effort();
         let _ = unsafe { hv_vm_destroy() };
-        if !self.host_mem.is_null() {
-            let _ = unsafe { libc::munmap(self.host_mem, self.mem_size) };
-        }
     }
 }
 
@@ -597,15 +805,123 @@ fn read_vmcs(vcpu: HvVcpuId, field: u32, name: &str) -> Result<u64> {
     Ok(value)
 }
 
-fn inject_external_interrupt(vcpu: HvVcpuId, vector: u8) -> Result<()> {
-    // Valid bit(31)=1, type(10:8)=0 for external interrupt, vector(7:0).
-    let info = (1u64 << 31) | (vector as u64);
+fn dump_invalid_guest_state(vcpu: HvVcpuId) {
+    let fields = [
+        ("guest_cr0", VMCS_GUEST_CR0),
+        ("guest_cr3", VMCS_GUEST_CR3),
+        ("guest_cr4", VMCS_GUEST_CR4),
+        ("guest_efer", VMCS_GUEST_IA32_EFER),
+        ("cs_sel", VMCS_GUEST_CS_SELECTOR),
+        ("cs_ar", VMCS_GUEST_CS_AR),
+        ("ss_sel", VMCS_GUEST_SS_SELECTOR),
+        ("ss_ar", VMCS_GUEST_SS_AR),
+        ("ds_sel", VMCS_GUEST_DS_SELECTOR),
+        ("ds_ar", VMCS_GUEST_DS_AR),
+        ("es_sel", VMCS_GUEST_ES_SELECTOR),
+        ("es_ar", VMCS_GUEST_ES_AR),
+        ("fs_sel", VMCS_GUEST_FS_SELECTOR),
+        ("fs_ar", VMCS_GUEST_FS_AR),
+        ("gs_sel", VMCS_GUEST_GS_SELECTOR),
+        ("gs_ar", VMCS_GUEST_GS_AR),
+        ("tr_sel", VMCS_GUEST_TR_SELECTOR),
+        ("tr_ar", VMCS_GUEST_TR_AR),
+        ("tr_limit", VMCS_GUEST_TR_LIMIT),
+        ("tr_base", VMCS_GUEST_TR_BASE),
+        ("ldtr_sel", VMCS_GUEST_LDTR_SELECTOR),
+        ("ldtr_ar", VMCS_GUEST_LDTR_AR),
+        ("gdtr_limit", VMCS_GUEST_GDTR_LIMIT),
+        ("gdtr_base", VMCS_GUEST_GDTR_BASE),
+        ("idtr_limit", VMCS_GUEST_IDTR_LIMIT),
+        ("idtr_base", VMCS_GUEST_IDTR_BASE),
+    ];
+
+    eprintln!("[veer-vm] invalid guest state dump:");
+    for (name, field) in fields {
+        match read_vmcs(vcpu, field, "hv_vmx_vcpu_read_vmcs(debug_dump)") {
+            Ok(value) => eprintln!("  {}={:#x}", name, value),
+            Err(err) => eprintln!("  {}=<err:{}>", name, err),
+        }
+    }
+
+    match read_reg(vcpu, HV_X86_RIP, "hv_vcpu_read_register(RIP)") {
+        Ok(value) => eprintln!("  rip={:#x}", value),
+        Err(err) => eprintln!("  rip=<err:{}>", err),
+    }
+    match read_reg(vcpu, HV_X86_RFLAGS, "hv_vcpu_read_register(RFLAGS)") {
+        Ok(value) => eprintln!("  rflags={:#x}", value),
+        Err(err) => eprintln!("  rflags=<err:{}>", err),
+    }
+}
+
+fn inject_vmentry_interrupt(vcpu: HvVcpuId, delivery_mode: u64, vector: u8) -> Result<()> {
+    // Valid bit(31)=1, delivery mode(10:8), vector(7:0).
+    let info = (1u64 << 31) | ((delivery_mode & 0x7) << 8) | (vector as u64);
     write_vmcs(
         vcpu,
         VMCS_CTRL_VMENTRY_INTERRUPTION_INFO,
         info,
         "hv_vmx_vcpu_write_vmcs(VMENTRY_INTERRUPTION_INFO)",
     )
+}
+
+fn inject_external_interrupt(vcpu: HvVcpuId, vector: u8) -> Result<()> {
+    inject_vmentry_interrupt(vcpu, VMX_INTR_DELIVERY_MODE_EXTERNAL, vector)
+}
+
+fn inject_nmi(vcpu: HvVcpuId) -> Result<()> {
+    inject_vmentry_interrupt(vcpu, VMX_INTR_DELIVERY_MODE_NMI, 0)
+}
+
+fn inject_init(vcpu: HvVcpuId) -> Result<()> {
+    inject_vmentry_interrupt(vcpu, VMX_INTR_DELIVERY_MODE_INIT, 0)
+}
+
+fn set_activity_state(vcpu: HvVcpuId, state: u64) -> Result<()> {
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_ACTIVITY_STATE,
+        state,
+        "hv_vmx_vcpu_write_vmcs(GUEST_ACTIVITY_STATE)",
+    )
+}
+
+fn set_halted(vcpu_state: &mut VcpuState, halted: bool) -> Result<()> {
+    vcpu_state.halted = halted;
+    let state = if halted {
+        VMCS_ACTIVITY_STATE_HLT
+    } else {
+        VMCS_ACTIVITY_STATE_ACTIVE
+    };
+    set_activity_state(vcpu_state.id, state)
+}
+
+fn queue_interrupt(vcpu_state: &mut VcpuState, vector: u8) {
+    // Keep latest pending vector in this Phase 2 queue model.
+    vcpu_state.pending_interrupt = Some(vector);
+}
+
+fn check_halt_state(vcpu: HvVcpuId) -> Result<bool> {
+    let activity_state = read_vmcs(
+        vcpu,
+        VMCS_GUEST_ACTIVITY_STATE,
+        "hv_vmx_vcpu_read_vmcs(GUEST_ACTIVITY_STATE)",
+    )?;
+    Ok(activity_state == VMCS_ACTIVITY_STATE_HLT)
+}
+
+fn deliver_pending_interrupt(vcpu_state: &mut VcpuState) -> Result<bool> {
+    let Some(vector) = vcpu_state.pending_interrupt else {
+        return Ok(false);
+    };
+    if !guest_can_accept_ext_interrupt(vcpu_state.id)? {
+        return Ok(false);
+    }
+    inject_external_interrupt(vcpu_state.id, vector)?;
+    vcpu_state.pending_interrupt = None;
+    if vcpu_state.halted {
+        set_halted(vcpu_state, false)?;
+    }
+    Ok(true)
 }
 
 fn guest_can_accept_ext_interrupt(vcpu: HvVcpuId) -> Result<bool> {
@@ -1018,10 +1334,29 @@ fn write_flat_seg(vcpu: HvVcpuId, selector: u16, sel_field: u32, limit_field: u3
 }
 
 fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
-    // Mirror the KVM PM-entry contract: CR0=PE|ET, CR4=0, EFER=0, flat 32-bit segments.
-    write_vmcs(vcpu, VMCS_GUEST_CR0, 0x11, "hv_vmx_vcpu_write_vmcs(GUEST_CR0)")?;
+    let read_msr = |msr: u32, name: &str| -> Result<u64> {
+        let mut value = 0u64;
+        hv_check(
+            unsafe { hv_vcpu_read_msr(vcpu, msr, &mut value as *mut u64) },
+            name,
+        )?;
+        Ok(value)
+    };
+
+    // Derive VMX-compliant CR0/CR4 values from Intel fixed-bit MSRs.
+    let cr0_fixed0 = read_msr(IA32_VMX_CR0_FIXED0, "hv_vcpu_read_msr(CR0_FIXED0)")?;
+    let cr0_fixed1 = read_msr(IA32_VMX_CR0_FIXED1, "hv_vcpu_read_msr(CR0_FIXED1)")?;
+    let cr4_fixed0 = read_msr(IA32_VMX_CR4_FIXED0, "hv_vcpu_read_msr(CR4_FIXED0)")?;
+    let cr4_fixed1 = read_msr(IA32_VMX_CR4_FIXED1, "hv_vcpu_read_msr(CR4_FIXED1)")?;
+
+    let desired_cr0 = 0x31u64; // PE|ET|NE for 32-bit protected mode entry.
+    let desired_cr4 = 0u64;
+    let guest_cr0 = (desired_cr0 | cr0_fixed0) & cr0_fixed1;
+    let guest_cr4 = (desired_cr4 | cr4_fixed0) & cr4_fixed1;
+
+    write_vmcs(vcpu, VMCS_GUEST_CR0, guest_cr0, "hv_vmx_vcpu_write_vmcs(GUEST_CR0)")?;
     write_vmcs(vcpu, VMCS_GUEST_CR3, 0, "hv_vmx_vcpu_write_vmcs(GUEST_CR3)")?;
-    write_vmcs(vcpu, VMCS_GUEST_CR4, 0, "hv_vmx_vcpu_write_vmcs(GUEST_CR4)")?;
+    write_vmcs(vcpu, VMCS_GUEST_CR4, guest_cr4, "hv_vmx_vcpu_write_vmcs(GUEST_CR4)")?;
     write_vmcs(vcpu, VMCS_GUEST_IA32_EFER, 0, "hv_vmx_vcpu_write_vmcs(GUEST_IA32_EFER)")?;
 
     // Access-rights bits align with Intel VMCS segment AR format.
@@ -1029,6 +1364,10 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
     let cs_ar = 0xC09B_u32;
     // Data: type=0x3 (read/write/accessed), S=1, P=1, D/B=1, G=1.
     let data_ar = 0xC093_u32;
+    // 32-bit available TSS, present. Required for valid VM-entry in protected mode.
+    let tr_ar = 0x008B_u32;
+    // Mark LDTR unusable.
+    let ldtr_ar = 1u32 << 16;
 
     write_flat_seg(
         vcpu,
@@ -1092,6 +1431,22 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
         "hv_vmx_vcpu_write_vmcs(GUEST_GS_*)",
     )?;
 
+    write_vmcs(vcpu, VMCS_GUEST_TR_SELECTOR, 0x18, "hv_vmx_vcpu_write_vmcs(GUEST_TR_SELECTOR)")?;
+    write_vmcs(vcpu, VMCS_GUEST_TR_LIMIT, 0x67, "hv_vmx_vcpu_write_vmcs(GUEST_TR_LIMIT)")?;
+    write_vmcs(vcpu, VMCS_GUEST_TR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_TR_BASE)")?;
+    write_vmcs(vcpu, VMCS_GUEST_TR_AR, tr_ar as u64, "hv_vmx_vcpu_write_vmcs(GUEST_TR_AR)")?;
+
+    write_vmcs(vcpu, VMCS_GUEST_LDTR_SELECTOR, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_SELECTOR)")?;
+    write_vmcs(vcpu, VMCS_GUEST_LDTR_LIMIT, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_LIMIT)")?;
+    write_vmcs(vcpu, VMCS_GUEST_LDTR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_BASE)")?;
+    write_vmcs(vcpu, VMCS_GUEST_LDTR_AR, ldtr_ar as u64, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_AR)")?;
+
+    write_vmcs(vcpu, VMCS_GUEST_GDTR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_GDTR_BASE)")?;
+    // Null + code + data + TSS descriptor (selector 0x18 => bytes 0x18..0x1f).
+    write_vmcs(vcpu, VMCS_GUEST_GDTR_LIMIT, 0x1f, "hv_vmx_vcpu_write_vmcs(GUEST_GDTR_LIMIT)")?;
+    write_vmcs(vcpu, VMCS_GUEST_IDTR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_IDTR_BASE)")?;
+    write_vmcs(vcpu, VMCS_GUEST_IDTR_LIMIT, 0x3ff, "hv_vmx_vcpu_write_vmcs(GUEST_IDTR_LIMIT)")?;
+
     Ok(())
 }
 
@@ -1108,10 +1463,47 @@ fn hv_check(rc: i32, what: &str) -> Result<()> {
     }
 }
 
+fn hvf_sync_mapping_for_host_protection(
+    host_mem: *mut c_void,
+    gpa: u64,
+    size: usize,
+    old_prot: i32,
+    new_prot: i32,
+    hv_flags: u64,
+) -> Result<()> {
+    if old_prot == new_prot {
+        return Ok(());
+    }
+
+    // Hypervisor.framework can lose visibility when host pages transition
+    // from PROT_NONE; rebind the guest mapping after the protection change.
+    if old_prot == libc::PROT_NONE && new_prot != libc::PROT_NONE {
+        let _ = unsafe { hv_vm_unmap(gpa, size) };
+    }
+
+    let mprotect_rc = unsafe { libc::mprotect(host_mem, size, new_prot) };
+    if mprotect_rc != 0 {
+        bail!("mprotect failed while changing guest host memory protection");
+    }
+
+    if new_prot == libc::PROT_NONE {
+        hv_check(unsafe { hv_vm_unmap(gpa, size) }, "hv_vm_unmap")
+            .context("unmapping guest memory after PROT_NONE transition")?;
+        return Ok(());
+    }
+
+    hv_check(
+        unsafe { hv_vm_map(host_mem, gpa, size, hv_flags) },
+        "hv_vm_map",
+    )
+    .context("mapping guest memory into HVF VM after host protection transition")
+}
+
 fn hv_return_name(rc: i32) -> &'static str {
     match rc {
         HV_SUCCESS => "HV_SUCCESS",
         HV_BUSY => "HV_BUSY",
+        HV_VCPU_CREATE_UNAVAILABLE => "HV_VCPU_CREATE_UNAVAILABLE",
         _ => "UNKNOWN",
     }
 }
@@ -1184,6 +1576,11 @@ pub fn preflight() -> Result<()> {
     if hv_vmm_present == Some(1) {
         bail!("host appears to be running inside a VM (kern.hv_vmm_present=1); nested HVF is typically unavailable");
     }
+    if vmx != Some(true) {
+        bail!(
+            "x86_64 HVF backend requires Intel VMX, but machdep.cpu.features VMX is unavailable/false"
+        );
+    }
 
     eprintln!("[veer-vm] preflight checks passed; if hv_vm_create still fails, check for hypervisor contention");
     Ok(())
@@ -1193,6 +1590,18 @@ pub fn probe() -> Result<()> {
     preflight()?;
     let create_rc = unsafe { hv_vm_create(0) };
     if create_rc != HV_SUCCESS {
+        // Error -85377017 specifically means missing hypervisor entitlement
+        if create_rc == HV_BUSY {
+            bail!(
+                "hv_vm_create failed with hv_return_t={} (HV_BUSY / ENTITLEMENT_MISSING)\n\n\
+                 CRITICAL: veer-vm binary must be code-signed with:\n\
+                   com.apple.security.hypervisor = true\n\n\
+                 The build script (build-mac.sh) should have done this automatically.\n\
+                 Try rebuilding: ./scripts/build-mac.sh\n\n{}",
+                create_rc,
+                hvf_preflight_hints()
+            );
+        }
         bail!(
             "hv_vm_create failed with hv_return_t={} ({}){}",
             create_rc,
@@ -1207,6 +1616,70 @@ pub fn probe() -> Result<()> {
     Ok(())
 }
 
+pub fn vcpu_probe() -> Result<()> {
+    preflight()?;
+
+    let create_vm_rc = unsafe { hv_vm_create(0) };
+    if create_vm_rc != HV_SUCCESS {
+        if create_vm_rc == HV_BUSY {
+            bail!(
+                "hv_vm_create failed with hv_return_t={} (HV_BUSY / ENTITLEMENT_MISSING)\n\n\
+                 CRITICAL: the exact veer-vm binary being executed must be code-signed with:\n\
+                   com.apple.security.hypervisor = true\n\n\
+                 Rebuild/sign using: ./scripts/build-mac.sh\n\
+                 Then verify the same binary path you run:\n\
+                   codesign --verify --verbose=4 <veer-vm-path>\n\
+                   codesign --display --entitlements - <veer-vm-path>\n\n{}",
+                create_vm_rc,
+                hvf_preflight_hints()
+            );
+        }
+        bail!(
+            "hv_vm_create failed with hv_return_t={} ({}){}",
+            create_vm_rc,
+            hv_return_name(create_vm_rc),
+            hvf_preflight_hints()
+        );
+    }
+
+    let mut vcpu_id: HvVcpuId = 0;
+    let mut exit_ptr: *mut c_void = ptr::null_mut();
+    let (create_vcpu_rc, create_vcpu_diag) =
+        hv_vcpu_create_compat(&mut vcpu_id as *mut HvVcpuId, &mut exit_ptr as *mut *mut c_void);
+
+    if create_vcpu_rc != HV_SUCCESS {
+        let _ = unsafe { hv_vm_destroy() };
+        if create_vcpu_rc == HV_VCPU_CREATE_UNAVAILABLE {
+            bail!(
+                "hvf vcpu probe failed: hv_vcpu_create returned {} ({})\n\
+                 Hint: Intel VMX vCPU APIs appear unavailable on this host/session.\n\
+                 Ensure native Intel macOS with VT-x/VMX available and no nested VM.\n\
+                 create-attempts: {}{}",
+                create_vcpu_rc,
+                hv_return_name(create_vcpu_rc),
+                create_vcpu_diag,
+                hvf_preflight_hints()
+            );
+        }
+        bail!(
+            "hvf vcpu probe failed: hv_vcpu_create returned {} ({})\n\
+             create-attempts: {}{}",
+            create_vcpu_rc,
+            hv_return_name(create_vcpu_rc),
+            create_vcpu_diag,
+            hvf_preflight_hints()
+        );
+    }
+
+    hv_check(unsafe { hv_vcpu_destroy(vcpu_id) }, "hv_vcpu_destroy")
+        .context("destroying temporary probe vCPU")?;
+    hv_check(unsafe { hv_vm_destroy() }, "hv_vm_destroy")
+        .context("destroying temporary probe VM")?;
+
+    eprintln!("[veer-vm] hvf vcpu probe passed: vm+vcpu create/destroy succeeded");
+    Ok(())
+}
+
 fn read_reg(vcpu: HvVcpuId, reg: u32, name: &str) -> Result<u64> {
     let mut value = 0u64;
     hv_check(
@@ -1216,7 +1689,9 @@ fn read_reg(vcpu: HvVcpuId, reg: u32, name: &str) -> Result<u64> {
     Ok(value)
 }
 
-fn run_vcpu_placeholder(vcpu: HvVcpuId) -> Result<()> {
+
+fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
+    let vcpu = vcpu_state.id;
     // Optional bring-up hook for staged development.
     if std::env::var_os("VEER_VM_HVF_RUN_ONCE").is_none() {
         return Ok(());
@@ -1246,39 +1721,69 @@ fn run_vcpu_placeholder(vcpu: HvVcpuId) -> Result<()> {
     let mut lapic = HvfLapic::default();
     let mut ioapic = HvfIoapic::default();
     let inject_timer = std::env::var_os("VEER_VM_HVF_INJECT_TIMER").is_some();
-    let mut pending_timer_irq: Option<u8> = None;
-    let mut pending_uart_irq: Option<u8> = None;
+    let inject_nmi_once = std::env::var_os("VEER_VM_HVF_INJECT_NMI_ONCE").is_some();
+    let inject_init_once = std::env::var_os("VEER_VM_HVF_INJECT_INIT_ONCE").is_some();
+    let mut nmi_injected = false;
+    let mut init_injected = false;
     const MAX_STEPS: usize = 32;
     for _ in 0..MAX_STEPS {
-        if inject_timer {
-            if pending_timer_irq.is_none() {
-                pending_timer_irq = lapic.tick(1000);
-            }
-            if pending_uart_irq.is_none() {
-                pending_uart_irq = uart.poll_irq_vector(&ioapic);
-            }
-            let inject_vec = pending_timer_irq.or(pending_uart_irq);
-            if let Some(vector) = inject_vec {
-                if guest_can_accept_ext_interrupt(vcpu)? {
-                    if let Err(err) = inject_external_interrupt(vcpu, vector) {
-                        eprintln!(
-                            "[veer-vm] warning: timer interrupt injection failed for vector {}: {:#}",
-                            vector, err
-                        );
-                    } else {
-                        eprintln!("[veer-vm] injected external interrupt vector {}", vector);
-                        if pending_timer_irq == Some(vector) {
-                            pending_timer_irq = None;
-                        }
-                        if pending_uart_irq == Some(vector) {
-                            pending_uart_irq = None;
-                        }
-                    }
-                }
+        // Keep cached halt state aligned with guest VMCS activity state.
+        vcpu_state.halted = check_halt_state(vcpu)?;
+
+        if inject_nmi_once && !nmi_injected {
+            if let Err(err) = inject_nmi(vcpu) {
+                eprintln!("[veer-vm] warning: NMI injection failed: {:#}", err);
+            } else {
+                nmi_injected = true;
+                eprintln!("[veer-vm] injected one-shot NMI");
             }
         }
+
+        if inject_init_once && !init_injected {
+            if let Err(err) = inject_init(vcpu) {
+                eprintln!("[veer-vm] warning: INIT injection failed: {:#}", err);
+            } else {
+                init_injected = true;
+                eprintln!("[veer-vm] injected one-shot INIT");
+            }
+        }
+
+        if inject_timer {
+            if let Some(vector) = lapic.tick(1000) {
+                queue_interrupt(vcpu_state, vector);
+            }
+            if let Some(vector) = uart.poll_irq_vector(&ioapic) {
+                queue_interrupt(vcpu_state, vector);
+            }
+        }
+
+        if let Err(err) = deliver_pending_interrupt(vcpu_state) {
+            eprintln!(
+                "[veer-vm] warning: pending interrupt delivery failed for vCPU {}: {:#}",
+                vcpu, err
+            );
+        }
+
+        if vcpu_state.halted && vcpu_state.pending_interrupt.is_none() {
+            // Stay parked until an interrupt becomes pending.
+            continue;
+        }
+
         hv_check(unsafe { hv_vcpu_run(vcpu) }, "hv_vcpu_run")?;
         let exit_state = read_exit_state(vcpu)?;
+
+        eprintln!(
+            "[veer-vm] raw exit state: reason={} raw={:#x} qualification={:#x} instr_len={} guest_phys_addr={:?}",
+            exit_state.reason,
+            exit_state.reason_raw,
+            exit_state.qualification,
+            exit_state.instr_len,
+            exit_state.guest_phys_addr,
+        );
+
+        if exit_state.reason == 33 {
+            dump_invalid_guest_state(vcpu);
+        }
 
         let rip = read_reg(vcpu, HV_X86_RIP, "hv_vcpu_read_register(RIP)")?;
         match dispatch_exit(vcpu, &exit_state, &mut uart, &mut lapic, &mut ioapic)? {
@@ -1287,8 +1792,22 @@ fn run_vcpu_placeholder(vcpu: HvVcpuId) -> Result<()> {
                 continue;
             }
             ExitDispatch::Stop(exit) => {
-                eprintln!("[veer-vm] HVF run-once returned, RIP={:#x}, exit={:?}", rip, exit);
-                return Ok(());
+                match exit {
+                    ExitReason::Hlt => {
+                        set_halted(vcpu_state, true)?;
+                        eprintln!("[veer-vm] guest entered HLT state at RIP={:#x}", rip);
+                        continue;
+                    }
+                    ExitReason::Shutdown => {
+                        set_activity_state(vcpu, VMCS_ACTIVITY_STATE_SHUTDOWN)?;
+                        eprintln!("[veer-vm] HVF run-once returned, RIP={:#x}, exit={:?}", rip, exit);
+                        return Ok(());
+                    }
+                    _ => {
+                        eprintln!("[veer-vm] HVF run-once returned, RIP={:#x}, exit={:?}", rip, exit);
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -1304,6 +1823,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     if cfg.guest_arch != GuestArch::X86_64 {
         bail!("macOS HVF skeleton currently supports only --arch x86_64");
     }
+    preflight()?;
     let kernel_path = match &cfg.boot {
         BootSource::Kernel(path) => path,
         BootSource::Snapshot(_) => {
@@ -1312,6 +1832,23 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     };
     if cfg.snapshot_save.is_some() {
         bail!("--snapshot-save is not implemented for the macOS HVF skeleton yet");
+    }
+    if cfg.tap_name.is_some() {
+        bail!("--tap is not supported on macOS HVF; use --vmnet shared|host instead");
+    }
+    if let Some(mode) = cfg.vmnet_mode {
+        match mode {
+            VmnetMode::Shared => {
+                eprintln!(
+                    "[veer-vm] vmnet mode requested: shared (backend wiring pending; boot continues without host NIC attachment)"
+                );
+            }
+            VmnetMode::Host => {
+                eprintln!(
+                    "[veer-vm] vmnet mode requested: host (backend wiring pending; boot continues without host NIC attachment)"
+                );
+            }
+        }
     }
 
     let create_rc = unsafe { hv_vm_create(0) };
@@ -1324,36 +1861,16 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         );
     }
 
-    let mem_ptr = unsafe {
-        libc::mmap(
-            ptr::null_mut(),
-            cfg.memory_bytes,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANON,
-            -1,
-            0,
-        )
-    };
-    if mem_ptr == libc::MAP_FAILED {
-        bail!("mmap failed while allocating guest memory");
-    }
+    let mut guest_memory = HvfGuestMemoryRegion::allocate(
+        cfg.memory_bytes,
+        0,
+        HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC,
+    )?;
+    guest_memory.set_protection(libc::PROT_READ | libc::PROT_WRITE)?;
 
-    hv_check(
-        unsafe {
-            hv_vm_map(
-                mem_ptr,
-                0,
-                cfg.memory_bytes,
-                HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC,
-            )
-        },
-        "hv_vm_map",
-    )
-    .context("mapping guest memory into HVF VM")?;
-
-    let loaded = load_kernel(kernel_path, mem_ptr, cfg.memory_bytes)
+    let loaded = load_kernel(kernel_path, guest_memory.host_mem, guest_memory.size)
         .with_context(|| format!("loading kernel {}", kernel_path.display()))?;
-    let mbinfo_gpa = write_multiboot_info(mem_ptr, cfg.memory_bytes)?;
+    let mbinfo_gpa = write_multiboot_info(guest_memory.host_mem, guest_memory.size)?;
     eprintln!(
         "[veer-vm] loaded kernel {}: entry={:#x} end={:#x} memory={} MiB",
         kernel_path.display(),
@@ -1362,28 +1879,67 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         cfg.memory_bytes / (1024 * 1024),
     );
 
-    let mut vcpu: HvVcpuId = 0;
-    let mut exit_ptr: *mut c_void = ptr::null_mut();
-    hv_check(
-        unsafe { hv_vcpu_create(&mut vcpu as *mut HvVcpuId, &mut exit_ptr as *mut *mut c_void, 0) },
-        "hv_vcpu_create",
-    )
-    .context("creating vCPU 0")?;
-    setup_vcpu_initial_state(vcpu, loaded.entry, mbinfo_gpa)
-        .context("programming initial vCPU register state")?;
-    run_vcpu_placeholder(vcpu)?;
-
-    let _vm_guard = HvfVm {
-        host_mem: mem_ptr,
-        mem_size: cfg.memory_bytes,
-        vcpu_id: Some(vcpu),
+    // Phase 2: Multi-vCPU support (default to 1 CPU for now, expandable to 2-4)
+    let num_vcpus = 1;  // TODO: make configurable from CLI
+    let mut vcpu_states = Vec::new();
+    
+    for cpu_idx in 0..num_vcpus {
+        let mut vcpu_id: HvVcpuId = 0;
+        let mut exit_ptr: *mut c_void = ptr::null_mut();
+        let (create_vcpu_rc, create_vcpu_diag) = hv_vcpu_create_compat(
+            &mut vcpu_id as *mut HvVcpuId,
+            &mut exit_ptr as *mut *mut c_void,
+        );
+        if create_vcpu_rc != HV_SUCCESS {
+            if create_vcpu_rc == HV_VCPU_CREATE_UNAVAILABLE {
+                bail!(
+                    "creating vCPU {} failed: hv_vcpu_create returned {} ({})\n\
+                     Hint: this commonly indicates Intel VMX vCPU APIs are unavailable on this host/session.\n\
+                     Ensure you are on native Intel macOS with VT-x/VMX available and not inside a nested VM.\n\
+                     create-attempts: {}{}",
+                    cpu_idx,
+                    create_vcpu_rc,
+                    hv_return_name(create_vcpu_rc),
+                    create_vcpu_diag,
+                    hvf_preflight_hints()
+                );
+            }
+            bail!(
+                "creating vCPU {} failed: hv_vcpu_create returned {} ({})\n\
+                 create-attempts: {}{}",
+                cpu_idx,
+                create_vcpu_rc,
+                hv_return_name(create_vcpu_rc),
+                create_vcpu_diag,
+                hvf_preflight_hints()
+            );
+        }
+        
+        setup_vcpu_initial_state(vcpu_id, loaded.entry, mbinfo_gpa)
+            .context(format!("programming initial vCPU {} register state", cpu_idx))?;
+        
+        vcpu_states.push(VcpuState {
+            id: vcpu_id,
+            halted: false,
+            pending_interrupt: None,
+        });
+    }
+    
+    let mut vm_guard = HvfVm {
+        memory: guest_memory,
+        vcpus: vcpu_states,
     };
 
+    // Run Phase 2 placeholder with first vCPU (mutable state for interrupt handling)
+    if !vm_guard.vcpus.is_empty() {
+        run_vcpu_placeholder(&mut vm_guard.vcpus[0])?;
+    }
+
     eprintln!(
-        "[veer-vm] HVF backend initialized (macOS skeleton, guest={} memory={} MiB, vcpu={})",
+        "[veer-vm] HVF backend initialized (Phase 2 multi-vCPU, guest={} memory={} MiB, vcpus={})",
         cfg.guest_arch.as_str(),
         cfg.memory_bytes / (1024 * 1024),
-        vcpu,
+        num_vcpus,
     );
     Ok(())
 }

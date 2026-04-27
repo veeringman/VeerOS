@@ -463,13 +463,13 @@ fn shell_task() -> ! {
         platform: "QEMU PC (x86-64)",
         scheduler: "minimal",
         get_uptime_ticks: Some(get_uptime_ticks),
+        sleep_ms: Some(shell_sleep_ms),
         get_task_list: Some(write_task_list),
         get_mem_info: Some(write_mem_info),
         get_driver_list: Some(write_driver_list),
         wifi_cmd: None,
         bt_cmd: None,
         zigbee_cmd: None,
-        sensor_cmd: None,
         sensor_cmd: None,
         get_current_user: Some(get_current_user),
         get_user_list: Some(write_user_list),
@@ -979,14 +979,14 @@ fn ssh_session_task() {
                 platform: "QEMU PC (x86-64) [SSH]",
                 scheduler: "minimal",
                 get_uptime_ticks: Some(get_uptime_ticks),
+                sleep_ms: Some(shell_sleep_ms),
                 get_task_list: Some(write_task_list),
                 get_mem_info: Some(write_mem_info),
                 get_driver_list: Some(write_driver_list),
                 wifi_cmd: None,
                 bt_cmd: None,
                 zigbee_cmd: None,
-        sensor_cmd: None,
-        sensor_cmd: None,
+                sensor_cmd: None,
                 get_current_user: Some(get_current_user),
                 get_user_list: Some(write_user_list),
                 vfs_list_dir: Some(vfs_list_dir),
@@ -1113,6 +1113,19 @@ impl Serial for SshSerial<'_> {
 #[cfg(feature = "shell")]
 fn get_uptime_ticks() -> u64 {
     unsafe { (*SCHEDULER.0.get()).ticks }
+}
+
+#[cfg(feature = "shell")]
+fn shell_sleep_ms(ms: u64) {
+    let ms = ms.min(60_000);
+    if ms == 0 {
+        return;
+    }
+    let start = unsafe { (*SCHEDULER.0.get()).ticks };
+    let target = start.saturating_add(ms);
+    while unsafe { (*SCHEDULER.0.get()).ticks } < target {
+        core::hint::spin_loop();
+    }
 }
 
 #[cfg(feature = "shell")]

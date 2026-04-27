@@ -60,6 +60,39 @@ impl VirtioNet {
         if ifname.len() >= 16 {
             bail!("TAP interface name '{ifname}' too long (max 15 bytes)");
         }
+
+        #[cfg(target_os = "macos")]
+        {
+            // macOS with tuntaposx exposes per-interface character devices
+            // like /dev/tap0, /dev/tap1, etc. Open the device directly and
+            // set O_NONBLOCK for RX polling.
+            if !ifname.starts_with("tap") {
+                bail!(
+                    "macOS TAP name '{ifname}' is unsupported (expected tapN, e.g. tap0)"
+                );
+            }
+            let dev_path = format!("/dev/{ifname}");
+            let c_path = std::ffi::CString::new(dev_path.clone())
+                .context("building TAP device path")?;
+            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+            if fd < 0 {
+                let e = std::io::Error::last_os_error();
+                bail!(
+                    "open {dev_path}: {e} (install/load tuntaposx and ensure {ifname} exists)"
+                );
+            }
+
+            let transport = VirtioTransport::new(/*num_queues=*/2, VIRTIO_NET_F_MAC);
+            return Ok(Self {
+                transport,
+                mac,
+                tap_fd: fd,
+                tap_name: ifname.to_string(),
+            });
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
         let fd = unsafe {
             libc::open(
                 b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
@@ -104,6 +137,7 @@ impl VirtioNet {
             tap_fd: fd,
             tap_name: ifname.to_string(),
         })
+        }
     }
 
     pub fn mac(&self) -> [u8; 6] { self.mac }

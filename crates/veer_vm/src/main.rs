@@ -78,6 +78,13 @@ struct Cli {
     #[arg(long)]
     tap: Option<String>,
 
+    /// macOS-only host networking mode via vmnet.framework.
+    ///
+    /// `shared` uses host NAT; `host` creates host-only networking.
+    /// Mutually exclusive with `--tap`.
+    #[arg(long, value_enum)]
+    vmnet: Option<VmnetModeArg>,
+
     /// MAC address to advertise to the guest (format `aa:bb:cc:dd:ee:ff`).
     /// Defaults to a locally-administered, randomly-seeded address.
     /// When restoring with `--tap` and no `--mac`, the MAC saved in the
@@ -119,6 +126,19 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     hvf_probe: bool,
 
+    /// Alias for `--hvf-probe`.
+    ///
+    /// Kept for quick diagnostics and backwards compatibility.
+    #[arg(long, hide = true, default_value_t = false)]
+    probe: bool,
+
+    /// Run a minimal Hypervisor.framework VM + vCPU create/destroy probe and exit.
+    ///
+    /// macOS-only diagnostic aid to isolate hv_vcpu_create compatibility and
+    /// host support issues from guest boot plumbing.
+    #[arg(long, default_value_t = false)]
+    hvf_vcpu_probe: bool,
+
     /// Run a single HVF vCPU cycle and print the decoded VM-exit reason.
     ///
     /// macOS-only diagnostic aid for backend bring-up.
@@ -140,11 +160,28 @@ enum ArchArg {
     Riscv32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum VmnetModeArg {
+    #[value(name = "shared")]
+    Shared,
+    #[value(name = "host")]
+    Host,
+}
+
 impl ArchArg {
     fn to_guest_arch(self) -> config::GuestArch {
         match self {
             ArchArg::X8664 => config::GuestArch::X86_64,
             ArchArg::Riscv32 => config::GuestArch::Riscv32,
+        }
+    }
+}
+
+impl VmnetModeArg {
+    fn to_vmnet_mode(self) -> config::VmnetMode {
+        match self {
+            VmnetModeArg::Shared => config::VmnetMode::Shared,
+            VmnetModeArg::Host => config::VmnetMode::Host,
         }
     }
 }
@@ -187,14 +224,20 @@ fn main() -> Result<()> {
     if cli.hvf_preflight {
         anyhow::bail!("--hvf-preflight is macOS-only");
     }
-    if cli.hvf_probe {
+    if cli.hvf_probe || cli.probe {
         anyhow::bail!("--hvf-probe is macOS-only");
     }
     if cli.hvf_run_once {
         anyhow::bail!("--hvf-run-once is macOS-only");
     }
+    if cli.hvf_vcpu_probe {
+        anyhow::bail!("--hvf-vcpu-probe is macOS-only");
+    }
     if cli.hvf_inject_timer {
         anyhow::bail!("--hvf-inject-timer is macOS-only");
+    }
+    if cli.vmnet.is_some() {
+        anyhow::bail!("--vmnet is macOS-only");
     }
     let restore_path = cli.restore.clone();
     let boot = match (cli.kernel, cli.restore) {
@@ -230,6 +273,7 @@ fn main() -> Result<()> {
         disk_path: cli.disk,
         disk_read_only: cli.disk_ro,
         tap_name: cli.tap,
+        vmnet_mode: None,
         mac,
         snapshot_save: cli.snapshot_save,
         cpu_throttle_ms: cli.cpu_throttle_ms,
@@ -241,11 +285,17 @@ fn main() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.tap.is_some() && cli.vmnet.is_some() {
+        anyhow::bail!("--tap and --vmnet are mutually exclusive");
+    }
     if cli.hvf_preflight {
         return backend::hvf::preflight();
     }
-    if cli.hvf_probe {
+    if cli.hvf_probe || cli.probe {
         return backend::hvf::probe();
+    }
+    if cli.hvf_vcpu_probe {
+        return backend::hvf::vcpu_probe();
     }
     if cli.hvf_run_once {
         std::env::set_var("VEER_VM_HVF_RUN_ONCE", "1");
@@ -274,6 +324,7 @@ fn main() -> Result<()> {
         disk_path: cli.disk,
         disk_read_only: cli.disk_ro,
         tap_name: cli.tap,
+        vmnet_mode: cli.vmnet.map(|m| m.to_vmnet_mode()),
         mac,
         snapshot_save: cli.snapshot_save,
         cpu_throttle_ms: cli.cpu_throttle_ms,
