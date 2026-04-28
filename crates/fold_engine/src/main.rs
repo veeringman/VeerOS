@@ -3,13 +3,14 @@
 mod cli;
 mod engine;
 mod manifest;
+mod mobility;
 mod state;
 mod vm;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::cli::{Cli, Cmd, VmCmd};
+use crate::cli::{Cli, Cmd, MobilityCmd, VmCmd};
 use crate::engine::{Engine, PlatformEngine};
 use crate::manifest::Manifest;
 use crate::state::StateDir;
@@ -23,6 +24,7 @@ fn main() -> Result<()> {
         Cmd::Stop { name } => cmd_stop(&name),
         Cmd::Rm { name, force } => cmd_rm(&name, force),
         Cmd::Vm { cmd } => cmd_vm(cmd),
+        Cmd::Mobility { cmd } => cmd_mobility(cmd),
     }
 }
 
@@ -133,6 +135,77 @@ fn cmd_vm(cmd: VmCmd) -> Result<()> {
             println!();
             println!("Stream boot output:  fold logs {} --follow", rec.name);
             println!("Shut it down     :  fold stop {}", rec.name);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_mobility(cmd: MobilityCmd) -> Result<()> {
+    match cmd {
+        MobilityCmd::MigratePlan {
+            name,
+            target_zone,
+            target_device,
+            strategy,
+            json,
+        } => {
+            let state = StateDir::open()?;
+            let rec = state
+                .load(&name)
+                .with_context(|| format!("no such fold: {name}"))?;
+            let plan = mobility::build_migration_plan(
+                &rec,
+                &target_zone,
+                target_device.as_deref(),
+                strategy.into(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                println!("migration plan for fold {}", plan.fold);
+                println!("  strategy      : {:?}", plan.strategy);
+                println!("  target zone   : {}", plan.target_zone);
+                if let Some(dev) = &plan.target_device {
+                    println!("  target device : {}", dev);
+                }
+                println!("  checkpoint    : {}", plan.requires_checkpoint);
+                println!("  steps:");
+                for step in &plan.steps {
+                    println!("    - {}", step);
+                }
+            }
+            Ok(())
+        }
+        MobilityCmd::ReplicatePlan {
+            name,
+            targets,
+            consistency,
+            json,
+        } => {
+            let state = StateDir::open()?;
+            let rec = state
+                .load(&name)
+                .with_context(|| format!("no such fold: {name}"))?;
+            let plan = mobility::build_replication_plan(&rec, &targets, consistency.into())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                println!("replication plan for fold {}", plan.fold);
+                println!("  consistency : {:?}", plan.consistency);
+                println!("  targets:");
+                for t in &plan.targets {
+                    println!(
+                        "    - zone={} device={} replica={}",
+                        t.zone,
+                        t.device.as_deref().unwrap_or("<auto>"),
+                        t.replica_name
+                    );
+                }
+                println!("  steps:");
+                for step in &plan.steps {
+                    println!("    - {}", step);
+                }
+            }
             Ok(())
         }
     }

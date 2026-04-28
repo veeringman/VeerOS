@@ -61,6 +61,10 @@ sudo ./target/release/fold spawn --manifest crates/fold_engine/examples/hardened
 ./target/release/fold logs rootless
 ./target/release/fold stop rootless
 ./target/release/fold rm rootless
+
+# Mobility planning (Phase D)
+./target/release/fold mobility migrate-plan rootless --target-zone zone-east --target-device dev{edge-a,corp,active}
+./target/release/fold mobility replicate-plan rootless --target zone-east:dev{edge-a,corp,active} --target zone-west
 ```
 
 For rootless cgroup limits, wrap the spawn in a delegated scope:
@@ -141,6 +145,8 @@ removed when the manifest is loaded.
 - [ ] veth pair + optional bridge attachment
 - [ ] overlayfs rootfs layering
 - [ ] GPU / accelerator attach (UAI bridge)
-- [ ] Snapshot / migration / refold
+- [~] Snapshot / migration / refold
+  - [x] Migration/replication plan generation (`fold mobility migrate-plan|replicate-plan`)
+  - [ ] Runtime checkpoint transfer + restore execution path
 - [ ] macOS backend (sandbox_init + launchd)
 - [ ] Windows backend (Job Objects + Windows containers)

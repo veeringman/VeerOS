@@ -54,6 +54,12 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: VmCmd,
     },
+
+    /// Mobility planning for fold migration and replication.
+    Mobility {
+        #[command(subcommand)]
+        cmd: MobilityCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -129,6 +135,54 @@ impl VmArchArg {
     }
 }
 
+#[derive(Subcommand, Debug)]
+pub enum MobilityCmd {
+    /// Build a migration plan for moving a fold to another zone/device.
+    MigratePlan {
+        /// Fold name from local state registry.
+        name: String,
+        /// Destination zone (VAS atom style, free-form string).
+        #[arg(long)]
+        target_zone: String,
+        /// Optional destination device identity.
+        #[arg(long)]
+        target_device: Option<String>,
+        /// Migration strategy.
+        #[arg(long, value_enum, default_value_t = MigrationStrategyArg::Live)]
+        strategy: MigrationStrategyArg,
+        /// Emit JSON plan.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Build a replication plan to fan out a fold into additional zones/devices.
+    ReplicatePlan {
+        /// Fold name from local state registry.
+        name: String,
+        /// Replication targets as `<zone>:<device>` or `<zone>`.
+        #[arg(long = "target", required = true)]
+        targets: Vec<String>,
+        /// Replication consistency model.
+        #[arg(long, value_enum, default_value_t = ReplicationConsistencyArg::Eventual)]
+        consistency: ReplicationConsistencyArg,
+        /// Emit JSON plan.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MigrationStrategyArg {
+    Live,
+    Cold,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ReplicationConsistencyArg {
+    Eventual,
+    Strong,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +228,74 @@ mod tests {
         match cli.cmd {
             Cmd::Vm { cmd: VmCmd::Spawn { tap, .. } } => {
                 assert!(tap.is_none());
+            }
+            _ => panic!("parsed wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn mobility_migrate_plan_parses() {
+        let cli = Cli::try_parse_from([
+            "fold",
+            "mobility",
+            "migrate-plan",
+            "worker-a",
+            "--target-zone",
+            "zone-east",
+            "--target-device",
+            "dev{host,edge,active}",
+            "--strategy",
+            "cold",
+        ])
+        .unwrap();
+
+        match cli.cmd {
+            Cmd::Mobility {
+                cmd: MobilityCmd::MigratePlan {
+                    name,
+                    target_zone,
+                    target_device,
+                    strategy,
+                    ..
+                },
+            } => {
+                assert_eq!(name, "worker-a");
+                assert_eq!(target_zone, "zone-east");
+                assert_eq!(target_device.as_deref(), Some("dev{host,edge,active}"));
+                assert_eq!(strategy, MigrationStrategyArg::Cold);
+            }
+            _ => panic!("parsed wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn mobility_replicate_plan_parses_multi_targets() {
+        let cli = Cli::try_parse_from([
+            "fold",
+            "mobility",
+            "replicate-plan",
+            "worker-a",
+            "--target",
+            "zone-east:dev{edge-a,edge,active}",
+            "--target",
+            "zone-west",
+            "--consistency",
+            "strong",
+        ])
+        .unwrap();
+
+        match cli.cmd {
+            Cmd::Mobility {
+                cmd: MobilityCmd::ReplicatePlan {
+                    name,
+                    targets,
+                    consistency,
+                    ..
+                },
+            } => {
+                assert_eq!(name, "worker-a");
+                assert_eq!(targets.len(), 2);
+                assert_eq!(consistency, ReplicationConsistencyArg::Strong);
             }
             _ => panic!("parsed wrong command variant"),
         }

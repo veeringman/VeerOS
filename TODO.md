@@ -50,7 +50,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - [x] Advanced permission algebra (set ops, intersections, time bounds, context predicates)
   - [x] High-level developer SDK for Aura / Fold / Service orchestration
 - [ ] **Phase D — Full Orchestration & Mobility**
-  - [ ] Fold migration + replication across devices and zones (functorial mapping)
+  - [x] Fold migration + replication across devices and zones (functorial mapping)
   - [ ] Graph-driven workload placement + continuous re-optimization (with hysteresis)
   - [ ] Aura-aware resource scheduling (GPU slices, storage, bandwidth quotas)
   - [ ] Cross-zone, cross-Aura flows and data movement primitives
