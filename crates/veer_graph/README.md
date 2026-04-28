@@ -48,3 +48,16 @@ assert_eq!(out.len(), 1);
 
 Use `ingest_signal` for single updates or `ingest_batch` for stream/batch input,
 and read `telemetry_stats()` for accepted/rejected counts.
+
+## Solver Engine
+
+`veer_graph` includes a Phase B solver API:
+
+- `solve_best_target(source, edge_kind, target_kind, coefficients)`
+
+Objective function:
+
+- `argmin(alpha*latency + beta*(cost+load) - gamma*trust - delta*affinity)`
+
+This lets callers pick the best destination vertex for service/Fold selection
+using live graph + telemetry weights.

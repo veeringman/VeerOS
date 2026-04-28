@@ -162,6 +162,33 @@ pub struct TelemetryStats {
     pub rejected: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SolverWeights {
+    pub alpha_latency: f32,
+    pub beta_cost: f32,
+    pub gamma_trust: f32,
+    pub delta_affinity: f32,
+}
+
+impl Default for SolverWeights {
+    fn default() -> Self {
+        Self {
+            alpha_latency: 1.0,
+            beta_cost: 1.0,
+            gamma_trust: 1.0,
+            delta_affinity: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SolverChoice {
+    pub target: String,
+    pub edge_kind: EdgeKind,
+    pub score: f32,
+    pub weights: EdgeWeights,
+}
+
 #[derive(Debug, Default)]
 pub struct GraphCore {
     vertices: HashMap<String, Vertex>,
@@ -303,6 +330,65 @@ impl GraphCore {
 
     pub fn edge_count(&self) -> usize {
         self.edges.len()
+    }
+
+    /// Solve `argmin_x (alpha*L + beta*(C+load) - gamma*T - delta*A)` over
+    /// outgoing edges from `source_raw` filtered by `edge_kind`, optionally
+    /// constrained to destination vertex kind.
+    pub fn solve_best_target(
+        &self,
+        source_raw: &str,
+        edge_kind: EdgeKind,
+        target_kind: Option<VertexKind>,
+        coefficients: SolverWeights,
+    ) -> Result<Option<SolverChoice>, GraphError> {
+        let source = canonicalize(source_raw).map_err(|_| GraphError::InvalidVertexId)?;
+        if !self.vertices.contains_key(&source) {
+            return Err(GraphError::MissingVertex);
+        }
+
+        let mut best: Option<SolverChoice> = None;
+
+        for edge in self.edges.values() {
+            if edge.from != source || edge.kind != edge_kind {
+                continue;
+            }
+
+            if let Some(expected_kind) = target_kind {
+                let Some(v) = self.vertices.get(&edge.to) else {
+                    continue;
+                };
+                if v.kind != expected_kind {
+                    continue;
+                }
+            }
+
+            let score = coefficients.alpha_latency * edge.weights.latency
+                + coefficients.beta_cost * (edge.weights.cost + edge.weights.load)
+                - coefficients.gamma_trust * edge.weights.trust
+                - coefficients.delta_affinity * edge.weights.affinity;
+
+            let candidate = SolverChoice {
+                target: edge.to.clone(),
+                edge_kind,
+                score,
+                weights: edge.weights,
+            };
+
+            match &best {
+                None => best = Some(candidate),
+                Some(cur) => {
+                    if candidate.score < cur.score
+                        || ((candidate.score - cur.score).abs() <= f32::EPSILON
+                            && candidate.target < cur.target)
+                    {
+                        best = Some(candidate);
+                    }
+                }
+            }
+        }
+
+        Ok(best)
     }
 
     pub fn telemetry_stats(&self) -> TelemetryStats {
@@ -680,5 +766,132 @@ mod tests {
         assert_eq!(rejected, 1);
         assert_eq!(g.telemetry_stats().applied, 1);
         assert_eq!(g.telemetry_stats().rejected, 1);
+    }
+
+    #[test]
+    fn solver_picks_lowest_objective_score() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-b,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 9.0,
+                trust: 0.9,
+                cost: 0.2,
+                affinity: 0.9,
+                load: 0.4,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-b,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 6.0,
+                trust: 0.2,
+                cost: 0.1,
+                affinity: 0.1,
+                load: 0.3,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let choice = g
+            .solve_best_target(
+                "svc{render,company,live}",
+                EdgeKind::Reachability,
+                Some(VertexKind::Node),
+                SolverWeights {
+                    alpha_latency: 1.0,
+                    beta_cost: 1.0,
+                    gamma_trust: 1.0,
+                    delta_affinity: 1.0,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(choice.target, "nod{edge-b,zone-1,ready}");
+    }
+
+    #[test]
+    fn solver_honors_target_kind_filter() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("fld{worker,gpu,warm}", None, BTreeMap::new())
+            .unwrap();
+
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights::default(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "fld{worker,gpu,warm}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 0.1,
+                ..EdgeWeights::default()
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let node_choice = g
+            .solve_best_target(
+                "svc{render,company,live}",
+                EdgeKind::Reachability,
+                Some(VertexKind::Node),
+                SolverWeights::default(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(node_choice.target, "nod{edge-a,zone-1,ready}");
+
+        let fold_choice = g
+            .solve_best_target(
+                "svc{render,company,live}",
+                EdgeKind::Reachability,
+                Some(VertexKind::Fold),
+                SolverWeights::default(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(fold_choice.target, "fld{worker,gpu,warm}");
+    }
+
+    #[test]
+    fn solver_returns_none_when_no_candidate_matches() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+
+        let out = g
+            .solve_best_target(
+                "svc{render,company,live}",
+                EdgeKind::Reachability,
+                Some(VertexKind::Node),
+                SolverWeights::default(),
+            )
+            .unwrap();
+        assert!(out.is_none());
     }
 }
