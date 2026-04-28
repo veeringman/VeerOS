@@ -22,6 +22,7 @@ Binary path:
 veer aura create aur{design,private,open} --name "Design Aura"
 veer aura join aur{design,private,open}
 veer aura share aur{design,private,open} --with usr{alice,corp,active} --with usr{bob,corp,active}
+veer aura grant-agent aur{design,private,open} --agent agt{opsbot,corp,live} --expires-unix-ms 1790000000000 --scope observe --scope deploy
 veer aura leave aur{design,private,open}
 ```
 
@@ -29,6 +30,8 @@ Local Aura CLI state is stored at:
 
 - `$XDG_STATE_HOME/veeros/aura-state.json`
 - fallback: `$HOME/.local/state/veeros/aura-state.json`
+
+`grant-agent` stores a temporary, scoped membership grant for an agent with an explicit expiry timestamp.
 
 ### Fold launch with Aura overlays
 

@@ -46,6 +46,7 @@ enum AuraCmd {
     Create(AuraCreateArgs),
     Join(AuraJoinArgs),
     Share(AuraShareArgs),
+    GrantAgent(AuraGrantAgentArgs),
     Leave(AuraLeaveArgs),
 }
 
@@ -90,6 +91,17 @@ struct AuraShareArgs {
 #[derive(Args, Debug)]
 struct AuraLeaveArgs {
     aura: String,
+}
+
+#[derive(Args, Debug)]
+struct AuraGrantAgentArgs {
+    aura: String,
+    #[arg(long)]
+    agent: String,
+    #[arg(long)]
+    expires_unix_ms: u128,
+    #[arg(long = "scope", required = true)]
+    scopes: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -260,6 +272,16 @@ struct AuraState {
 struct CreatedAura {
     display_name: Option<String>,
     shared_with: BTreeSet<String>,
+    #[serde(default)]
+    temporary_agents: BTreeMap<String, TemporaryAgentGrant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TemporaryAgentGrant {
+    expires_unix_ms: u128,
+    #[serde(default)]
+    scopes: BTreeSet<String>,
+    granted_at_unix_ms: u128,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -682,6 +704,7 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
             }).or_insert(CreatedAura {
                 display_name: args.name,
                 shared_with: BTreeSet::new(),
+                temporary_agents: BTreeMap::new(),
             });
             save_state(&state)?;
             println!("aura created: {}", aura);
@@ -715,6 +738,47 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
             println!("shared aura {} with {} new member(s)", aura, added);
             Ok(())
         }
+        AuraCmd::GrantAgent(args) => {
+            let now = now_unix_ms();
+            if args.expires_unix_ms <= now {
+                bail!("expires_unix_ms must be in the future");
+            }
+
+            let aura = canonical_typed(&args.aura, AddressType::Aura, "aura")?;
+            let agent = canonical_typed(&args.agent, AddressType::Agent, "agent")?;
+            let created = state
+                .created
+                .get_mut(&aura)
+                .with_context(|| format!("aura not found in local state: {aura}; create it first with veer aura create"))?;
+
+            let mut scopes = BTreeSet::new();
+            for scope in &args.scopes {
+                let s = scope.trim().to_ascii_lowercase();
+                if s.is_empty() {
+                    bail!("scope values must be non-empty");
+                }
+                scopes.insert(s);
+            }
+            if scopes.is_empty() {
+                bail!("at least one --scope is required");
+            }
+
+            created.temporary_agents.insert(
+                agent.clone(),
+                TemporaryAgentGrant {
+                    expires_unix_ms: args.expires_unix_ms,
+                    scopes,
+                    granted_at_unix_ms: now,
+                },
+            );
+
+            save_state(&state)?;
+            println!(
+                "temporary agent membership granted: {} in {} until {}",
+                agent, aura, args.expires_unix_ms
+            );
+            Ok(())
+        }
         AuraCmd::Leave(args) => {
             let aura = canonical_typed(&args.aura, AddressType::Aura, "aura")?;
             let removed = state.joined.remove(&aura);
@@ -727,6 +791,13 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn now_unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 fn cmd_fold(cmd: FoldCmd) -> Result<()> {

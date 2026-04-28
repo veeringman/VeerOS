@@ -36,6 +36,14 @@ pub struct Aura {
     pub parent: Option<AuraId>,
     pub children: BTreeSet<AuraId>,
     pub members: BTreeSet<String>,
+    pub temporary_members: HashMap<String, TemporaryMembership>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemporaryMembership {
+    pub granted_by: String,
+    pub expires_unix_ms: u128,
+    pub scopes: BTreeSet<String>,
 }
 
 impl Aura {
@@ -47,6 +55,7 @@ impl Aura {
             parent: None,
             children: BTreeSet::new(),
             members: BTreeSet::new(),
+            temporary_members: HashMap::new(),
         }
     }
 
@@ -84,15 +93,99 @@ impl Aura {
 
     pub fn remove_member(&mut self, member_address: &str) -> Result<bool, AuraError> {
         let canonical = canonicalize(member_address).map_err(|_| AuraError::InvalidAddress)?;
-        Ok(self.members.remove(&canonical))
+        let removed_static = self.members.remove(&canonical);
+        let removed_temp = self.temporary_members.remove(&canonical).is_some();
+        Ok(removed_static || removed_temp)
     }
 
     pub fn contains_member(&self, member_address: &str) -> bool {
         canonicalize(member_address)
             .ok()
-            .map(|s| self.members.contains(&s))
+            .map(|s| {
+                self.members.contains(&s)
+                    || self
+                        .temporary_members
+                        .get(&s)
+                        .map(|m| m.expires_unix_ms > now_unix_ms())
+                        .unwrap_or(false)
+            })
             .unwrap_or(false)
     }
+
+    pub fn contains_member_at(&self, member_address: &str, now_unix_ms: u128) -> bool {
+        canonicalize(member_address)
+            .ok()
+            .map(|s| {
+                self.members.contains(&s)
+                    || self
+                        .temporary_members
+                        .get(&s)
+                        .map(|m| m.expires_unix_ms > now_unix_ms)
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn temporary_membership(&self, member_address: &str) -> Option<&TemporaryMembership> {
+        let canonical = canonicalize(member_address).ok()?;
+        self.temporary_members.get(&canonical)
+    }
+
+    pub fn add_temporary_member(
+        &mut self,
+        member_address: &str,
+        granted_by: &str,
+        expires_unix_ms: u128,
+        scopes: &[String],
+        now_unix_ms: u128,
+    ) -> Result<bool, AuraError> {
+        let canonical_member = canonicalize(member_address).map_err(|_| AuraError::InvalidAddress)?;
+        let member = VasAddress::parse(&canonical_member).map_err(|_| AuraError::InvalidAddress)?;
+        if member.kind != AddressType::Agent {
+            return Err(AuraError::NotAgentAddress);
+        }
+
+        let canonical_granted_by = canonicalize(granted_by).map_err(|_| AuraError::InvalidAddress)?;
+        if expires_unix_ms <= now_unix_ms {
+            return Err(AuraError::InvalidExpiry);
+        }
+
+        let mut norm_scopes = BTreeSet::new();
+        for scope in scopes {
+            let s = scope.trim().to_ascii_lowercase();
+            if s.is_empty() {
+                return Err(AuraError::InvalidScope);
+            }
+            norm_scopes.insert(s);
+        }
+        if norm_scopes.is_empty() {
+            return Err(AuraError::InvalidScope);
+        }
+
+        let next = TemporaryMembership {
+            granted_by: canonical_granted_by,
+            expires_unix_ms,
+            scopes: norm_scopes,
+        };
+
+        let changed = self.temporary_members.get(&canonical_member) != Some(&next);
+        self.temporary_members.insert(canonical_member, next);
+        Ok(changed)
+    }
+
+    pub fn prune_expired_temporary_members(&mut self, now_unix_ms: u128) -> usize {
+        let before = self.temporary_members.len();
+        self.temporary_members
+            .retain(|_, grant| grant.expires_unix_ms > now_unix_ms);
+        before.saturating_sub(self.temporary_members.len())
+    }
+}
+
+fn now_unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Default)]
@@ -180,6 +273,9 @@ pub enum AuraError {
     InvalidAddress,
     NotAuraAddress,
     InvalidMemberType,
+    NotAgentAddress,
+    InvalidExpiry,
+    InvalidScope,
     NotFound,
     AlreadyExists,
     CycleDetected,
@@ -253,5 +349,69 @@ mod tests {
         let mut aura = Aura::new(id);
         aura.set_governor_ref("SVC{governor,company,live}").unwrap();
         assert_eq!(aura.governor_ref.as_deref(), Some("svc{governor,company,live}"));
+    }
+
+    #[test]
+    fn temporary_agent_membership_requires_agent_scope_and_future_expiry() {
+        let id = AuraId::parse("aur{ops,private,open}").unwrap();
+        let mut aura = Aura::new(id);
+        let now = 1_000u128;
+
+        let err = aura
+            .add_temporary_member(
+                "usr{alice,corp,active}",
+                "usr{owner,corp,active}",
+                now + 10,
+                &["observe".to_string()],
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, AuraError::NotAgentAddress);
+
+        let err = aura
+            .add_temporary_member(
+                "agt{bot,ops,live}",
+                "usr{owner,corp,active}",
+                now,
+                &["observe".to_string()],
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, AuraError::InvalidExpiry);
+
+        let err = aura
+            .add_temporary_member(
+                "agt{bot,ops,live}",
+                "usr{owner,corp,active}",
+                now + 10,
+                &[],
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(err, AuraError::InvalidScope);
+    }
+
+    #[test]
+    fn temporary_agent_membership_expires_and_prunes() {
+        let id = AuraId::parse("aur{ops,private,open}").unwrap();
+        let mut aura = Aura::new(id);
+        let now = 5_000u128;
+
+        let changed = aura
+            .add_temporary_member(
+                "agt{bot,ops,live}",
+                "usr{owner,corp,active}",
+                now + 20,
+                &["observe".to_string(), "deploy".to_string()],
+                now,
+            )
+            .unwrap();
+        assert!(changed);
+        assert!(aura.contains_member_at("agt{bot,ops,live}", now + 10));
+        assert!(!aura.contains_member_at("agt{bot,ops,live}", now + 25));
+
+        let pruned = aura.prune_expired_temporary_members(now + 25);
+        assert_eq!(pruned, 1);
+        assert!(aura.temporary_membership("agt{bot,ops,live}").is_none());
     }
 }

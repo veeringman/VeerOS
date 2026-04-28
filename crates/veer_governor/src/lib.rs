@@ -281,6 +281,7 @@ impl GovernorPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
     AddMember,
+    AddTemporaryMember,
     RemoveMember,
     UpdatePolicy,
 }
@@ -489,6 +490,119 @@ impl Governor {
         });
         let reason = if changed { "member added" } else { "already a member" };
         self.record(actor, AuditAction::AddMember, member, AuditOutcome::Allowed, reason, Some(&trace))?;
+        Ok(changed)
+    }
+
+    pub fn add_temporary_agent_member(
+        &mut self,
+        aura: &mut Aura,
+        actor: &str,
+        member: &str,
+        expires_unix_ms: u128,
+        scopes: &[String],
+        now_unix_ms: u128,
+    ) -> Result<bool, GovernorError> {
+        let mut trace = DecisionTrace {
+            policy_version: self.policy.policy_version,
+            action: "add_temporary_member".to_string(),
+            allowed: false,
+            steps: Vec::new(),
+        };
+
+        let managed_ok = self.ensure_managed_aura(aura).is_ok();
+        trace.steps.push(TraceStep {
+            check: "managed_aura_match".to_string(),
+            passed: managed_ok,
+            detail: if managed_ok {
+                "aura matches managed policy".to_string()
+            } else {
+                "governor policy does not manage this aura".to_string()
+            },
+        });
+        if !managed_ok {
+            self.record(
+                actor,
+                AuditAction::AddTemporaryMember,
+                member,
+                AuditOutcome::Denied,
+                "aura not managed",
+                Some(&trace),
+            )?;
+            return Err(GovernorError::Denied("governor policy does not manage this aura".into()));
+        }
+
+        let is_admin = self.policy.is_admin(actor)?;
+        trace.steps.push(TraceStep {
+            check: "actor_is_admin".to_string(),
+            passed: is_admin,
+            detail: if is_admin {
+                "actor in effective admins".to_string()
+            } else {
+                "actor not in effective admins".to_string()
+            },
+        });
+        if !is_admin {
+            self.record(
+                actor,
+                AuditAction::AddTemporaryMember,
+                member,
+                AuditOutcome::Denied,
+                "actor not in admins",
+                Some(&trace),
+            )?;
+            return Err(GovernorError::Denied("actor not in admins".into()));
+        }
+
+        let type_allowed = self.policy.member_type_allowed(member)?;
+        trace.steps.push(TraceStep {
+            check: "member_type_allowed".to_string(),
+            passed: type_allowed,
+            detail: if type_allowed {
+                "member type allowed by effective policy".to_string()
+            } else {
+                "member type rejected by effective policy".to_string()
+            },
+        });
+        if !type_allowed {
+            self.record(
+                actor,
+                AuditAction::AddTemporaryMember,
+                member,
+                AuditOutcome::Denied,
+                "member type not allowed",
+                Some(&trace),
+            )?;
+            return Err(GovernorError::Denied("member type not allowed".into()));
+        }
+
+        let changed = aura
+            .add_temporary_member(member, actor, expires_unix_ms, scopes, now_unix_ms)
+            .map_err(map_temporary_membership_error)?;
+
+        trace.allowed = true;
+        trace.steps.push(TraceStep {
+            check: "temporary_membership_write".to_string(),
+            passed: true,
+            detail: if changed {
+                "temporary membership inserted/updated".to_string()
+            } else {
+                "temporary membership unchanged".to_string()
+            },
+        });
+
+        let reason = if changed {
+            "temporary scoped member added"
+        } else {
+            "temporary scoped member unchanged"
+        };
+        self.record(
+            actor,
+            AuditAction::AddTemporaryMember,
+            member,
+            AuditOutcome::Allowed,
+            reason,
+            Some(&trace),
+        )?;
         Ok(changed)
     }
 
@@ -776,6 +890,22 @@ fn normalize_member_types(input: &[String]) -> Result<Vec<String>, GovernorError
 
 fn map_aura_error(_: veer_aura::AuraError) -> GovernorError {
     GovernorError::InvalidAddress
+}
+
+fn map_temporary_membership_error(err: veer_aura::AuraError) -> GovernorError {
+    match err {
+        veer_aura::AuraError::InvalidAddress => GovernorError::InvalidAddress,
+        veer_aura::AuraError::NotAgentAddress => {
+            GovernorError::Denied("temporary membership requires agt{...} member".into())
+        }
+        veer_aura::AuraError::InvalidExpiry => {
+            GovernorError::Denied("temporary membership expiry must be in the future".into())
+        }
+        veer_aura::AuraError::InvalidScope => {
+            GovernorError::Denied("temporary membership requires non-empty scope list".into())
+        }
+        _ => GovernorError::InvalidAddress,
+    }
 }
 
 fn address_type_code(kind: AddressType) -> &'static str {
@@ -1066,5 +1196,57 @@ mod tests {
         assert_eq!(report.denied_events, 0);
         assert!(report.findings.is_empty());
         assert!(report.suggestions.is_empty());
+    }
+
+    #[test]
+    fn temporary_agent_membership_requires_admin_and_records_audit() {
+        let mut g = Governor::new(sample_policy());
+        g.policy.allow_member_types.push("agt".to_string());
+        let mut aura = Aura::new(AuraId::parse("aur{finance,private,open}").unwrap());
+        let now = 10_000u128;
+
+        let denied = g.add_temporary_agent_member(
+            &mut aura,
+            "usr{mallory,corp,active}",
+            "agt{opsbot,corp,live}",
+            now + 500,
+            &["observe".to_string()],
+            now,
+        );
+        assert!(matches!(denied, Err(GovernorError::Denied(_))));
+
+        let allowed = g
+            .add_temporary_agent_member(
+                &mut aura,
+                "usr{alice,corp,active}",
+                "agt{opsbot,corp,live}",
+                now + 500,
+                &["observe".to_string(), "deploy".to_string()],
+                now,
+            )
+            .unwrap();
+        assert!(allowed);
+        assert!(aura.contains_member_at("agt{opsbot,corp,live}", now + 100));
+
+        let rec = g.audit_log().last().unwrap();
+        assert_eq!(rec.action, AuditAction::AddTemporaryMember);
+        assert_eq!(rec.outcome, AuditOutcome::Allowed);
+    }
+
+    #[test]
+    fn temporary_agent_membership_rejects_non_agent_member() {
+        let mut g = Governor::new(sample_policy());
+        let mut aura = Aura::new(AuraId::parse("aur{finance,private,open}").unwrap());
+        let now = 15_000u128;
+
+        let err = g.add_temporary_agent_member(
+            &mut aura,
+            "usr{alice,corp,active}",
+            "usr{jane,corp,active}",
+            now + 10,
+            &["observe".to_string()],
+            now,
+        );
+        assert!(matches!(err, Err(GovernorError::Denied(_))));
     }
 }
