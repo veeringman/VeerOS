@@ -40,7 +40,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - [x] Solver engine: `argmin (αL + βC − γT − δA)` for service / Fold selection
   - [x] Algebraic policy engine — composable permission sets, time-bound capability tokens
   - [x] Aura Governor v2 — dynamic policy, inheritance, explainability traces
-  - [ ] Fabric transport runtime (QUIC-class, multiplexed, encrypted, resumable)
+  - [x] Fabric transport runtime (QUIC-class, multiplexed, encrypted, resumable)
   - [ ] Visual graph explorer / decision-trace debugger (why was node X chosen?)
 - [ ] **Phase C — AI-Native & Multi-Aura**
   - [ ] AI assistant integration in Aura Governor (anomaly detection, policy suggestions)
