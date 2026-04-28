@@ -38,6 +38,8 @@ impl GuestArch {
 pub struct VmConfig {
     pub boot: BootSource,
     pub guest_arch: GuestArch,
+    /// Number of virtual CPUs presented to the guest.
+    pub cpus: usize,
     pub memory_bytes: usize,
     pub disk_path: Option<PathBuf>,
     pub disk_read_only: bool,

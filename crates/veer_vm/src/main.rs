@@ -62,6 +62,10 @@ struct Cli {
     #[arg(long, default_value_t = 128)]
     memory: usize,
 
+    /// Number of virtual CPUs.
+    #[arg(long, default_value_t = 1)]
+    cpus: usize,
+
     /// Raw disk image to expose as virtio-blk-pci. Size must be a multiple
     /// of 512 bytes.
     #[arg(long)]
@@ -139,9 +143,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     hvf_vcpu_probe: bool,
 
-    /// Run a single HVF vCPU cycle and print the decoded VM-exit reason.
+    /// Limit HVF execution to a short bounded bring-up loop.
     ///
-    /// macOS-only diagnostic aid for backend bring-up.
+    /// macOS-only diagnostic aid. By default, HVF runs continuously.
     #[arg(long, default_value_t = false)]
     hvf_run_once: bool,
 
@@ -217,10 +221,16 @@ fn default_mac() -> [u8; 6] {
     ]
 }
 
+fn validate_cpus(cpus: usize) -> Result<()> {
+    anyhow::ensure!((1..=64).contains(&cpus), "--cpus must be between 1 and 64");
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     use anyhow::Context;
     let cli = Cli::parse();
+    validate_cpus(cli.cpus)?;
     if cli.hvf_preflight {
         anyhow::bail!("--hvf-preflight is macOS-only");
     }
@@ -269,6 +279,7 @@ fn main() -> Result<()> {
     let cfg = config::VmConfig {
         boot,
         guest_arch: cli.arch.to_guest_arch(),
+        cpus: cli.cpus,
         memory_bytes: cli.memory * 1024 * 1024,
         disk_path: cli.disk,
         disk_read_only: cli.disk_ro,
@@ -285,6 +296,7 @@ fn main() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    validate_cpus(cli.cpus)?;
     if cli.tap.is_some() && cli.vmnet.is_some() {
         anyhow::bail!("--tap and --vmnet are mutually exclusive");
     }
@@ -320,6 +332,7 @@ fn main() -> Result<()> {
     let cfg = config::VmConfig {
         boot,
         guest_arch: cli.arch.to_guest_arch(),
+        cpus: cli.cpus,
         memory_bytes: cli.memory * 1024 * 1024,
         disk_path: cli.disk,
         disk_read_only: cli.disk_ro,

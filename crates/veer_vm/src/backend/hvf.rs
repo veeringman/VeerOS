@@ -577,6 +577,25 @@ fn write_reg(vcpu: HvVcpuId, reg: u32, value: u64, name: &str) -> Result<()> {
 fn setup_vcpu_initial_state(vcpu: HvVcpuId, entry: u64, mbinfo_gpa: u64) -> Result<()> {
     // Minimal skeleton register state; real boot wiring comes in later phases.
     setup_vmcs_protected_mode_state(vcpu)?;
+    // Ensure VM-entry starts from a clean active state.
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_ACTIVITY_STATE,
+        VMCS_ACTIVITY_STATE_ACTIVE,
+        "hv_vmx_vcpu_write_vmcs(GUEST_ACTIVITY_STATE:init)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_INTERRUPTIBILITY_STATE,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_INTERRUPTIBILITY_STATE:init)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_CTRL_VMENTRY_INTERRUPTION_INFO,
+        0,
+        "hv_vmx_vcpu_write_vmcs(VMENTRY_INTERRUPTION_INFO:init)",
+    )?;
     write_reg(vcpu, HV_X86_RIP, entry, "hv_vcpu_write_register(RIP)")?;
     write_reg(vcpu, HV_X86_RFLAGS, 0x2, "hv_vcpu_write_register(RFLAGS)")?;
     write_reg(vcpu, HV_X86_RSP, 0, "hv_vcpu_write_register(RSP)")?;
@@ -833,6 +852,15 @@ fn dump_invalid_guest_state(vcpu: HvVcpuId) {
         ("gdtr_base", VMCS_GUEST_GDTR_BASE),
         ("idtr_limit", VMCS_GUEST_IDTR_LIMIT),
         ("idtr_base", VMCS_GUEST_IDTR_BASE),
+        ("activity_state", VMCS_GUEST_ACTIVITY_STATE),
+        (
+            "interruptibility_state",
+            VMCS_GUEST_INTERRUPTIBILITY_STATE,
+        ),
+        (
+            "vmentry_interruption_info",
+            VMCS_CTRL_VMENTRY_INTERRUPTION_INFO,
+        ),
     ];
 
     eprintln!("[veer-vm] invalid guest state dump:");
@@ -1327,7 +1355,8 @@ fn dispatch_exit(
 
 fn write_flat_seg(vcpu: HvVcpuId, selector: u16, sel_field: u32, limit_field: u32, base_field: u32, ar_field: u32, ar: u32, name: &str) -> Result<()> {
     write_vmcs(vcpu, sel_field, selector as u64, name)?;
-    write_vmcs(vcpu, limit_field, 0xFFFF_FFFF, name)?;
+    // Use 0xFFFF for protected mode segment limits (matches GDT and guest state dump)
+    write_vmcs(vcpu, limit_field, 0xFFFF, name)?;
     write_vmcs(vcpu, base_field, 0, name)?;
     write_vmcs(vcpu, ar_field, ar as u64, name)?;
     Ok(())
@@ -1343,16 +1372,42 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
         Ok(value)
     };
 
-    // Derive VMX-compliant CR0/CR4 values from Intel fixed-bit MSRs.
-    let cr0_fixed0 = read_msr(IA32_VMX_CR0_FIXED0, "hv_vcpu_read_msr(CR0_FIXED0)")?;
-    let cr0_fixed1 = read_msr(IA32_VMX_CR0_FIXED1, "hv_vcpu_read_msr(CR0_FIXED1)")?;
-    let cr4_fixed0 = read_msr(IA32_VMX_CR4_FIXED0, "hv_vcpu_read_msr(CR4_FIXED0)")?;
-    let cr4_fixed1 = read_msr(IA32_VMX_CR4_FIXED1, "hv_vcpu_read_msr(CR4_FIXED1)")?;
+    let try_read_msr = |msr: u32, name: &str| -> Option<u64> {
+        match read_msr(msr, name) {
+            Ok(v) => Some(v),
+            Err(err) => {
+                eprintln!(
+                    "[veer-vm] warning: {} unavailable on this HVF runtime ({}); using fallback guest control register defaults",
+                    name,
+                    err
+                );
+                None
+            }
+        }
+    };
 
-    let desired_cr0 = 0x31u64; // PE|ET|NE for 32-bit protected mode entry.
+    // Derive VMX-compliant CR0/CR4 values from Intel fixed-bit MSRs when
+    // available. Some HVF runtimes reject hv_vcpu_read_msr; on those hosts we
+    // fall back to fixed protected-mode defaults used in earlier bring-up.
+    let desired_cr0 = 0x11u64; // PE|ET for 32-bit protected mode entry.
     let desired_cr4 = 0u64;
-    let guest_cr0 = (desired_cr0 | cr0_fixed0) & cr0_fixed1;
-    let guest_cr4 = (desired_cr4 | cr4_fixed0) & cr4_fixed1;
+    let guest_cr0 = if let (Some(cr0_fixed0), Some(cr0_fixed1)) = (
+        try_read_msr(IA32_VMX_CR0_FIXED0, "hv_vcpu_read_msr(CR0_FIXED0)"),
+        try_read_msr(IA32_VMX_CR0_FIXED1, "hv_vcpu_read_msr(CR0_FIXED1)"),
+    ) {
+        (desired_cr0 | cr0_fixed0) & cr0_fixed1
+    } else {
+        desired_cr0
+    };
+
+    let guest_cr4 = if let (Some(cr4_fixed0), Some(cr4_fixed1)) = (
+        try_read_msr(IA32_VMX_CR4_FIXED0, "hv_vcpu_read_msr(CR4_FIXED0)"),
+        try_read_msr(IA32_VMX_CR4_FIXED1, "hv_vcpu_read_msr(CR4_FIXED1)"),
+    ) {
+        (desired_cr4 | cr4_fixed0) & cr4_fixed1
+    } else {
+        desired_cr4
+    };
 
     write_vmcs(vcpu, VMCS_GUEST_CR0, guest_cr0, "hv_vmx_vcpu_write_vmcs(GUEST_CR0)")?;
     write_vmcs(vcpu, VMCS_GUEST_CR3, 0, "hv_vmx_vcpu_write_vmcs(GUEST_CR3)")?;
@@ -1365,8 +1420,8 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
     // Data: type=0x3 (read/write/accessed), S=1, P=1, D/B=1, G=1.
     let data_ar = 0xC093_u32;
     // 32-bit available TSS, present. Required for valid VM-entry in protected mode.
-    let tr_ar = 0x008B_u32;
-    // Mark LDTR unusable.
+    let tr_ar = 0x008B_u32; // Present, available 32-bit TSS
+    // Mark LDTR unusable (bit 16 = 1, all others 0)
     let ldtr_ar = 1u32 << 16;
 
     write_flat_seg(
@@ -1431,11 +1486,13 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
         "hv_vmx_vcpu_write_vmcs(GUEST_GS_*)",
     )?;
 
+    // Task Register (TR): selector must be nonzero, AR must be present, type=0xB (available 32-bit TSS), limit >= 0x67, base=0
     write_vmcs(vcpu, VMCS_GUEST_TR_SELECTOR, 0x18, "hv_vmx_vcpu_write_vmcs(GUEST_TR_SELECTOR)")?;
     write_vmcs(vcpu, VMCS_GUEST_TR_LIMIT, 0x67, "hv_vmx_vcpu_write_vmcs(GUEST_TR_LIMIT)")?;
     write_vmcs(vcpu, VMCS_GUEST_TR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_TR_BASE)")?;
     write_vmcs(vcpu, VMCS_GUEST_TR_AR, tr_ar as u64, "hv_vmx_vcpu_write_vmcs(GUEST_TR_AR)")?;
 
+    // LDTR: selector=0, AR unusable (bit 16 set), limit=0, base=0
     write_vmcs(vcpu, VMCS_GUEST_LDTR_SELECTOR, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_SELECTOR)")?;
     write_vmcs(vcpu, VMCS_GUEST_LDTR_LIMIT, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_LIMIT)")?;
     write_vmcs(vcpu, VMCS_GUEST_LDTR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_BASE)")?;
@@ -1692,10 +1749,7 @@ fn read_reg(vcpu: HvVcpuId, reg: u32, name: &str) -> Result<u64> {
 
 fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
     let vcpu = vcpu_state.id;
-    // Optional bring-up hook for staged development.
-    if std::env::var_os("VEER_VM_HVF_RUN_ONCE").is_none() {
-        return Ok(());
-    }
+    let run_once = std::env::var_os("VEER_VM_HVF_RUN_ONCE").is_some();
 
     let mut uart = HvfUart16550::default();
     if let Some(seed) = std::env::var_os("VEER_VM_HVF_UART_RX") {
@@ -1725,8 +1779,18 @@ fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
     let inject_init_once = std::env::var_os("VEER_VM_HVF_INJECT_INIT_ONCE").is_some();
     let mut nmi_injected = false;
     let mut init_injected = false;
-    const MAX_STEPS: usize = 32;
-    for _ in 0..MAX_STEPS {
+    const RUN_ONCE_MAX_STEPS: usize = 32;
+    let mut steps = 0usize;
+    loop {
+        if run_once && steps >= RUN_ONCE_MAX_STEPS {
+            eprintln!(
+                "[veer-vm] HVF run-once reached handling limit ({} steps)",
+                RUN_ONCE_MAX_STEPS
+            );
+            return Ok(());
+        }
+        steps += 1;
+
         // Keep cached halt state aligned with guest VMCS activity state.
         vcpu_state.halted = check_halt_state(vcpu)?;
 
@@ -1765,7 +1829,8 @@ fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
         }
 
         if vcpu_state.halted && vcpu_state.pending_interrupt.is_none() {
-            // Stay parked until an interrupt becomes pending.
+            // Park halted guests without spinning at 100% host CPU.
+            std::thread::sleep(std::time::Duration::from_millis(1));
             continue;
         }
 
@@ -1811,12 +1876,6 @@ fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
             }
         }
     }
-
-    eprintln!(
-        "[veer-vm] HVF run-once reached handling limit ({} steps)",
-        MAX_STEPS
-    );
-    Ok(())
 }
 
 pub fn run(cfg: VmConfig) -> Result<()> {
@@ -1879,8 +1938,8 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         cfg.memory_bytes / (1024 * 1024),
     );
 
-    // Phase 2: Multi-vCPU support (default to 1 CPU for now, expandable to 2-4)
-    let num_vcpus = 1;  // TODO: make configurable from CLI
+    // Phase 2: Multi-vCPU support.
+    let num_vcpus = cfg.cpus;
     let mut vcpu_states = Vec::new();
     
     for cpu_idx in 0..num_vcpus {
