@@ -27,7 +27,7 @@ The canonical long-horizon phase ledger remains in `TODO.md` (Phase 1..26).
 
 ## Phase 2: Dynamic Graph Fabric
 - [x] Implement live graph core (entities, edges, weights)
-- [ ] Integrate telemetry feed (latency, trust, load)
+- [x] Integrate telemetry feed (latency, trust, load)
 - [ ] Build solver engine for optimal service/Fold selection
 - [ ] Policy engine for algebraic, composable policies
 - [ ] Aura Governor: dynamic policy, audit, explainability

@@ -36,7 +36,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - [x] Legacy compatibility gateway (DNS / IP fallback, classic socket bridge)
 - [ ] **Phase B — Dynamic Graph Fabric**
   - [x] Live graph core (in-process, then distributed) — vertices, edges, weights
-  - [ ] Telemetry feed: latency, load, trust score, locality, GPU/CPU availability
+  - [x] Telemetry feed: latency, load, trust score, locality, GPU/CPU availability
   - [ ] Solver engine: `argmin (αL + βC − γT − δA)` for service / Fold selection
   - [ ] Algebraic policy engine — composable permission sets, time-bound capability tokens
   - [ ] Aura Governor v2 — dynamic policy, inheritance, explainability traces

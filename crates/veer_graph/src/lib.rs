@@ -133,10 +133,40 @@ pub enum GraphError {
     InvalidWeight,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetrySignal {
+    /// Live metric update for a directed relationship edge.
+    EdgeMetrics {
+        from: String,
+        to: String,
+        kind: EdgeKind,
+        latency: Option<f32>,
+        trust: Option<f32>,
+        cost: Option<f32>,
+        affinity: Option<f32>,
+        load: Option<f32>,
+    },
+    /// Live capability/locality update for a node vertex.
+    NodeCapacity {
+        node: String,
+        cpu_available: Option<f32>,
+        gpu_available: Option<f32>,
+        locality: Option<String>,
+    },
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TelemetryStats {
+    pub applied: u64,
+    pub rejected: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct GraphCore {
     vertices: HashMap<String, Vertex>,
     edges: HashMap<EdgeKey, Edge>,
+    telemetry_stats: TelemetryStats,
 }
 
 impl GraphCore {
@@ -273,6 +303,111 @@ impl GraphCore {
 
     pub fn edge_count(&self) -> usize {
         self.edges.len()
+    }
+
+    pub fn telemetry_stats(&self) -> TelemetryStats {
+        self.telemetry_stats
+    }
+
+    pub fn ingest_signal(&mut self, signal: TelemetrySignal) -> Result<(), GraphError> {
+        let result = match signal {
+            TelemetrySignal::EdgeMetrics {
+                from,
+                to,
+                kind,
+                latency,
+                trust,
+                cost,
+                affinity,
+                load,
+            } => self.update_edge_weights(
+                &from,
+                &to,
+                kind,
+                WeightPatch {
+                    latency,
+                    trust,
+                    cost,
+                    affinity,
+                    load,
+                },
+            ),
+            TelemetrySignal::NodeCapacity {
+                node,
+                cpu_available,
+                gpu_available,
+                locality,
+            } => self.apply_node_capacity(&node, cpu_available, gpu_available, locality),
+        };
+
+        match result {
+            Ok(()) => {
+                self.telemetry_stats.applied += 1;
+                Ok(())
+            }
+            Err(e) => {
+                self.telemetry_stats.rejected += 1;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn ingest_batch<I>(&mut self, signals: I) -> (u64, u64)
+    where
+        I: IntoIterator<Item = TelemetrySignal>,
+    {
+        let mut applied = 0u64;
+        let mut rejected = 0u64;
+
+        for signal in signals {
+            if self.ingest_signal(signal).is_ok() {
+                applied += 1;
+            } else {
+                rejected += 1;
+            }
+        }
+
+        (applied, rejected)
+    }
+
+    fn apply_node_capacity(
+        &mut self,
+        node_raw: &str,
+        cpu_available: Option<f32>,
+        gpu_available: Option<f32>,
+        locality: Option<String>,
+    ) -> Result<(), GraphError> {
+        let id = canonicalize(node_raw).map_err(|_| GraphError::InvalidVertexId)?;
+        let vertex = self.vertices.get_mut(&id).ok_or(GraphError::MissingVertex)?;
+
+        if vertex.kind != VertexKind::Node {
+            return Err(GraphError::VertexKindMismatch);
+        }
+
+        if let Some(cpu) = cpu_available {
+            if cpu < 0.0 {
+                return Err(GraphError::InvalidWeight);
+            }
+            vertex.attrs.insert("cpu_available".to_string(), format!("{cpu:.4}"));
+        }
+
+        if let Some(gpu) = gpu_available {
+            if gpu < 0.0 {
+                return Err(GraphError::InvalidWeight);
+            }
+            vertex.attrs.insert("gpu_available".to_string(), format!("{gpu:.4}"));
+        }
+
+        if let Some(loc) = locality {
+            let trimmed = loc.trim();
+            if !trimmed.is_empty() {
+                vertex
+                    .attrs
+                    .insert("locality".to_string(), trimmed.to_string());
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -436,5 +571,114 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, GraphError::InvalidWeight);
+    }
+
+    #[test]
+    fn telemetry_edge_metrics_updates_existing_edge() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights::default(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        g.ingest_signal(TelemetrySignal::EdgeMetrics {
+            from: "svc{render,company,live}".into(),
+            to: "nod{edge-a,zone-1,ready}".into(),
+            kind: EdgeKind::Reachability,
+            latency: Some(5.0),
+            trust: Some(0.8),
+            cost: None,
+            affinity: None,
+            load: Some(0.2),
+        })
+        .unwrap();
+
+        let edge = g
+            .neighbors(
+                "svc{render,company,live}",
+                Direction::Out,
+                Some(EdgeKind::Reachability),
+            )
+            .unwrap()[0]
+            .clone();
+
+        assert_eq!(edge.weights.latency, 5.0);
+        assert_eq!(edge.weights.trust, 0.8);
+        assert_eq!(edge.weights.load, 0.2);
+        assert_eq!(g.telemetry_stats().applied, 1);
+        assert_eq!(g.telemetry_stats().rejected, 0);
+    }
+
+    #[test]
+    fn telemetry_node_capacity_updates_attrs() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+
+        g.ingest_signal(TelemetrySignal::NodeCapacity {
+            node: "nod{edge-a,zone-1,ready}".into(),
+            cpu_available: Some(0.42),
+            gpu_available: Some(0.75),
+            locality: Some("zone-1/rack-2".into()),
+        })
+        .unwrap();
+
+        let v = g.get_vertex("nod{edge-a,zone-1,ready}").unwrap();
+        assert_eq!(v.attrs.get("cpu_available").map(String::as_str), Some("0.4200"));
+        assert_eq!(v.attrs.get("gpu_available").map(String::as_str), Some("0.7500"));
+        assert_eq!(v.attrs.get("locality").map(String::as_str), Some("zone-1/rack-2"));
+    }
+
+    #[test]
+    fn telemetry_batch_reports_applied_and_rejected() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights::default(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let (applied, rejected) = g.ingest_batch(vec![
+            TelemetrySignal::EdgeMetrics {
+                from: "svc{render,company,live}".into(),
+                to: "nod{edge-a,zone-1,ready}".into(),
+                kind: EdgeKind::Reachability,
+                latency: Some(7.0),
+                trust: None,
+                cost: None,
+                affinity: None,
+                load: None,
+            },
+            TelemetrySignal::EdgeMetrics {
+                from: "svc{render,company,live}".into(),
+                to: "nod{missing,zone-1,ready}".into(),
+                kind: EdgeKind::Reachability,
+                latency: Some(7.0),
+                trust: None,
+                cost: None,
+                affinity: None,
+                load: None,
+            },
+        ]);
+
+        assert_eq!(applied, 1);
+        assert_eq!(rejected, 1);
+        assert_eq!(g.telemetry_stats().applied, 1);
+        assert_eq!(g.telemetry_stats().rejected, 1);
     }
 }
