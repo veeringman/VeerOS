@@ -6,9 +6,10 @@ use std::process::Command;
 use std::thread;
 
 use anyhow::{bail, Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use vas::{canonicalize, AddressType, VasAddress};
+use veer_graph::{Direction, EdgeKind, EdgeWeights, GraphCore, PolicySet, SolverWeights, VertexKind};
 use veer_resolve::{Endpoint, ResolveError, Resolver, ServiceBinding};
 
 #[derive(Parser, Debug)]
@@ -32,6 +33,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: GatewayCmd,
     },
+    Trace {
+        #[command(subcommand)]
+        cmd: TraceCmd,
+    },
     Connect(ConnectArgs),
 }
 
@@ -52,6 +57,12 @@ enum FoldCmd {
 enum GatewayCmd {
     /// Classic TCP socket bridge (local listen -> remote target).
     Bridge(BridgeArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum TraceCmd {
+    /// Explain solver decision path from a graph snapshot.
+    Decision(TraceDecisionArgs),
 }
 
 #[derive(Args, Debug)]
@@ -124,6 +135,90 @@ struct BridgeArgs {
     target_port: u16,
 }
 
+#[derive(Args, Debug)]
+struct TraceDecisionArgs {
+    /// Graph snapshot TOML path.
+    #[arg(long)]
+    graph: PathBuf,
+    /// Source vertex id (VAS).
+    #[arg(long)]
+    source: String,
+    /// Edge kind to evaluate.
+    #[arg(long, value_enum)]
+    edge_kind: EdgeKindArg,
+    /// Optional target vertex kind filter.
+    #[arg(long, value_enum)]
+    target_kind: Option<VertexKindArg>,
+    /// Optional policy TOML path (`PolicySet` schema).
+    #[arg(long)]
+    policy: Option<PathBuf>,
+    /// Emit JSON instead of text table.
+    #[arg(long)]
+    json: bool,
+    #[arg(long, default_value_t = 1.0)]
+    alpha: f32,
+    #[arg(long, default_value_t = 1.0)]
+    beta: f32,
+    #[arg(long, default_value_t = 1.0)]
+    gamma: f32,
+    #[arg(long, default_value_t = 1.0)]
+    delta: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum EdgeKindArg {
+    Trust,
+    Membership,
+    Reachability,
+    Capability,
+    Replication,
+    Affinity,
+}
+
+impl EdgeKindArg {
+    fn as_kind(self) -> EdgeKind {
+        match self {
+            EdgeKindArg::Trust => EdgeKind::Trust,
+            EdgeKindArg::Membership => EdgeKind::Membership,
+            EdgeKindArg::Reachability => EdgeKind::Reachability,
+            EdgeKindArg::Capability => EdgeKind::Capability,
+            EdgeKindArg::Replication => EdgeKind::Replication,
+            EdgeKindArg::Affinity => EdgeKind::Affinity,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum VertexKindArg {
+    User,
+    Device,
+    Fold,
+    Aura,
+    Service,
+    Vault,
+    Agent,
+    Zone,
+    Node,
+    Event,
+}
+
+impl VertexKindArg {
+    fn as_kind(self) -> VertexKind {
+        match self {
+            VertexKindArg::User => VertexKind::User,
+            VertexKindArg::Device => VertexKind::Device,
+            VertexKindArg::Fold => VertexKind::Fold,
+            VertexKindArg::Aura => VertexKind::Aura,
+            VertexKindArg::Service => VertexKind::Service,
+            VertexKindArg::Vault => VertexKind::Vault,
+            VertexKindArg::Agent => VertexKind::Agent,
+            VertexKindArg::Zone => VertexKind::Zone,
+            VertexKindArg::Node => VertexKind::Node,
+            VertexKindArg::Event => VertexKind::Event,
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct AuraState {
     joined: BTreeSet<String>,
@@ -169,6 +264,56 @@ struct ResolveEndpointSpec {
     required_aura: Option<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct GraphSpec {
+    #[serde(default)]
+    vertices: Vec<GraphVertexSpec>,
+    #[serde(default)]
+    edges: Vec<GraphEdgeSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GraphVertexSpec {
+    id: String,
+    #[serde(default)]
+    attrs: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GraphEdgeSpec {
+    from: String,
+    to: String,
+    kind: EdgeKind,
+    #[serde(default)]
+    weights: Option<EdgeWeights>,
+    #[serde(default)]
+    attrs: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionTraceReport {
+    source: String,
+    edge_kind: String,
+    target_kind: Option<String>,
+    policy_mode: String,
+    selected: Option<DecisionCandidate>,
+    candidates: Vec<DecisionCandidate>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionCandidate {
+    target: String,
+    target_kind: String,
+    policy_allowed: bool,
+    kind_allowed: bool,
+    score: Option<f32>,
+    latency: f32,
+    trust: f32,
+    cost: f32,
+    affinity: f32,
+    load: f32,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -179,7 +324,166 @@ fn main() -> Result<()> {
         Cmd::Aura { cmd } => cmd_aura(cmd),
         Cmd::Fold { cmd } => cmd_fold(cmd),
         Cmd::Gateway { cmd } => cmd_gateway(cmd),
+        Cmd::Trace { cmd } => cmd_trace(cmd),
         Cmd::Connect(args) => cmd_connect(args),
+    }
+}
+
+fn cmd_trace(cmd: TraceCmd) -> Result<()> {
+    match cmd {
+        TraceCmd::Decision(args) => cmd_trace_decision(args),
+    }
+}
+
+fn cmd_trace_decision(args: TraceDecisionArgs) -> Result<()> {
+    let graph = load_graph_spec(&args.graph)?;
+    let source = canonical_typed(&args.source, AddressType::Service, "source")?;
+    let edge_kind = args.edge_kind.as_kind();
+    let target_kind = args.target_kind.map(|k| k.as_kind());
+
+    let policy = if let Some(path) = args.policy.as_deref() {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str::<PolicySet>(&text)
+            .with_context(|| format!("parsing {}", path.display()))?
+    } else {
+        PolicySet::default()
+    };
+
+    let coeff = SolverWeights {
+        alpha_latency: args.alpha,
+        beta_cost: args.beta,
+        gamma_trust: args.gamma,
+        delta_affinity: args.delta,
+    };
+
+    let selected = graph
+        .solve_best_target_with_policy(&source, edge_kind, target_kind, coeff, &policy)
+        .map_err(|e| anyhow::anyhow!("solver error: {:?}", e))?;
+
+    let mut candidates = Vec::new();
+    for e in graph
+        .neighbors(&source, Direction::Out, Some(edge_kind))
+        .map_err(|e| anyhow::anyhow!("graph query error: {:?}", e))?
+    {
+        let Some(v) = graph.get_vertex(&e.to) else {
+            continue;
+        };
+        let kind_allowed = target_kind.map(|k| k == v.kind).unwrap_or(true);
+        let policy_allowed = policy.allows(v, e);
+        let score = if kind_allowed && policy_allowed {
+            Some(
+                coeff.alpha_latency * e.weights.latency
+                    + coeff.beta_cost * (e.weights.cost + e.weights.load)
+                    - coeff.gamma_trust * e.weights.trust
+                    - coeff.delta_affinity * e.weights.affinity,
+            )
+        } else {
+            None
+        };
+
+        candidates.push(DecisionCandidate {
+            target: e.to.clone(),
+            target_kind: format!("{:?}", v.kind).to_ascii_lowercase(),
+            policy_allowed,
+            kind_allowed,
+            score,
+            latency: e.weights.latency,
+            trust: e.weights.trust,
+            cost: e.weights.cost,
+            affinity: e.weights.affinity,
+            load: e.weights.load,
+        });
+    }
+    candidates.sort_by(|a, b| a.target.cmp(&b.target));
+
+    let report = DecisionTraceReport {
+        source,
+        edge_kind: format!("{:?}", edge_kind).to_ascii_lowercase(),
+        target_kind: target_kind.map(|k| format!("{:?}", k).to_ascii_lowercase()),
+        policy_mode: format!("{:?}", policy.mode).to_ascii_lowercase(),
+        selected: selected.map(|s| DecisionCandidate {
+            target: s.target,
+            target_kind: target_kind
+                .map(|k| format!("{:?}", k).to_ascii_lowercase())
+                .unwrap_or_else(|| "unknown".to_string()),
+            policy_allowed: true,
+            kind_allowed: true,
+            score: Some(s.score),
+            latency: s.weights.latency,
+            trust: s.weights.trust,
+            cost: s.weights.cost,
+            affinity: s.weights.affinity,
+            load: s.weights.load,
+        }),
+        candidates,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_decision_report(&report);
+    }
+
+    Ok(())
+}
+
+fn load_graph_spec(path: &Path) -> Result<GraphCore> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let spec: GraphSpec = toml::from_str(&text)
+        .with_context(|| format!("parsing {}", path.display()))?;
+
+    let mut g = GraphCore::new();
+    for v in &spec.vertices {
+        g.upsert_vertex(&v.id, None, v.attrs.clone())
+            .map_err(|e| anyhow::anyhow!("graph vertex {} invalid: {:?}", v.id, e))?;
+    }
+    for e in &spec.edges {
+        g.upsert_edge(
+            &e.from,
+            &e.to,
+            e.kind,
+            e.weights.unwrap_or_default(),
+            e.attrs.clone(),
+        )
+        .map_err(|err| anyhow::anyhow!("graph edge {} -> {} invalid: {:?}", e.from, e.to, err))?;
+    }
+    Ok(g)
+}
+
+fn print_decision_report(report: &DecisionTraceReport) {
+    println!("source      : {}", report.source);
+    println!("edge kind   : {}", report.edge_kind);
+    println!("target kind : {}", report.target_kind.clone().unwrap_or_else(|| "any".to_string()));
+    println!("policy mode : {}", report.policy_mode);
+
+    if let Some(sel) = &report.selected {
+        println!("selected    : {} (score {:.4})", sel.target, sel.score.unwrap_or_default());
+    } else {
+        println!("selected    : none");
+    }
+
+    println!();
+    println!("{:<30} {:<8} {:<8} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "TARGET", "KIND", "POLICY", "SCORE", "LAT", "TRUST", "COST", "AFF", "LOAD");
+    for c in &report.candidates {
+        let score = c
+            .score
+            .map(|s| format!("{s:.4}"))
+            .unwrap_or_else(|| "blocked".to_string());
+        println!(
+            "{:<30} {:<8} {:<8} {:>10} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3}",
+            c.target,
+            c.target_kind,
+            if c.policy_allowed && c.kind_allowed { "yes" } else { "no" },
+            score,
+            c.latency,
+            c.trust,
+            c.cost,
+            c.affinity,
+            c.load,
+        );
     }
 }
 

@@ -32,7 +32,7 @@ The canonical long-horizon phase ledger remains in `TODO.md` (Phase 1..26).
 - [x] Policy engine for algebraic, composable policies
 - [x] Aura Governor: dynamic policy, audit, explainability
 - [x] Secure, multiplexed Fabric transport (QUIC-like)
-- [ ] Visual graph explorer/debugger
+- [x] Visual graph explorer/debugger
 
 ---
 

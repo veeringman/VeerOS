@@ -113,3 +113,50 @@ veer gateway bridge --listen 127.0.0.1:19000 --target-host 10.10.10.21 --target-
 
 This keeps older IP/socket-based clients working while moving service identity
 to VAS-based `veer connect` flows.
+
+### Decision trace debugger
+
+Inspect solver + policy decisions from a graph snapshot:
+
+```bash
+veer trace decision \
+	--graph ./graph-spec.toml \
+	--source svc{render,company,live} \
+	--edge-kind reachability \
+	--target-kind node \
+	--policy ./policy.toml
+```
+
+JSON output mode:
+
+```bash
+veer trace decision \
+	--graph ./graph-spec.toml \
+	--source svc{render,company,live} \
+	--edge-kind reachability \
+	--json
+```
+
+`graph-spec.toml` format:
+
+```toml
+[[vertices]]
+id = "svc{render,company,live}"
+
+[[vertices]]
+id = "nod{edge-a,zone-1,ready}"
+[vertices.attrs]
+zone = "z1"
+
+[[edges]]
+from = "svc{render,company,live}"
+to = "nod{edge-a,zone-1,ready}"
+kind = "reachability"
+
+[edges.weights]
+latency = 8.0
+trust = 0.9
+cost = 0.2
+affinity = 0.6
+load = 0.4
+```

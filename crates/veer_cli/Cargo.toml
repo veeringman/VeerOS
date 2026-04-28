@@ -19,3 +19,4 @@ serde_json = "1"
 toml = "0.8"
 vas = { path = "../vas" }
 veer_resolve = { path = "../veer_resolve" }
+veer_graph = { path = "../veer_graph" }
