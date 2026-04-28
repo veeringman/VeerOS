@@ -7,7 +7,7 @@
 //! - Explainable decision traces
 //! - Append-only JSONL audit records
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -63,6 +63,40 @@ pub struct PolicySuggestion {
     pub priority: String,
     pub summary: String,
     pub rationale: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedCapability {
+    AddMember,
+    RemoveMember,
+    AddTemporaryMember,
+    UpdatePolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationGrant {
+    pub aura: String,
+    pub grantor: String,
+    pub delegate: String,
+    pub capabilities: BTreeSet<DelegatedCapability>,
+    pub expires_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FederationLink {
+    pub parent_aura: String,
+    pub child_aura: String,
+    pub inherit_admins: bool,
+    pub inherit_member_types: bool,
+    pub inherit_allow_removal: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct FederatedGovernor {
+    policies: HashMap<String, GovernorPolicy>,
+    links: Vec<FederationLink>,
+    delegations: Vec<DelegationGrant>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -719,6 +753,192 @@ impl Governor {
     }
 }
 
+impl FederatedGovernor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_policy(&mut self, mut policy: GovernorPolicy) -> Result<(), GovernorError> {
+        policy.normalize()?;
+        self.policies.insert(policy.managed_aura.clone(), policy);
+        Ok(())
+    }
+
+    pub fn add_federation_link(&mut self, mut link: FederationLink) -> Result<(), GovernorError> {
+        link.parent_aura = canonical_aura_addr(&link.parent_aura)?;
+        link.child_aura = canonical_aura_addr(&link.child_aura)?;
+
+        if link.parent_aura == link.child_aura {
+            return Err(GovernorError::InvalidPolicy(
+                "federation link cannot point an aura to itself".into(),
+            ));
+        }
+
+        if !self.policies.contains_key(&link.parent_aura) || !self.policies.contains_key(&link.child_aura)
+        {
+            return Err(GovernorError::InvalidPolicy(
+                "federation link requires both parent and child policies to be registered".into(),
+            ));
+        }
+
+        if self
+            .links
+            .iter()
+            .any(|l| l.parent_aura == link.parent_aura && l.child_aura == link.child_aura)
+        {
+            return Ok(());
+        }
+
+        self.links.push(link.clone());
+        if self.has_cycle() {
+            self.links.pop();
+            return Err(GovernorError::InvalidPolicy(
+                "federation link introduces an inheritance cycle".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn effective_policy(&self, aura: &str) -> Result<GovernorPolicy, GovernorError> {
+        let aura = canonical_aura_addr(aura)?;
+        let Some(base) = self.policies.get(&aura) else {
+            return Err(GovernorError::Denied("aura policy not found".into()));
+        };
+
+        let mut effective = base.clone();
+        let mut cur = aura.clone();
+        let mut visited = BTreeSet::new();
+
+        while let Some(link) = self.links.iter().find(|l| l.child_aura == cur) {
+            if !visited.insert(link.child_aura.clone()) {
+                break;
+            }
+            let Some(parent) = self.policies.get(&link.parent_aura) else {
+                break;
+            };
+
+            if link.inherit_admins {
+                for a in parent.effective_admins() {
+                    if !effective.inherited_admins.contains(&a) {
+                        effective.inherited_admins.push(a);
+                    }
+                }
+            }
+
+            if link.inherit_member_types {
+                for t in parent.effective_member_types() {
+                    if !effective.inherited_allow_member_types.contains(&t) {
+                        effective.inherited_allow_member_types.push(t);
+                    }
+                }
+            }
+
+            if link.inherit_allow_removal {
+                let inherited_gate = parent.effective_allow_removal();
+                effective.inherited_allow_removal = Some(
+                    effective
+                        .inherited_allow_removal
+                        .unwrap_or(true)
+                        && inherited_gate,
+                );
+            }
+
+            cur = link.parent_aura.clone();
+        }
+
+        effective.normalize()?;
+        Ok(effective)
+    }
+
+    pub fn grant_delegation(
+        &mut self,
+        aura: &str,
+        grantor: &str,
+        delegate: &str,
+        capabilities: BTreeSet<DelegatedCapability>,
+        expires_unix_ms: u128,
+        now_unix_ms: u128,
+    ) -> Result<(), GovernorError> {
+        if capabilities.is_empty() {
+            return Err(GovernorError::Denied("delegation requires at least one capability".into()));
+        }
+        if expires_unix_ms <= now_unix_ms {
+            return Err(GovernorError::Denied("delegation expiry must be in the future".into()));
+        }
+
+        let aura = canonical_aura_addr(aura)?;
+        let grantor = canonicalize(grantor).map_err(|_| GovernorError::InvalidAddress)?;
+        let delegate = canonicalize(delegate).map_err(|_| GovernorError::InvalidAddress)?;
+        let effective = self.effective_policy(&aura)?;
+
+        if !effective.is_admin(&grantor)? {
+            return Err(GovernorError::Denied("grantor is not an effective admin for aura".into()));
+        }
+
+        self.delegations.retain(|d| {
+            !(d.aura == aura && d.grantor == grantor && d.delegate == delegate)
+        });
+        self.delegations.push(DelegationGrant {
+            aura,
+            grantor,
+            delegate,
+            capabilities,
+            expires_unix_ms,
+        });
+
+        Ok(())
+    }
+
+    pub fn is_authorized(
+        &self,
+        aura: &str,
+        actor: &str,
+        capability: DelegatedCapability,
+        now_unix_ms: u128,
+    ) -> Result<bool, GovernorError> {
+        let aura = canonical_aura_addr(aura)?;
+        let actor = canonicalize(actor).map_err(|_| GovernorError::InvalidAddress)?;
+        let effective = self.effective_policy(&aura)?;
+
+        if effective.is_admin(&actor)? {
+            return Ok(true);
+        }
+
+        Ok(self.delegations.iter().any(|d| {
+            d.aura == aura
+                && d.delegate == actor
+                && d.expires_unix_ms > now_unix_ms
+                && d.capabilities.contains(&capability)
+        }))
+    }
+
+    fn has_cycle(&self) -> bool {
+        for p in self.policies.keys() {
+            let mut seen = BTreeSet::new();
+            let mut cur = p.clone();
+            while let Some(next) = self.links.iter().find(|l| l.child_aura == cur).map(|l| l.parent_aura.clone()) {
+                if !seen.insert(cur.clone()) {
+                    return true;
+                }
+                cur = next;
+            }
+        }
+        false
+    }
+}
+
+fn canonical_aura_addr(input: &str) -> Result<String, GovernorError> {
+    let canonical = canonicalize(input).map_err(|_| GovernorError::InvalidAddress)?;
+    let addr = VasAddress::parse(&canonical).map_err(|_| GovernorError::InvalidAddress)?;
+    if addr.kind != AddressType::Aura {
+        return Err(GovernorError::InvalidPolicy(
+            "federation operations require aur{...} addresses".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
 pub fn analyze_audit_records(records: &[AuditRecord], cfg: &AnalysisConfig) -> AuditAnalysisReport {
     let total_events = records.len();
     let allowed_events = records
@@ -1248,5 +1468,145 @@ mod tests {
             now,
         );
         assert!(matches!(err, Err(GovernorError::Denied(_))));
+    }
+
+    #[test]
+    fn federation_inherits_parent_admins_and_member_types() {
+        let mut root = GovernorPolicy::from_toml_str(
+            r#"
+            governor = "svc{gov,corp,live}"
+            managed_aura = "aur{corp,private,open}"
+            admins = ["usr{root,corp,active}"]
+            allow_member_types = ["usr", "dev", "agt"]
+            allow_removal = true
+            "#,
+        )
+        .unwrap();
+        root.normalize().unwrap();
+
+        let mut team = GovernorPolicy::from_toml_str(
+            r#"
+            governor = "svc{gov,corp,live}"
+            managed_aura = "aur{team,private,open}"
+            admins = ["usr{alice,corp,active}"]
+            allow_member_types = ["usr"]
+            allow_removal = true
+            "#,
+        )
+        .unwrap();
+        team.normalize().unwrap();
+
+        let mut fed = FederatedGovernor::new();
+        fed.register_policy(root).unwrap();
+        fed.register_policy(team).unwrap();
+        fed.add_federation_link(FederationLink {
+            parent_aura: "aur{corp,private,open}".into(),
+            child_aura: "aur{team,private,open}".into(),
+            inherit_admins: true,
+            inherit_member_types: true,
+            inherit_allow_removal: false,
+        })
+        .unwrap();
+
+        let effective = fed.effective_policy("aur{team,private,open}").unwrap();
+        assert!(effective
+            .effective_admins()
+            .contains(&"usr{root,corp,active}".to_string()));
+        assert!(effective
+            .effective_member_types()
+            .contains(&"dev".to_string()));
+        assert!(effective
+            .effective_member_types()
+            .contains(&"agt".to_string()));
+    }
+
+    #[test]
+    fn federation_delegation_is_capability_and_expiry_scoped() {
+        let mut fed = FederatedGovernor::new();
+        fed.register_policy(sample_policy()).unwrap();
+
+        let now = 100_000u128;
+        let caps = BTreeSet::from([DelegatedCapability::AddMember]);
+        fed.grant_delegation(
+            "aur{finance,private,open}",
+            "usr{alice,corp,active}",
+            "agt{opsbot,corp,live}",
+            caps,
+            now + 50,
+            now,
+        )
+        .unwrap();
+
+        assert!(fed
+            .is_authorized(
+                "aur{finance,private,open}",
+                "agt{opsbot,corp,live}",
+                DelegatedCapability::AddMember,
+                now + 10,
+            )
+            .unwrap());
+
+        assert!(!fed
+            .is_authorized(
+                "aur{finance,private,open}",
+                "agt{opsbot,corp,live}",
+                DelegatedCapability::UpdatePolicy,
+                now + 10,
+            )
+            .unwrap());
+
+        assert!(!fed
+            .is_authorized(
+                "aur{finance,private,open}",
+                "agt{opsbot,corp,live}",
+                DelegatedCapability::AddMember,
+                now + 60,
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn federation_rejects_inheritance_cycles() {
+        let mut fed = FederatedGovernor::new();
+        fed.register_policy(
+            GovernorPolicy::from_toml_str(
+                r#"
+                governor = "svc{gov,corp,live}"
+                managed_aura = "aur{a,private,open}"
+                admins = ["usr{alice,corp,active}"]
+                "#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        fed.register_policy(
+            GovernorPolicy::from_toml_str(
+                r#"
+                governor = "svc{gov,corp,live}"
+                managed_aura = "aur{b,private,open}"
+                admins = ["usr{alice,corp,active}"]
+                "#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        fed.add_federation_link(FederationLink {
+            parent_aura: "aur{a,private,open}".into(),
+            child_aura: "aur{b,private,open}".into(),
+            inherit_admins: true,
+            inherit_member_types: true,
+            inherit_allow_removal: true,
+        })
+        .unwrap();
+
+        let err = fed.add_federation_link(FederationLink {
+            parent_aura: "aur{b,private,open}".into(),
+            child_aura: "aur{a,private,open}".into(),
+            inherit_admins: true,
+            inherit_member_types: false,
+            inherit_allow_removal: false,
+        });
+        assert!(matches!(err, Err(GovernorError::InvalidPolicy(_))));
     }
 }

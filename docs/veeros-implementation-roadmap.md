@@ -40,7 +40,7 @@ The canonical long-horizon phase ledger remains in `TODO.md` (Phase 1..26).
 - [x] AI assistant integration for Aura Governor (policy suggestions, anomaly detection)
 - [x] Temporary/conditional Aura membership for agents
 - [x] Multi-Aura participation for Folds, devices, users
-- [ ] Policy inheritance, delegation, and federation
+- [x] Policy inheritance, delegation, and federation
 - [ ] Advanced permission algebra (set ops, time bounds, context)
 - [ ] Developer APIs for Aura/Fold/Service orchestration
 
