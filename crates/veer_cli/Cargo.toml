@@ -20,3 +20,4 @@ toml = "0.8"
 vas = { path = "../vas" }
 veer_resolve = { path = "../veer_resolve" }
 veer_graph = { path = "../veer_graph" }
+veer_governor = { path = "../veer_governor" }

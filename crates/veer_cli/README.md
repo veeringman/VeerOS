@@ -160,3 +160,19 @@ cost = 0.2
 affinity = 0.6
 load = 0.4
 ```
+
+Analyze governor audit logs for anomalies and policy suggestions:
+
+```bash
+veer trace governor \
+	--audit ./governor-audit.jsonl \
+	--limit 300
+```
+
+JSON output mode:
+
+```bash
+veer trace governor \
+	--audit ./governor-audit.jsonl \
+	--json
+```

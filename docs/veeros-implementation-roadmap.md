@@ -37,7 +37,7 @@ The canonical long-horizon phase ledger remains in `TODO.md` (Phase 1..26).
 ---
 
 ## Phase 3: AI-Native & Multi-Aura
-- [ ] AI assistant integration for Aura Governor (policy suggestions, anomaly detection)
+- [x] AI assistant integration for Aura Governor (policy suggestions, anomaly detection)
 - [ ] Temporary/conditional Aura membership for agents
 - [ ] Multi-Aura participation for Folds, devices, users
 - [ ] Policy inheritance, delegation, and federation

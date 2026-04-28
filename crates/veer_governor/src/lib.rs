@@ -17,6 +17,54 @@ use serde::{Deserialize, Serialize};
 use vas::{canonicalize, AddressType, VasAddress};
 use veer_aura::Aura;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnalysisConfig {
+    pub min_events: usize,
+    pub deny_ratio_threshold: f32,
+    pub unknown_actor_denied_threshold: usize,
+    pub member_type_denied_threshold: usize,
+    pub policy_update_churn_threshold: usize,
+}
+
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            min_events: 8,
+            deny_ratio_threshold: 0.35,
+            unknown_actor_denied_threshold: 3,
+            member_type_denied_threshold: 3,
+            policy_update_churn_threshold: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuditAnalysisReport {
+    pub total_events: usize,
+    pub allowed_events: usize,
+    pub denied_events: usize,
+    pub deny_ratio: f32,
+    pub unique_actors: usize,
+    pub findings: Vec<AnomalyFinding>,
+    pub suggestions: Vec<PolicySuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnomalyFinding {
+    pub code: String,
+    pub severity: String,
+    pub count: usize,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolicySuggestion {
+    pub id: String,
+    pub priority: String,
+    pub summary: String,
+    pub rationale: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GovernorPolicy {
     pub governor: String,
@@ -302,6 +350,15 @@ impl Governor {
         &self.audit_log
     }
 
+    pub fn analyze_recent_audit(&self, limit: usize, cfg: &AnalysisConfig) -> AuditAnalysisReport {
+        if limit == 0 || self.audit_log.is_empty() {
+            return analyze_audit_records(&[], cfg);
+        }
+
+        let start = self.audit_log.len().saturating_sub(limit);
+        analyze_audit_records(&self.audit_log[start..], cfg)
+    }
+
     pub fn apply_policy_delta(
         &mut self,
         actor: &str,
@@ -545,6 +602,128 @@ impl Governor {
         }
         self.audit_log.push(rec);
         Ok(())
+    }
+}
+
+pub fn analyze_audit_records(records: &[AuditRecord], cfg: &AnalysisConfig) -> AuditAnalysisReport {
+    let total_events = records.len();
+    let allowed_events = records
+        .iter()
+        .filter(|r| r.outcome == AuditOutcome::Allowed)
+        .count();
+    let denied_events = total_events.saturating_sub(allowed_events);
+    let deny_ratio = if total_events == 0 {
+        0.0
+    } else {
+        denied_events as f32 / total_events as f32
+    };
+
+    let mut unique_actors = BTreeSet::new();
+    let mut denied_unknown_actor = 0usize;
+    let mut denied_member_type = 0usize;
+    let mut update_policy_allowed = 0usize;
+
+    for r in records {
+        unique_actors.insert(r.actor.clone());
+
+        if r.action == AuditAction::UpdatePolicy && r.outcome == AuditOutcome::Allowed {
+            update_policy_allowed += 1;
+        }
+
+        if r.outcome == AuditOutcome::Denied {
+            let reason = r.reason.to_ascii_lowercase();
+            if reason.contains("actor not in admins") {
+                denied_unknown_actor += 1;
+            }
+            if reason.contains("member type not allowed") {
+                denied_member_type += 1;
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    let mut suggestions = Vec::new();
+
+    if total_events >= cfg.min_events && deny_ratio >= cfg.deny_ratio_threshold {
+        findings.push(AnomalyFinding {
+            code: "deny_spike".to_string(),
+            severity: "high".to_string(),
+            count: denied_events,
+            detail: format!(
+                "deny ratio {:.1}% exceeded threshold {:.1}% over {} events",
+                deny_ratio * 100.0,
+                cfg.deny_ratio_threshold * 100.0,
+                total_events
+            ),
+        });
+        suggestions.push(PolicySuggestion {
+            id: "review_recent_denials".to_string(),
+            priority: "high".to_string(),
+            summary: "Review recent denied decisions and tighten admission path".to_string(),
+            rationale:
+                "A sustained deny spike indicates policy/traffic mismatch; validate caller identity sources and member admission criteria".to_string(),
+        });
+    }
+
+    if denied_unknown_actor >= cfg.unknown_actor_denied_threshold {
+        findings.push(AnomalyFinding {
+            code: "unknown_actor_denials".to_string(),
+            severity: "medium".to_string(),
+            count: denied_unknown_actor,
+            detail: "Repeated denies where actor is not an effective admin".to_string(),
+        });
+        suggestions.push(PolicySuggestion {
+            id: "delegate_scoped_admin".to_string(),
+            priority: "medium".to_string(),
+            summary: "Add scoped delegation for expected automation actors".to_string(),
+            rationale:
+                "Frequent admin-check failures suggest missing delegated principals; prefer time-bound delegated actors over broad permanent admin expansion".to_string(),
+        });
+    }
+
+    if denied_member_type >= cfg.member_type_denied_threshold {
+        findings.push(AnomalyFinding {
+            code: "member_type_rejections".to_string(),
+            severity: "medium".to_string(),
+            count: denied_member_type,
+            detail: "Repeated denies due to disallowed member type".to_string(),
+        });
+        suggestions.push(PolicySuggestion {
+            id: "refine_member_type_policy".to_string(),
+            priority: "medium".to_string(),
+            summary: "Refine allow_member_types or onboarding flow".to_string(),
+            rationale:
+                "Rejected member-type requests likely indicate policy is stricter than real usage; tune type allowlist or enforce earlier validation in clients".to_string(),
+        });
+    }
+
+    if update_policy_allowed >= cfg.policy_update_churn_threshold {
+        findings.push(AnomalyFinding {
+            code: "policy_update_churn".to_string(),
+            severity: "medium".to_string(),
+            count: update_policy_allowed,
+            detail: "High count of successful policy updates in analysis window".to_string(),
+        });
+        suggestions.push(PolicySuggestion {
+            id: "stabilize_policy_rollouts".to_string(),
+            priority: "low".to_string(),
+            summary: "Batch policy deltas and introduce staged rollouts".to_string(),
+            rationale:
+                "Frequent policy changes can create operational instability; use release windows and consolidated deltas for predictability".to_string(),
+        });
+    }
+
+    findings.sort_by(|a, b| a.code.cmp(&b.code));
+    suggestions.sort_by(|a, b| a.id.cmp(&b.id));
+
+    AuditAnalysisReport {
+        total_events,
+        allowed_events,
+        denied_events,
+        deny_ratio,
+        unique_actors: unique_actors.len(),
+        findings,
+        suggestions,
     }
 }
 
@@ -806,5 +985,86 @@ mod tests {
         let trace = rec.trace.as_ref().unwrap();
         assert!(!trace.allowed);
         assert!(trace.steps.iter().any(|s| s.check == "actor_is_admin" && !s.passed));
+    }
+
+    #[test]
+    fn audit_analysis_reports_findings_and_suggestions() {
+        let records = vec![
+            AuditRecord {
+                ts_unix_ms: 1,
+                governor: "svc{governor,company,live}".into(),
+                aura: "aur{finance,private,open}".into(),
+                policy_version: 3,
+                actor: "usr{mallory,corp,active}".into(),
+                action: AuditAction::AddMember,
+                member: "usr{jane,corp,active}".into(),
+                outcome: AuditOutcome::Denied,
+                reason: "actor not in admins".into(),
+                trace: None,
+            },
+            AuditRecord {
+                ts_unix_ms: 2,
+                governor: "svc{governor,company,live}".into(),
+                aura: "aur{finance,private,open}".into(),
+                policy_version: 3,
+                actor: "usr{mallory,corp,active}".into(),
+                action: AuditAction::AddMember,
+                member: "vlt{payroll,corp,2026}".into(),
+                outcome: AuditOutcome::Denied,
+                reason: "member type not allowed".into(),
+                trace: None,
+            },
+            AuditRecord {
+                ts_unix_ms: 3,
+                governor: "svc{governor,company,live}".into(),
+                aura: "aur{finance,private,open}".into(),
+                policy_version: 4,
+                actor: "usr{alice,corp,active}".into(),
+                action: AuditAction::UpdatePolicy,
+                member: "evt{governor,policy,update}".into(),
+                outcome: AuditOutcome::Allowed,
+                reason: "policy updated".into(),
+                trace: None,
+            },
+            AuditRecord {
+                ts_unix_ms: 4,
+                governor: "svc{governor,company,live}".into(),
+                aura: "aur{finance,private,open}".into(),
+                policy_version: 5,
+                actor: "usr{alice,corp,active}".into(),
+                action: AuditAction::UpdatePolicy,
+                member: "evt{governor,policy,update}".into(),
+                outcome: AuditOutcome::Allowed,
+                reason: "policy updated".into(),
+                trace: None,
+            },
+        ];
+
+        let cfg = AnalysisConfig {
+            min_events: 4,
+            deny_ratio_threshold: 0.25,
+            unknown_actor_denied_threshold: 1,
+            member_type_denied_threshold: 1,
+            policy_update_churn_threshold: 2,
+        };
+
+        let report = analyze_audit_records(&records, &cfg);
+        assert_eq!(report.total_events, 4);
+        assert_eq!(report.denied_events, 2);
+        assert_eq!(report.unique_actors, 2);
+        assert!(report.findings.iter().any(|f| f.code == "deny_spike"));
+        assert!(report.findings.iter().any(|f| f.code == "member_type_rejections"));
+        assert!(report.findings.iter().any(|f| f.code == "policy_update_churn"));
+        assert!(report.findings.iter().any(|f| f.code == "unknown_actor_denials"));
+        assert!(report.suggestions.iter().any(|s| s.id == "delegate_scoped_admin"));
+    }
+
+    #[test]
+    fn audit_analysis_handles_empty_input() {
+        let report = analyze_audit_records(&[], &AnalysisConfig::default());
+        assert_eq!(report.total_events, 0);
+        assert_eq!(report.denied_events, 0);
+        assert!(report.findings.is_empty());
+        assert!(report.suggestions.is_empty());
     }
 }

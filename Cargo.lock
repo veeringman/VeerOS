@@ -1225,6 +1225,7 @@ dependencies = [
  "serde_json",
  "toml",
  "vas",
+ "veer_governor",
  "veer_graph",
  "veer_resolve",
 ]

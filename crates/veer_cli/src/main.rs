@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use vas::{canonicalize, AddressType, VasAddress};
+use veer_governor::{analyze_audit_records, AnalysisConfig, AuditAnalysisReport, AuditRecord};
 use veer_graph::{Direction, EdgeKind, EdgeWeights, GraphCore, PolicySet, SolverWeights, VertexKind};
 use veer_resolve::{Endpoint, ResolveError, Resolver, ServiceBinding};
 
@@ -63,6 +64,8 @@ enum GatewayCmd {
 enum TraceCmd {
     /// Explain solver decision path from a graph snapshot.
     Decision(TraceDecisionArgs),
+    /// Analyze governor audit stream for anomalies and policy suggestions.
+    Governor(TraceGovernorArgs),
 }
 
 #[derive(Args, Debug)]
@@ -163,6 +166,34 @@ struct TraceDecisionArgs {
     gamma: f32,
     #[arg(long, default_value_t = 1.0)]
     delta: f32,
+}
+
+#[derive(Args, Debug)]
+struct TraceGovernorArgs {
+    /// Governor JSONL audit file path.
+    #[arg(long)]
+    audit: PathBuf,
+    /// Analyze only the most recent N records.
+    #[arg(long, default_value_t = 200)]
+    limit: usize,
+    /// Minimum event count before deny ratio anomaly is evaluated.
+    #[arg(long)]
+    min_events: Option<usize>,
+    /// Deny ratio threshold for high-severity anomaly.
+    #[arg(long)]
+    deny_ratio_threshold: Option<f32>,
+    /// Threshold for repeated "actor not in admins" denied events.
+    #[arg(long)]
+    unknown_actor_denied_threshold: Option<usize>,
+    /// Threshold for repeated "member type not allowed" denied events.
+    #[arg(long)]
+    member_type_denied_threshold: Option<usize>,
+    /// Threshold for repeated successful policy updates.
+    #[arg(long)]
+    policy_update_churn_threshold: Option<usize>,
+    /// Emit JSON report.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -332,7 +363,42 @@ fn main() -> Result<()> {
 fn cmd_trace(cmd: TraceCmd) -> Result<()> {
     match cmd {
         TraceCmd::Decision(args) => cmd_trace_decision(args),
+        TraceCmd::Governor(args) => cmd_trace_governor(args),
     }
+}
+
+fn cmd_trace_governor(args: TraceGovernorArgs) -> Result<()> {
+    let all = load_audit_records(&args.audit)?;
+    let records = if args.limit == 0 || all.len() <= args.limit {
+        all
+    } else {
+        all[all.len() - args.limit..].to_vec()
+    };
+
+    let mut cfg = AnalysisConfig::default();
+    if let Some(v) = args.min_events {
+        cfg.min_events = v;
+    }
+    if let Some(v) = args.deny_ratio_threshold {
+        cfg.deny_ratio_threshold = v;
+    }
+    if let Some(v) = args.unknown_actor_denied_threshold {
+        cfg.unknown_actor_denied_threshold = v;
+    }
+    if let Some(v) = args.member_type_denied_threshold {
+        cfg.member_type_denied_threshold = v;
+    }
+    if let Some(v) = args.policy_update_churn_threshold {
+        cfg.policy_update_churn_threshold = v;
+    }
+
+    let report = analyze_audit_records(&records, &cfg);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_governor_report(&report, &cfg, records.len());
+    }
+    Ok(())
 }
 
 fn cmd_trace_decision(args: TraceDecisionArgs) -> Result<()> {
@@ -484,6 +550,63 @@ fn print_decision_report(report: &DecisionTraceReport) {
             c.affinity,
             c.load,
         );
+    }
+}
+
+fn load_audit_records(path: &Path) -> Result<Vec<AuditRecord>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+
+    let mut out = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rec: AuditRecord = serde_json::from_str(trimmed)
+            .with_context(|| format!("parsing {} line {}", path.display(), idx + 1))?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+fn print_governor_report(report: &AuditAnalysisReport, cfg: &AnalysisConfig, analyzed: usize) {
+    println!("governor audit analysis");
+    println!("  analyzed events : {}", analyzed);
+    println!("  total events    : {}", report.total_events);
+    println!("  allowed         : {}", report.allowed_events);
+    println!("  denied          : {}", report.denied_events);
+    println!("  deny ratio      : {:.1}%", report.deny_ratio * 100.0);
+    println!("  unique actors   : {}", report.unique_actors);
+    println!();
+    println!(
+        "thresholds: min_events={} deny_ratio>={:.1}% unknown_actor_denied>={} member_type_denied>={} policy_update_churn>={}",
+        cfg.min_events,
+        cfg.deny_ratio_threshold * 100.0,
+        cfg.unknown_actor_denied_threshold,
+        cfg.member_type_denied_threshold,
+        cfg.policy_update_churn_threshold,
+    );
+
+    println!();
+    if report.findings.is_empty() {
+        println!("findings: none");
+    } else {
+        println!("findings:");
+        for f in &report.findings {
+            println!("  - [{}] {} (count={}): {}", f.severity, f.code, f.count, f.detail);
+        }
+    }
+
+    println!();
+    if report.suggestions.is_empty() {
+        println!("policy suggestions: none");
+    } else {
+        println!("policy suggestions:");
+        for s in &report.suggestions {
+            println!("  - [{}] {}: {}", s.priority, s.id, s.summary);
+            println!("    rationale: {}", s.rationale);
+        }
     }
 }
 
