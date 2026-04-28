@@ -190,6 +190,33 @@ pub struct SolverChoice {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementRequest {
+    pub source: String,
+    pub edge_kind: EdgeKind,
+    pub target_kind: Option<VertexKind>,
+    #[serde(default)]
+    pub coefficients: SolverWeights,
+    /// Minimum objective improvement required to switch away from
+    /// `current_target` during re-optimization.
+    #[serde(default)]
+    pub hysteresis_margin: f32,
+    /// Existing placement target to evaluate for re-optimization.
+    #[serde(default)]
+    pub current_target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementDecision {
+    pub source: String,
+    pub selected_target: Option<String>,
+    pub selected_score: Option<f32>,
+    pub previous_target: Option<String>,
+    pub previous_score: Option<f32>,
+    pub switched: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyClause {
     RequireTargetKind(VertexKind),
@@ -510,6 +537,122 @@ impl GraphCore {
         self.telemetry_stats
     }
 
+    /// Graph-driven workload placement with continuous re-optimization and
+    /// hysteresis to avoid target flapping.
+    pub fn optimize_placement_with_hysteresis(
+        &self,
+        request: &PlacementRequest,
+    ) -> Result<PlacementDecision, GraphError> {
+        if request.hysteresis_margin < 0.0 {
+            return Err(GraphError::InvalidWeight);
+        }
+
+        let source = canonicalize(&request.source).map_err(|_| GraphError::InvalidVertexId)?;
+        if !self.vertices.contains_key(&source) {
+            return Err(GraphError::MissingVertex);
+        }
+
+        let best = self.solve_best_target(
+            &source,
+            request.edge_kind,
+            request.target_kind,
+            request.coefficients,
+        )?;
+
+        let current_target = request
+            .current_target
+            .as_deref()
+            .map(canonicalize)
+            .transpose()
+            .map_err(|_| GraphError::InvalidVertexId)?;
+        let previous_score = current_target
+            .as_deref()
+            .and_then(|t| self.score_for_target(&source, t, request));
+
+        let decision = match (current_target.clone(), previous_score, best) {
+            (None, _, Some(best)) => PlacementDecision {
+                source,
+                selected_target: Some(best.target),
+                selected_score: Some(best.score),
+                previous_target: None,
+                previous_score: None,
+                switched: true,
+                reason: "initial_placement".to_string(),
+            },
+            (None, _, None) => PlacementDecision {
+                source,
+                selected_target: None,
+                selected_score: None,
+                previous_target: None,
+                previous_score: None,
+                switched: false,
+                reason: "no_candidate".to_string(),
+            },
+            (Some(current), Some(prev_score), Some(best)) if current == best.target => PlacementDecision {
+                source,
+                selected_target: Some(current.clone()),
+                selected_score: Some(prev_score),
+                previous_target: Some(current),
+                previous_score: Some(prev_score),
+                switched: false,
+                reason: "current_is_optimal".to_string(),
+            },
+            (Some(current), Some(prev_score), Some(best)) => {
+                let improvement = prev_score - best.score;
+                if improvement > request.hysteresis_margin {
+                    PlacementDecision {
+                        source,
+                        selected_target: Some(best.target),
+                        selected_score: Some(best.score),
+                        previous_target: Some(current),
+                        previous_score: Some(prev_score),
+                        switched: true,
+                        reason: "switch_better_than_hysteresis".to_string(),
+                    }
+                } else {
+                    PlacementDecision {
+                        source,
+                        selected_target: Some(current.clone()),
+                        selected_score: Some(prev_score),
+                        previous_target: Some(current),
+                        previous_score: Some(prev_score),
+                        switched: false,
+                        reason: "stay_due_to_hysteresis".to_string(),
+                    }
+                }
+            }
+            (Some(current), None, Some(best)) => PlacementDecision {
+                source,
+                selected_target: Some(best.target),
+                selected_score: Some(best.score),
+                previous_target: Some(current),
+                previous_score: None,
+                switched: true,
+                reason: "previous_target_unavailable".to_string(),
+            },
+            (Some(current), Some(prev_score), None) => PlacementDecision {
+                source,
+                selected_target: Some(current.clone()),
+                selected_score: Some(prev_score),
+                previous_target: Some(current),
+                previous_score: Some(prev_score),
+                switched: false,
+                reason: "no_better_candidate".to_string(),
+            },
+            (Some(current), None, None) => PlacementDecision {
+                source,
+                selected_target: Some(current.clone()),
+                selected_score: None,
+                previous_target: Some(current),
+                previous_score: None,
+                switched: false,
+                reason: "no_candidate_keep_current".to_string(),
+            },
+        };
+
+        Ok(decision)
+    }
+
     pub fn ingest_signal(&mut self, signal: TelemetrySignal) -> Result<(), GraphError> {
         let result = match signal {
             TelemetrySignal::EdgeMetrics {
@@ -609,6 +752,30 @@ impl GraphCore {
         }
 
         Ok(())
+    }
+
+    fn score_for_target(
+        &self,
+        source: &str,
+        target: &str,
+        request: &PlacementRequest,
+    ) -> Option<f32> {
+        let edge = self
+            .edges
+            .get(&EdgeKey::new(source, target, request.edge_kind))?;
+        if let Some(expected) = request.target_kind {
+            let v = self.vertices.get(target)?;
+            if v.kind != expected {
+                return None;
+            }
+        }
+
+        Some(
+            request.coefficients.alpha_latency * edge.weights.latency
+                + request.coefficients.beta_cost * (edge.weights.cost + edge.weights.load)
+                - request.coefficients.gamma_trust * edge.weights.trust
+                - request.coefficients.delta_affinity * edge.weights.affinity,
+        )
     }
 }
 
@@ -1172,5 +1339,167 @@ mod tests {
             )
             .unwrap();
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn placement_initial_pick_selects_best_target() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-b,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 10.0,
+                trust: 0.4,
+                cost: 0.2,
+                affinity: 0.2,
+                load: 0.2,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-b,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 4.0,
+                trust: 0.2,
+                cost: 0.1,
+                affinity: 0.1,
+                load: 0.1,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let decision = g
+            .optimize_placement_with_hysteresis(&PlacementRequest {
+                source: "svc{render,company,live}".to_string(),
+                edge_kind: EdgeKind::Reachability,
+                target_kind: Some(VertexKind::Node),
+                coefficients: SolverWeights::default(),
+                hysteresis_margin: 0.5,
+                current_target: None,
+            })
+            .unwrap();
+
+        assert_eq!(decision.selected_target.as_deref(), Some("nod{edge-b,zone-1,ready}"));
+        assert!(decision.switched);
+        assert_eq!(decision.reason, "initial_placement");
+    }
+
+    #[test]
+    fn placement_reoptimization_respects_hysteresis_margin() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-b,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 5.0,
+                trust: 0.4,
+                cost: 0.2,
+                affinity: 0.1,
+                load: 0.2,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-b,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 4.8,
+                trust: 0.41,
+                cost: 0.2,
+                affinity: 0.1,
+                load: 0.2,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let decision = g
+            .optimize_placement_with_hysteresis(&PlacementRequest {
+                source: "svc{render,company,live}".to_string(),
+                edge_kind: EdgeKind::Reachability,
+                target_kind: Some(VertexKind::Node),
+                coefficients: SolverWeights::default(),
+                hysteresis_margin: 0.3,
+                current_target: Some("nod{edge-a,zone-1,ready}".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(decision.selected_target.as_deref(), Some("nod{edge-a,zone-1,ready}"));
+        assert!(!decision.switched);
+        assert_eq!(decision.reason, "stay_due_to_hysteresis");
+    }
+
+    #[test]
+    fn placement_reoptimization_switches_when_improvement_exceeds_margin() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-b,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 9.0,
+                trust: 0.2,
+                cost: 0.3,
+                affinity: 0.1,
+                load: 0.3,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-b,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 3.0,
+                trust: 0.8,
+                cost: 0.1,
+                affinity: 0.4,
+                load: 0.1,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let decision = g
+            .optimize_placement_with_hysteresis(&PlacementRequest {
+                source: "svc{render,company,live}".to_string(),
+                edge_kind: EdgeKind::Reachability,
+                target_kind: Some(VertexKind::Node),
+                coefficients: SolverWeights::default(),
+                hysteresis_margin: 0.5,
+                current_target: Some("nod{edge-a,zone-1,ready}".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(decision.selected_target.as_deref(), Some("nod{edge-b,zone-1,ready}"));
+        assert!(decision.switched);
+        assert_eq!(decision.reason, "switch_better_than_hysteresis");
     }
 }
