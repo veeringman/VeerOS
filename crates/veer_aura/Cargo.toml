@@ -1,0 +1,11 @@
+[package]
+name = "veer_aura"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VeerOS Aura object model (identity, members, hierarchy, governor ref)"
+
+[dependencies]
+vas = { path = "../vas" }
