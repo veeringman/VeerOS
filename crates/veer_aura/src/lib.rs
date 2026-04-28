@@ -193,6 +193,13 @@ pub struct AuraGraph {
     auras: HashMap<AuraId, Aura>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuraOverlapEdge {
+    pub left: AuraId,
+    pub right: AuraId,
+    pub shared_members: Vec<String>,
+}
+
 impl AuraGraph {
     pub fn new() -> Self {
         Self::default()
@@ -256,6 +263,80 @@ impl AuraGraph {
         self.auras.values()
     }
 
+    pub fn add_member_to_aura(&mut self, aura: &AuraId, member_address: &str) -> Result<bool, AuraError> {
+        let Some(a) = self.auras.get_mut(aura) else {
+            return Err(AuraError::NotFound);
+        };
+        a.add_member(member_address)
+    }
+
+    pub fn remove_member_from_aura(
+        &mut self,
+        aura: &AuraId,
+        member_address: &str,
+    ) -> Result<bool, AuraError> {
+        let Some(a) = self.auras.get_mut(aura) else {
+            return Err(AuraError::NotFound);
+        };
+        a.remove_member(member_address)
+    }
+
+    pub fn auras_for_member(
+        &self,
+        member_address: &str,
+        include_active_temporary: bool,
+        now_unix_ms: u128,
+    ) -> Result<Vec<AuraId>, AuraError> {
+        let canonical = canonicalize(member_address).map_err(|_| AuraError::InvalidAddress)?;
+        let mut out = Vec::new();
+
+        for (id, aura) in &self.auras {
+            let is_static = aura.members.contains(&canonical);
+            let is_temporary = include_active_temporary
+                && aura
+                    .temporary_members
+                    .get(&canonical)
+                    .map(|m| m.expires_unix_ms > now_unix_ms)
+                    .unwrap_or(false);
+            if is_static || is_temporary {
+                out.push(id.clone());
+            }
+        }
+        out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(out)
+    }
+
+    pub fn overlap_graph(&self, include_active_temporary: bool, now_unix_ms: u128) -> Vec<AuraOverlapEdge> {
+        let mut nodes: Vec<(&AuraId, &Aura)> = self.auras.iter().collect();
+        nodes.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+
+        let mut edges = Vec::new();
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                let (left_id, left) = nodes[i];
+                let (right_id, right) = nodes[j];
+
+                let left_members = members_for_overlap(left, include_active_temporary, now_unix_ms);
+                let right_members = members_for_overlap(right, include_active_temporary, now_unix_ms);
+
+                let shared_members: Vec<String> = left_members
+                    .intersection(&right_members)
+                    .cloned()
+                    .collect();
+
+                if !shared_members.is_empty() {
+                    edges.push(AuraOverlapEdge {
+                        left: left_id.clone(),
+                        right: right_id.clone(),
+                        shared_members,
+                    });
+                }
+            }
+        }
+
+        edges
+    }
+
     fn is_descendant_of(&self, candidate_child: &AuraId, candidate_ancestor: &AuraId) -> bool {
         let mut cur = Some(candidate_child.clone());
         while let Some(id) = cur {
@@ -266,6 +347,18 @@ impl AuraGraph {
         }
         false
     }
+}
+
+fn members_for_overlap(aura: &Aura, include_active_temporary: bool, now_unix_ms: u128) -> BTreeSet<String> {
+    let mut out = aura.members.clone();
+    if include_active_temporary {
+        for (member, grant) in &aura.temporary_members {
+            if grant.expires_unix_ms > now_unix_ms {
+                out.insert(member.clone());
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -413,5 +506,92 @@ mod tests {
         let pruned = aura.prune_expired_temporary_members(now + 25);
         assert_eq!(pruned, 1);
         assert!(aura.temporary_membership("agt{bot,ops,live}").is_none());
+    }
+
+    #[test]
+    fn member_can_participate_in_multiple_auras() {
+        let a = AuraId::parse("aur{design,private,open}").unwrap();
+        let b = AuraId::parse("aur{ops,private,open}").unwrap();
+
+        let mut g = AuraGraph::new();
+        g.create_aura(a.clone()).unwrap();
+        g.create_aura(b.clone()).unwrap();
+
+        g.add_member_to_aura(&a, "usr{alice,corp,active}").unwrap();
+        g.add_member_to_aura(&b, "usr{alice,corp,active}").unwrap();
+
+        let out = g
+            .auras_for_member("usr{alice,corp,active}", false, 0)
+            .unwrap();
+        assert_eq!(out, vec![a, b]);
+    }
+
+    #[test]
+    fn overlap_graph_reports_shared_members_across_auras() {
+        let a = AuraId::parse("aur{design,private,open}").unwrap();
+        let b = AuraId::parse("aur{ops,private,open}").unwrap();
+        let c = AuraId::parse("aur{finance,private,open}").unwrap();
+
+        let mut g = AuraGraph::new();
+        g.create_aura(a.clone()).unwrap();
+        g.create_aura(b.clone()).unwrap();
+        g.create_aura(c).unwrap();
+
+        g.add_member_to_aura(&a, "usr{alice,corp,active}").unwrap();
+        g.add_member_to_aura(&a, "fld{worker,gpu,warm}").unwrap();
+        g.add_member_to_aura(&b, "usr{alice,corp,active}").unwrap();
+        g.add_member_to_aura(&b, "fld{worker,gpu,warm}").unwrap();
+
+        let edges = g.overlap_graph(false, 0);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].left, a);
+        assert_eq!(edges[0].right, b);
+        assert_eq!(
+            edges[0].shared_members,
+            vec![
+                "fld{worker,gpu,warm}".to_string(),
+                "usr{alice,corp,active}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlap_graph_can_include_active_temporary_agent_memberships() {
+        let a = AuraId::parse("aur{design,private,open}").unwrap();
+        let b = AuraId::parse("aur{ops,private,open}").unwrap();
+
+        let mut g = AuraGraph::new();
+        g.create_aura(a.clone()).unwrap();
+        g.create_aura(b.clone()).unwrap();
+
+        let now = 50_000u128;
+        g.get_mut(&a)
+            .unwrap()
+            .add_temporary_member(
+                "agt{opsbot,corp,live}",
+                "usr{owner,corp,active}",
+                now + 100,
+                &["observe".to_string()],
+                now,
+            )
+            .unwrap();
+        g.get_mut(&b)
+            .unwrap()
+            .add_temporary_member(
+                "agt{opsbot,corp,live}",
+                "usr{owner,corp,active}",
+                now + 100,
+                &["observe".to_string()],
+                now,
+            )
+            .unwrap();
+
+        assert!(g.overlap_graph(false, now).is_empty());
+        let with_temp = g.overlap_graph(true, now);
+        assert_eq!(with_temp.len(), 1);
+        assert_eq!(
+            with_temp[0].shared_members,
+            vec!["agt{opsbot,corp,live}".to_string()]
+        );
     }
 }

@@ -23,6 +23,8 @@ veer aura create aur{design,private,open} --name "Design Aura"
 veer aura join aur{design,private,open}
 veer aura share aur{design,private,open} --with usr{alice,corp,active} --with usr{bob,corp,active}
 veer aura grant-agent aur{design,private,open} --agent agt{opsbot,corp,live} --expires-unix-ms 1790000000000 --scope observe --scope deploy
+veer aura overlap
+veer aura overlap --member usr{alice,corp,active}
 veer aura leave aur{design,private,open}
 ```
 

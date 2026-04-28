@@ -45,7 +45,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [ ] **Phase C — AI-Native & Multi-Aura**
   - [x] AI assistant integration in Aura Governor (anomaly detection, policy suggestions)
   - [x] Temporary / scoped Aura membership for agents (`expires`, `scope`)
-  - [ ] Multi-Aura participation for Folds, devices, users (overlap graph)
+  - [x] Multi-Aura participation for Folds, devices, users (overlap graph)
   - [ ] Policy inheritance + delegation + federation across Auras
   - [ ] Advanced permission algebra (set ops, intersections, time bounds, context predicates)
   - [ ] High-level developer SDK for Aura / Fold / Service orchestration

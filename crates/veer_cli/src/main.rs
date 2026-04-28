@@ -47,6 +47,7 @@ enum AuraCmd {
     Join(AuraJoinArgs),
     Share(AuraShareArgs),
     GrantAgent(AuraGrantAgentArgs),
+    Overlap(AuraOverlapArgs),
     Leave(AuraLeaveArgs),
 }
 
@@ -102,6 +103,19 @@ struct AuraGrantAgentArgs {
     expires_unix_ms: u128,
     #[arg(long = "scope", required = true)]
     scopes: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct AuraOverlapArgs {
+    /// Optional principal to inspect (usr/dev/fld/agt/svc/nod).
+    #[arg(long)]
+    member: Option<String>,
+    /// Include active temporary agent memberships in overlap results.
+    #[arg(long)]
+    include_temporary: bool,
+    /// Emit JSON output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -282,6 +296,13 @@ struct TemporaryAgentGrant {
     #[serde(default)]
     scopes: BTreeSet<String>,
     granted_at_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct AuraOverlapEdgeView {
+    left_aura: String,
+    right_aura: String,
+    shared_members: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -779,6 +800,87 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
             );
             Ok(())
         }
+        AuraCmd::Overlap(args) => {
+            let now = now_unix_ms();
+            let mut aura_members = BTreeMap::new();
+            for (aura, created) in &state.created {
+                let members = members_for_created_aura(created, now, args.include_temporary);
+                aura_members.insert(aura.clone(), members);
+            }
+
+            if let Some(member) = args.member {
+                let member = canonical_overlap_target(&member)?;
+                let mut in_auras = Vec::new();
+                for (aura, members) in &aura_members {
+                    if members.contains(&member) {
+                        in_auras.push(aura.clone());
+                    }
+                }
+                in_auras.sort();
+
+                if args.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "member": member,
+                            "auras": in_auras,
+                        }))?
+                    );
+                } else {
+                    println!("member: {}", member);
+                    if in_auras.is_empty() {
+                        println!("participates in: none");
+                    } else {
+                        println!("participates in:");
+                        for aura in &in_auras {
+                            println!("  - {}", aura);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            let mut aura_names: Vec<String> = aura_members.keys().cloned().collect();
+            aura_names.sort();
+            let mut edges = Vec::new();
+            for i in 0..aura_names.len() {
+                for j in (i + 1)..aura_names.len() {
+                    let left = &aura_names[i];
+                    let right = &aura_names[j];
+                    let left_set = aura_members.get(left).cloned().unwrap_or_default();
+                    let right_set = aura_members.get(right).cloned().unwrap_or_default();
+                    let shared_members: Vec<String> = left_set
+                        .intersection(&right_set)
+                        .cloned()
+                        .collect();
+                    if !shared_members.is_empty() {
+                        edges.push(AuraOverlapEdgeView {
+                            left_aura: left.clone(),
+                            right_aura: right.clone(),
+                            shared_members,
+                        });
+                    }
+                }
+            }
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&edges)?);
+            } else if edges.is_empty() {
+                println!("no aura overlap edges");
+            } else {
+                println!("aura overlap graph:");
+                for e in &edges {
+                    println!(
+                        "  - {} <-> {} (shared={}): {}",
+                        e.left_aura,
+                        e.right_aura,
+                        e.shared_members.len(),
+                        e.shared_members.join(",")
+                    );
+                }
+            }
+            Ok(())
+        }
         AuraCmd::Leave(args) => {
             let aura = canonical_typed(&args.aura, AddressType::Aura, "aura")?;
             let removed = state.joined.remove(&aura);
@@ -1091,9 +1193,46 @@ fn canonical_share_target(input: &str) -> Result<String> {
     let parsed = VasAddress::parse(&canonical)
         .map_err(|e| anyhow::anyhow!("invalid share target {}: {}", input, e))?;
     match parsed.kind {
-        AddressType::User | AddressType::Device | AddressType::Agent | AddressType::Service | AddressType::Node => Ok(canonical),
-        _ => bail!("share target must be one of usr/dev/agt/svc/nod"),
+        AddressType::User
+        | AddressType::Device
+        | AddressType::Fold
+        | AddressType::Agent
+        | AddressType::Service
+        | AddressType::Node => Ok(canonical),
+        _ => bail!("share target must be one of usr/dev/fld/agt/svc/nod"),
     }
+}
+
+fn canonical_overlap_target(input: &str) -> Result<String> {
+    let canonical = canonicalize(input)
+        .map_err(|e| anyhow::anyhow!("invalid overlap target {}: {}", input, e))?;
+    let parsed = VasAddress::parse(&canonical)
+        .map_err(|e| anyhow::anyhow!("invalid overlap target {}: {}", input, e))?;
+    match parsed.kind {
+        AddressType::User
+        | AddressType::Device
+        | AddressType::Fold
+        | AddressType::Agent
+        | AddressType::Service
+        | AddressType::Node => Ok(canonical),
+        _ => bail!("overlap target must be one of usr/dev/fld/agt/svc/nod"),
+    }
+}
+
+fn members_for_created_aura(
+    created: &CreatedAura,
+    now_unix_ms: u128,
+    include_temporary: bool,
+) -> BTreeSet<String> {
+    let mut out = created.shared_with.clone();
+    if include_temporary {
+        for (agent, grant) in &created.temporary_agents {
+            if grant.expires_unix_ms > now_unix_ms {
+                out.insert(agent.clone());
+            }
+        }
+    }
+    out
 }
 
 fn merged_manifest_auras(doc: &toml::Value, extra: &[String]) -> Result<Vec<String>> {
@@ -1303,5 +1442,59 @@ auras = ["aur{team,private,open}", " AUR{Team,Private,Open } "]
         let (host, port) = endpoint_host_port(&ep).unwrap();
         assert_eq!(host, "render.internal");
         assert_eq!(port, 3344);
+    }
+
+    #[test]
+    fn share_target_accepts_fold_address() {
+        let out = canonical_share_target(" FLD{worker,gpu,warm} ").unwrap();
+        assert_eq!(out, "fld{worker,gpu,warm}");
+    }
+
+    #[test]
+    fn overlap_members_include_active_temporary_only() {
+        let mut created = CreatedAura {
+            display_name: None,
+            shared_with: BTreeSet::from(["usr{alice,corp,active}".to_string()]),
+            temporary_agents: BTreeMap::from([
+                (
+                    "agt{opsbot,corp,live}".to_string(),
+                    TemporaryAgentGrant {
+                        expires_unix_ms: 200,
+                        scopes: BTreeSet::from(["observe".to_string()]),
+                        granted_at_unix_ms: 100,
+                    },
+                ),
+                (
+                    "agt{expired,corp,live}".to_string(),
+                    TemporaryAgentGrant {
+                        expires_unix_ms: 80,
+                        scopes: BTreeSet::from(["observe".to_string()]),
+                        granted_at_unix_ms: 10,
+                    },
+                ),
+            ]),
+        };
+
+        let without_temp = members_for_created_aura(&created, 100, false);
+        assert_eq!(
+            without_temp,
+            BTreeSet::from(["usr{alice,corp,active}".to_string()])
+        );
+
+        let with_temp = members_for_created_aura(&created, 100, true);
+        assert_eq!(
+            with_temp,
+            BTreeSet::from([
+                "usr{alice,corp,active}".to_string(),
+                "agt{opsbot,corp,live}".to_string(),
+            ])
+        );
+
+        created.temporary_agents.clear();
+        let no_temp = members_for_created_aura(&created, 100, true);
+        assert_eq!(
+            no_temp,
+            BTreeSet::from(["usr{alice,corp,active}".to_string()])
+        );
     }
 }
