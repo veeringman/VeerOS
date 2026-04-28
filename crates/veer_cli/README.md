@@ -58,3 +58,31 @@ then delegates transport to:
 ```bash
 veer-connect shell <host> <port>
 ```
+
+Legacy DNS/IP fallback can be driven by a route map:
+
+`$XDG_CONFIG_HOME/veeros/legacy-routes.toml` (fallback: `$HOME/.config/veeros/legacy-routes.toml`)
+
+```toml
+[services."svc{render,company,live}"]
+dns = ["render.internal.example", "render.backup.example"]
+ips = ["10.10.10.21", "10.10.10.22"]
+port = 2232
+```
+
+With this file present, you can omit `--host` and/or `--port`:
+
+```bash
+veer connect svc{render,company,live} --aura aur{design,private,open}
+```
+
+### Legacy socket bridge
+
+Classic TCP bridge for legacy clients:
+
+```bash
+veer gateway bridge --listen 127.0.0.1:19000 --target-host 10.10.10.21 --target-port 2232
+```
+
+This keeps older IP/socket-based clients working while moving service identity
+to VAS-based `veer connect` flows.

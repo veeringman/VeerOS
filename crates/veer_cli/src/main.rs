@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -24,6 +27,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: FoldCmd,
     },
+    Gateway {
+        #[command(subcommand)]
+        cmd: GatewayCmd,
+    },
     Connect(ConnectArgs),
 }
 
@@ -38,6 +45,12 @@ enum AuraCmd {
 #[derive(Subcommand, Debug)]
 enum FoldCmd {
     Launch(FoldLaunchArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum GatewayCmd {
+    /// Classic TCP socket bridge (local listen -> remote target).
+    Bridge(BridgeArgs),
 }
 
 #[derive(Args, Debug)]
@@ -76,11 +89,31 @@ struct FoldLaunchArgs {
 struct ConnectArgs {
     service: String,
     #[arg(long)]
-    host: String,
+    host: Option<String>,
     #[arg(long)]
-    port: u16,
+    port: Option<u16>,
+    /// Optional path to legacy route map TOML.
+    ///
+    /// If omitted, defaults to
+    /// `$XDG_CONFIG_HOME/veeros/legacy-routes.toml` (or
+    /// `$HOME/.config/veeros/legacy-routes.toml`).
+    #[arg(long)]
+    legacy_map: Option<PathBuf>,
     #[arg(long = "aura")]
     auras: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct BridgeArgs {
+    /// Local TCP listener bind address, e.g. 127.0.0.1:19000
+    #[arg(long)]
+    listen: String,
+    /// Remote target host (DNS or IP)
+    #[arg(long)]
+    target_host: String,
+    /// Remote target port
+    #[arg(long)]
+    target_port: u16,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -95,13 +128,88 @@ struct CreatedAura {
     shared_with: BTreeSet<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LegacyRouteMap {
+    #[serde(default)]
+    services: BTreeMap<String, LegacyRoute>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct LegacyRoute {
+    #[serde(default)]
+    dns: Vec<String>,
+    #[serde(default)]
+    ips: Vec<String>,
+    port: u16,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Aura { cmd } => cmd_aura(cmd),
         Cmd::Fold { cmd } => cmd_fold(cmd),
+        Cmd::Gateway { cmd } => cmd_gateway(cmd),
         Cmd::Connect(args) => cmd_connect(args),
     }
+}
+
+fn cmd_gateway(cmd: GatewayCmd) -> Result<()> {
+    match cmd {
+        GatewayCmd::Bridge(args) => cmd_gateway_bridge(args),
+    }
+}
+
+fn cmd_gateway_bridge(args: BridgeArgs) -> Result<()> {
+    let target = format!("{}:{}", args.target_host, args.target_port);
+    let listener = TcpListener::bind(&args.listen)
+        .with_context(|| format!("binding local bridge listener {}", args.listen))?;
+
+    println!("legacy socket bridge active");
+    println!("  listen: {}", args.listen);
+    println!("  target: {}", target);
+
+    for inbound in listener.incoming() {
+        let target = target.clone();
+        match inbound {
+            Ok(client) => {
+                thread::spawn(move || {
+                    if let Err(e) = handle_bridge_client(client, &target) {
+                        eprintln!("bridge client error: {e:#}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("bridge accept error: {e}"),
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_bridge_client(client: TcpStream, target: &str) -> Result<()> {
+    let server = TcpStream::connect(target)
+        .with_context(|| format!("connecting bridge target {target}"))?;
+
+    let mut c_r = client
+        .try_clone()
+        .context("cloning client stream for upstream")?;
+    let mut c_w = client;
+    let mut s_r = server
+        .try_clone()
+        .context("cloning server stream for downstream")?;
+    let mut s_w = server;
+
+    let up = thread::spawn(move || {
+        let _ = io::copy(&mut c_r, &mut s_w);
+        let _ = s_w.shutdown(Shutdown::Write);
+    });
+    let down = thread::spawn(move || {
+        let _ = io::copy(&mut s_r, &mut c_w);
+        let _ = c_w.shutdown(Shutdown::Write);
+    });
+
+    let _ = up.join();
+    let _ = down.join();
+    Ok(())
 }
 
 fn cmd_aura(cmd: AuraCmd) -> Result<()> {
@@ -202,22 +310,109 @@ fn cmd_connect(args: ConnectArgs) -> Result<()> {
         .map(|a| canonical_typed(a, AddressType::Aura, "aura"))
         .collect::<Result<Vec<_>>>()?;
 
+    let legacy_route = load_legacy_route(args.legacy_map.as_deref(), &service)?;
+    let port = args
+        .port
+        .or_else(|| legacy_route.as_ref().map(|r| r.port))
+        .with_context(|| "no port provided; pass --port or define route port in legacy map")?;
+    let candidate_hosts = build_candidate_hosts(args.host.as_deref(), legacy_route.as_ref());
+    if candidate_hosts.is_empty() {
+        bail!(
+            "no target host candidates; pass --host or define dns/ips in legacy route map for {}",
+            service
+        );
+    }
+    let (target_host, resolved) = pick_target_host_with_fallback(&candidate_hosts, port)?;
+
     println!("service: {}", service);
     if !caller_auras.is_empty() {
         println!("caller auras: {}", caller_auras.join(","));
     }
-    println!("transport target: {}:{}", args.host, args.port);
+    println!("transport target: {}:{}", target_host, port);
+    println!("legacy resolution: {}", if resolved { "resolved" } else { "unresolved-used-first-candidate" });
 
     let mut cmd = Command::new("veer-connect");
-    cmd.arg("shell").arg(&args.host).arg(args.port.to_string());
+    cmd.arg("shell").arg(&target_host).arg(port.to_string());
     cmd.env("VEER_SERVICE", &service);
     cmd.env("VEER_CALLER_AURAS", caller_auras.join(","));
+    cmd.env("VEER_LEGACY_TARGET", format!("{}:{}", target_host, port));
 
     let status = cmd.status().context("launching veer-connect; ensure veer-connect is on PATH")?;
     if !status.success() {
         bail!("veer-connect shell failed with status: {}", status);
     }
     Ok(())
+}
+
+fn load_legacy_route(path: Option<&Path>, service: &str) -> Result<Option<LegacyRoute>> {
+    let map_path = path
+        .map(ToOwned::to_owned)
+        .unwrap_or(legacy_map_default_path()?);
+    if !map_path.exists() {
+        return Ok(None);
+    }
+
+    let text = std::fs::read_to_string(&map_path)
+        .with_context(|| format!("reading {}", map_path.display()))?;
+    let mut map: LegacyRouteMap = toml::from_str(&text)
+        .with_context(|| format!("parsing {}", map_path.display()))?;
+
+    let mut canonicalized = BTreeMap::new();
+    for (k, v) in map.services {
+        let key = canonical_typed(&k, AddressType::Service, "service")?;
+        canonicalized.insert(key, v);
+    }
+    map.services = canonicalized;
+
+    Ok(map.services.remove(service))
+}
+
+fn build_candidate_hosts(explicit_host: Option<&str>, route: Option<&LegacyRoute>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if let Some(h) = explicit_host {
+        let h = h.trim().to_string();
+        if !h.is_empty() && seen.insert(h.clone()) {
+            out.push(h);
+        }
+    }
+    if let Some(route) = route {
+        for h in route.dns.iter().chain(route.ips.iter()) {
+            let h = h.trim().to_string();
+            if !h.is_empty() && seen.insert(h.clone()) {
+                out.push(h);
+            }
+        }
+    }
+
+    out
+}
+
+fn pick_target_host_with_fallback(candidates: &[String], port: u16) -> Result<(String, bool)> {
+    for host in candidates {
+        if host.parse::<IpAddr>().is_ok() {
+            return Ok((host.clone(), true));
+        }
+        if host_resolves(host, port) {
+            return Ok((host.clone(), true));
+        }
+    }
+
+    // Last-resort fallback: keep legacy behavior and hand the first candidate
+    // to the transport command, which may still be able to connect.
+    let first = candidates
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no host candidates available"))?;
+    Ok((first, false))
+}
+
+fn host_resolves(host: &str, port: u16) -> bool {
+    (host, port)
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.next().is_some())
+        .unwrap_or(false)
 }
 
 fn canonical_typed(input: &str, expected: AddressType, what: &str) -> Result<String> {
@@ -304,6 +499,16 @@ fn state_path() -> Result<PathBuf> {
     Ok(base.join("veeros").join("aura-state.json"))
 }
 
+fn legacy_map_default_path() -> Result<PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else {
+        let home = std::env::var("HOME").context("HOME is not set")?;
+        Path::new(&home).join(".config")
+    };
+    Ok(base.join("veeros").join("legacy-routes.toml"))
+}
+
 fn load_state() -> Result<AuraState> {
     let path = state_path()?;
     if !path.exists() {
@@ -370,5 +575,35 @@ auras = ["aur{team,private,open}", " AUR{Team,Private,Open } "]
 
         let merged = merged_manifest_auras(&doc, &["aur{ops,private,open}".to_string()]).unwrap();
         assert_eq!(merged, vec!["aur{team,private,open}".to_string(), "aur{ops,private,open}".to_string()]);
+    }
+
+    #[test]
+    fn candidate_hosts_prefers_explicit_then_dns_then_ips_deduped() {
+        let route = LegacyRoute {
+            dns: vec!["svc.example.local".into(), "svc.example.local".into()],
+            ips: vec!["10.1.1.9".into(), "10.1.1.9".into()],
+            port: 2232,
+        };
+
+        let out = build_candidate_hosts(Some("manual.example"), Some(&route));
+        assert_eq!(
+            out,
+            vec![
+                "manual.example".to_string(),
+                "svc.example.local".to_string(),
+                "10.1.1.9".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_prefers_literal_ip_candidate() {
+        let (host, resolved) = pick_target_host_with_fallback(
+            &["unresolvable.invalid".to_string(), "127.0.0.1".to_string()],
+            2232,
+        )
+        .unwrap();
+        assert_eq!(host, "127.0.0.1");
+        assert!(resolved);
     }
 }
