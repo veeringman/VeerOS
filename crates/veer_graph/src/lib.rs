@@ -131,6 +131,8 @@ pub enum GraphError {
     VertexKindMismatch,
     MissingVertex,
     InvalidWeight,
+    InvalidAddressType,
+    QuotaNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,6 +216,152 @@ pub struct PlacementDecision {
     pub previous_score: Option<f32>,
     pub switched: bool,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuraResourceQuota {
+    pub aura: String,
+    pub gpu_slices: u32,
+    pub storage_mb: u64,
+    pub bandwidth_mbps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceRequest {
+    pub aura: String,
+    pub fold: String,
+    pub gpu_slices: u32,
+    pub storage_mb: u64,
+    pub bandwidth_mbps: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceUsage {
+    pub gpu_slices: u32,
+    pub storage_mb: u64,
+    pub bandwidth_mbps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceAllocationDecision {
+    pub aura: String,
+    pub fold: String,
+    pub granted: bool,
+    pub reason: String,
+    pub usage: ResourceUsage,
+    pub remaining: ResourceUsage,
+}
+
+#[derive(Debug, Default)]
+pub struct AuraResourceScheduler {
+    quotas: HashMap<String, AuraResourceQuota>,
+    usage: HashMap<String, ResourceUsage>,
+    allocations: HashMap<String, ResourceUsage>,
+}
+
+impl AuraResourceScheduler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_quota(&mut self, quota: AuraResourceQuota) -> Result<(), GraphError> {
+        let aura = canonical_typed_addr(&quota.aura, AddressType::Aura)?;
+        self.quotas.insert(
+            aura.clone(),
+            AuraResourceQuota {
+                aura,
+                gpu_slices: quota.gpu_slices,
+                storage_mb: quota.storage_mb,
+                bandwidth_mbps: quota.bandwidth_mbps,
+            },
+        );
+        self.usage.entry(canonical_typed_addr(&quota.aura, AddressType::Aura)?).or_default();
+        Ok(())
+    }
+
+    pub fn usage_for_aura(&self, aura_raw: &str) -> Result<ResourceUsage, GraphError> {
+        let aura = canonical_typed_addr(aura_raw, AddressType::Aura)?;
+        Ok(self.usage.get(&aura).cloned().unwrap_or_default())
+    }
+
+    pub fn allocate(&mut self, request: ResourceRequest) -> Result<ResourceAllocationDecision, GraphError> {
+        let aura = canonical_typed_addr(&request.aura, AddressType::Aura)?;
+        let fold = canonical_typed_addr(&request.fold, AddressType::Fold)?;
+
+        let Some(quota) = self.quotas.get(&aura).cloned() else {
+            return Err(GraphError::QuotaNotFound);
+        };
+
+        let key = allocation_key(&aura, &fold);
+        let previous = self.allocations.get(&key).cloned().unwrap_or_default();
+
+        let used_before = self.usage.get(&aura).cloned().unwrap_or_default();
+        let used_after = ResourceUsage {
+            gpu_slices: used_before
+                .gpu_slices
+                .saturating_sub(previous.gpu_slices)
+                .saturating_add(request.gpu_slices),
+            storage_mb: used_before
+                .storage_mb
+                .saturating_sub(previous.storage_mb)
+                .saturating_add(request.storage_mb),
+            bandwidth_mbps: used_before
+                .bandwidth_mbps
+                .saturating_sub(previous.bandwidth_mbps)
+                .saturating_add(request.bandwidth_mbps),
+        };
+
+        let within_quota = used_after.gpu_slices <= quota.gpu_slices
+            && used_after.storage_mb <= quota.storage_mb
+            && used_after.bandwidth_mbps <= quota.bandwidth_mbps;
+
+        if within_quota {
+            self.allocations.insert(
+                key,
+                ResourceUsage {
+                    gpu_slices: request.gpu_slices,
+                    storage_mb: request.storage_mb,
+                    bandwidth_mbps: request.bandwidth_mbps,
+                },
+            );
+            self.usage.insert(aura.clone(), used_after.clone());
+
+            Ok(ResourceAllocationDecision {
+                aura,
+                fold,
+                granted: true,
+                reason: "allocated".to_string(),
+                usage: used_after.clone(),
+                remaining: remaining_for(&quota, &used_after),
+            })
+        } else {
+            Ok(ResourceAllocationDecision {
+                aura,
+                fold,
+                granted: false,
+                reason: "quota_exceeded".to_string(),
+                usage: used_before.clone(),
+                remaining: remaining_for(&quota, &used_before),
+            })
+        }
+    }
+
+    pub fn release(&mut self, aura_raw: &str, fold_raw: &str) -> Result<bool, GraphError> {
+        let aura = canonical_typed_addr(aura_raw, AddressType::Aura)?;
+        let fold = canonical_typed_addr(fold_raw, AddressType::Fold)?;
+        let key = allocation_key(&aura, &fold);
+
+        let Some(existing) = self.allocations.remove(&key) else {
+            return Ok(false);
+        };
+
+        let mut used = self.usage.get(&aura).cloned().unwrap_or_default();
+        used.gpu_slices = used.gpu_slices.saturating_sub(existing.gpu_slices);
+        used.storage_mb = used.storage_mb.saturating_sub(existing.storage_mb);
+        used.bandwidth_mbps = used.bandwidth_mbps.saturating_sub(existing.bandwidth_mbps);
+        self.usage.insert(aura, used);
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -789,6 +937,27 @@ fn validate_weights(weights: EdgeWeights) -> Result<(), GraphError> {
         return Err(GraphError::InvalidWeight);
     }
     Ok(())
+}
+
+fn canonical_typed_addr(input: &str, expected: AddressType) -> Result<String, GraphError> {
+    let canonical = canonicalize(input).map_err(|_| GraphError::InvalidVertexId)?;
+    let addr = VasAddress::parse(&canonical).map_err(|_| GraphError::InvalidVertexId)?;
+    if addr.kind != expected {
+        return Err(GraphError::InvalidAddressType);
+    }
+    Ok(canonical)
+}
+
+fn allocation_key(aura: &str, fold: &str) -> String {
+    format!("{}|{}", aura, fold)
+}
+
+fn remaining_for(quota: &AuraResourceQuota, usage: &ResourceUsage) -> ResourceUsage {
+    ResourceUsage {
+        gpu_slices: quota.gpu_slices.saturating_sub(usage.gpu_slices),
+        storage_mb: quota.storage_mb.saturating_sub(usage.storage_mb),
+        bandwidth_mbps: quota.bandwidth_mbps.saturating_sub(usage.bandwidth_mbps),
+    }
 }
 
 fn clause_allows(clause: &PolicyClause, target_vertex: &Vertex, edge: &Edge) -> bool {
@@ -1501,5 +1670,102 @@ mod tests {
         assert_eq!(decision.selected_target.as_deref(), Some("nod{edge-b,zone-1,ready}"));
         assert!(decision.switched);
         assert_eq!(decision.reason, "switch_better_than_hysteresis");
+    }
+
+    #[test]
+    fn aura_resource_scheduler_allocates_within_quota() {
+        let mut s = AuraResourceScheduler::new();
+        s.set_quota(AuraResourceQuota {
+            aura: "aur{ops,private,open}".to_string(),
+            gpu_slices: 8,
+            storage_mb: 2048,
+            bandwidth_mbps: 1000,
+        })
+        .unwrap();
+
+        let d = s
+            .allocate(ResourceRequest {
+                aura: "aur{ops,private,open}".to_string(),
+                fold: "fld{worker-a,gpu,warm}".to_string(),
+                gpu_slices: 4,
+                storage_mb: 512,
+                bandwidth_mbps: 200,
+            })
+            .unwrap();
+
+        assert!(d.granted);
+        assert_eq!(d.remaining.gpu_slices, 4);
+        assert_eq!(d.remaining.storage_mb, 1536);
+        assert_eq!(d.remaining.bandwidth_mbps, 800);
+    }
+
+    #[test]
+    fn aura_resource_scheduler_rejects_over_quota_request() {
+        let mut s = AuraResourceScheduler::new();
+        s.set_quota(AuraResourceQuota {
+            aura: "aur{ops,private,open}".to_string(),
+            gpu_slices: 2,
+            storage_mb: 256,
+            bandwidth_mbps: 100,
+        })
+        .unwrap();
+
+        let d = s
+            .allocate(ResourceRequest {
+                aura: "aur{ops,private,open}".to_string(),
+                fold: "fld{worker-a,gpu,warm}".to_string(),
+                gpu_slices: 3,
+                storage_mb: 300,
+                bandwidth_mbps: 101,
+            })
+            .unwrap();
+
+        assert!(!d.granted);
+        assert_eq!(d.reason, "quota_exceeded");
+    }
+
+    #[test]
+    fn aura_resource_scheduler_reallocation_and_release_update_usage() {
+        let mut s = AuraResourceScheduler::new();
+        s.set_quota(AuraResourceQuota {
+            aura: "aur{ops,private,open}".to_string(),
+            gpu_slices: 8,
+            storage_mb: 2048,
+            bandwidth_mbps: 1000,
+        })
+        .unwrap();
+
+        s.allocate(ResourceRequest {
+            aura: "aur{ops,private,open}".to_string(),
+            fold: "fld{worker-a,gpu,warm}".to_string(),
+            gpu_slices: 4,
+            storage_mb: 400,
+            bandwidth_mbps: 100,
+        })
+        .unwrap();
+
+        let d = s
+            .allocate(ResourceRequest {
+                aura: "aur{ops,private,open}".to_string(),
+                fold: "fld{worker-a,gpu,warm}".to_string(),
+                gpu_slices: 2,
+                storage_mb: 200,
+                bandwidth_mbps: 50,
+            })
+            .unwrap();
+        assert!(d.granted);
+
+        let usage = s.usage_for_aura("aur{ops,private,open}").unwrap();
+        assert_eq!(usage.gpu_slices, 2);
+        assert_eq!(usage.storage_mb, 200);
+        assert_eq!(usage.bandwidth_mbps, 50);
+
+        let released = s
+            .release("aur{ops,private,open}", "fld{worker-a,gpu,warm}")
+            .unwrap();
+        assert!(released);
+
+        let usage_after = s.usage_for_aura("aur{ops,private,open}").unwrap();
+        assert_eq!(usage_after, ResourceUsage::default());
     }
 }

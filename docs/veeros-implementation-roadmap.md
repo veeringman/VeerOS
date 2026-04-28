@@ -49,7 +49,7 @@ The canonical long-horizon phase ledger remains in `TODO.md` (Phase 1..26).
 ## Phase 4: Full Orchestration & Mobility
 - [x] Fold migration and replication (across devices/zones)
 - [x] Graph-based workload placement and live optimization
-- [ ] Aura-aware resource scheduling (GPU, storage, bandwidth)
+- [x] Aura-aware resource scheduling (GPU, storage, bandwidth)
 - [ ] Cross-zone, cross-Aura flows and data movement
 - [ ] Policy-driven, explainable automation
 - [ ] Visual workflow composition and audit trails
