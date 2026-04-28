@@ -940,6 +940,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "veer_graph"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "vas",
+]
+
+[[package]]
 name = "veer_resolve"
 version = "0.1.0"
 dependencies = [

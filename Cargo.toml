@@ -32,6 +32,7 @@ members = [
     "crates/veer_vm",
     "crates/vas",
     "crates/veer_resolve",
+    "crates/veer_graph",
     "crates/veer_aura",
     "crates/veer_governor",
     "crates/veer_cli",
