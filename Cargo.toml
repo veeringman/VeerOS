@@ -33,6 +33,7 @@ members = [
     "crates/vas",
     "crates/veer_resolve",
     "crates/veer_aura",
+    "crates/veer_governor",
     # ── Demo / test ──────────────────────────────────────
     "crates/veeros-demo",
 ]
