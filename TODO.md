@@ -26,7 +26,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 ## VeerOS Aura / Graph Fabric / VAS — Implementation Track (NEW)
 - [ ] **Phase A — Foundation (Control Plane)**
   - [ ] Freeze and publish VAS v1 grammar (`type{atom,...}`) + reserved type prefixes (`usr`, `dev`, `fld`, `aur`, `svc`, `vlt`, `agt`, `zon`, `nod`, `evt`)
-  - [ ] VAS parser + canonical-form normalizer crate (`crates/vas`)
+  - [x] VAS parser + canonical-form normalizer crate (`crates/vas`)
   - [ ] Compact binary ID encoding (64/128-bit) + atom registry
   - [ ] `VeerResolve` MVP — local resolver with cache + Aura-scoped lookup
   - [ ] Aura object model (identity, members, parent/child links, governor ref)

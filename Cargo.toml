@@ -30,6 +30,7 @@ members = [
     "crates/veer-connect",
     "crates/fold_engine",
     "crates/veer_vm",
+    "crates/vas",
     # ── Demo / test ──────────────────────────────────────
     "crates/veeros-demo",
 ]
