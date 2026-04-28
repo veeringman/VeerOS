@@ -1267,6 +1267,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "veer_sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "vas",
+ "veer_aura",
+ "veer_resolve",
+]
+
+[[package]]
 name = "veer_vm"
 version = "0.1.0"
 dependencies = [

@@ -35,6 +35,7 @@ members = [
     "crates/veer_graph",
     "crates/veer_aura",
     "crates/veer_governor",
+    "crates/veer_sdk",
     "crates/veer_fabric_transport",
     "crates/veer_cli",
     # ── Demo / test ──────────────────────────────────────
