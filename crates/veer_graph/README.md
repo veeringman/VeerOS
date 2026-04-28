@@ -61,3 +61,22 @@ Objective function:
 
 This lets callers pick the best destination vertex for service/Fold selection
 using live graph + telemetry weights.
+
+## Algebraic Policy Constraints
+
+Policy can be applied as hard constraints before scoring via
+`solve_best_target_with_policy` and `PolicySet`.
+
+Supported clause types:
+
+- target kind requirements
+- target vertex attribute equality
+- edge attribute equality
+- minimum trust
+- maximum latency
+- maximum load
+
+Policy composition modes:
+
+- `all`: all clauses must pass
+- `any`: at least one clause must pass

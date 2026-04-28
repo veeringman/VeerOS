@@ -189,6 +189,59 @@ pub struct SolverChoice {
     pub weights: EdgeWeights,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyClause {
+    RequireTargetKind(VertexKind),
+    RequireVertexAttrEq { key: String, value: String },
+    RequireEdgeAttrEq { key: String, value: String },
+    MinTrust(f32),
+    MaxLatency(f32),
+    MaxLoad(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyMode {
+    All,
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicySet {
+    pub mode: PolicyMode,
+    #[serde(default)]
+    pub clauses: Vec<PolicyClause>,
+}
+
+impl Default for PolicySet {
+    fn default() -> Self {
+        Self {
+            mode: PolicyMode::All,
+            clauses: Vec::new(),
+        }
+    }
+}
+
+impl PolicySet {
+    pub fn allows(&self, target_vertex: &Vertex, edge: &Edge) -> bool {
+        if self.clauses.is_empty() {
+            return true;
+        }
+
+        match self.mode {
+            PolicyMode::All => self
+                .clauses
+                .iter()
+                .all(|c| clause_allows(c, target_vertex, edge)),
+            PolicyMode::Any => self
+                .clauses
+                .iter()
+                .any(|c| clause_allows(c, target_vertex, edge)),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct GraphCore {
     vertices: HashMap<String, Vertex>,
@@ -391,6 +444,68 @@ impl GraphCore {
         Ok(best)
     }
 
+    /// Policy-aware solver path. Policy clauses are evaluated as hard
+    /// constraints before objective scoring.
+    pub fn solve_best_target_with_policy(
+        &self,
+        source_raw: &str,
+        edge_kind: EdgeKind,
+        target_kind: Option<VertexKind>,
+        coefficients: SolverWeights,
+        policy: &PolicySet,
+    ) -> Result<Option<SolverChoice>, GraphError> {
+        let source = canonicalize(source_raw).map_err(|_| GraphError::InvalidVertexId)?;
+        if !self.vertices.contains_key(&source) {
+            return Err(GraphError::MissingVertex);
+        }
+
+        let mut best: Option<SolverChoice> = None;
+
+        for edge in self.edges.values() {
+            if edge.from != source || edge.kind != edge_kind {
+                continue;
+            }
+
+            let Some(v) = self.vertices.get(&edge.to) else {
+                continue;
+            };
+            if let Some(expected_kind) = target_kind {
+                if v.kind != expected_kind {
+                    continue;
+                }
+            }
+            if !policy.allows(v, edge) {
+                continue;
+            }
+
+            let score = coefficients.alpha_latency * edge.weights.latency
+                + coefficients.beta_cost * (edge.weights.cost + edge.weights.load)
+                - coefficients.gamma_trust * edge.weights.trust
+                - coefficients.delta_affinity * edge.weights.affinity;
+
+            let candidate = SolverChoice {
+                target: edge.to.clone(),
+                edge_kind,
+                score,
+                weights: edge.weights,
+            };
+
+            match &best {
+                None => best = Some(candidate),
+                Some(cur) => {
+                    if candidate.score < cur.score
+                        || ((candidate.score - cur.score).abs() <= f32::EPSILON
+                            && candidate.target < cur.target)
+                    {
+                        best = Some(candidate);
+                    }
+                }
+            }
+        }
+
+        Ok(best)
+    }
+
     pub fn telemetry_stats(&self) -> TelemetryStats {
         self.telemetry_stats
     }
@@ -507,6 +622,21 @@ fn validate_weights(weights: EdgeWeights) -> Result<(), GraphError> {
         return Err(GraphError::InvalidWeight);
     }
     Ok(())
+}
+
+fn clause_allows(clause: &PolicyClause, target_vertex: &Vertex, edge: &Edge) -> bool {
+    match clause {
+        PolicyClause::RequireTargetKind(kind) => target_vertex.kind == *kind,
+        PolicyClause::RequireVertexAttrEq { key, value } => {
+            target_vertex.attrs.get(key).map(|v| v == value).unwrap_or(false)
+        }
+        PolicyClause::RequireEdgeAttrEq { key, value } => {
+            edge.attrs.get(key).map(|v| v == value).unwrap_or(false)
+        }
+        PolicyClause::MinTrust(v) => edge.weights.trust >= *v,
+        PolicyClause::MaxLatency(v) => edge.weights.latency <= *v,
+        PolicyClause::MaxLoad(v) => edge.weights.load <= *v,
+    }
 }
 
 #[cfg(test)]
@@ -890,6 +1020,155 @@ mod tests {
                 EdgeKind::Reachability,
                 Some(VertexKind::Node),
                 SolverWeights::default(),
+            )
+            .unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn policy_all_mode_filters_candidates_before_scoring() {
+        let mut g = GraphCore::new();
+        let mut zone1 = BTreeMap::new();
+        zone1.insert("zone".into(), "z1".into());
+        let mut zone2 = BTreeMap::new();
+        zone2.insert("zone".into(), "z2".into());
+
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, zone1)
+            .unwrap();
+        g.upsert_vertex("nod{edge-b,zone-2,ready}", None, zone2)
+            .unwrap();
+
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 10.0,
+                trust: 0.9,
+                cost: 0.3,
+                affinity: 0.4,
+                load: 0.2,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-b,zone-2,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 3.0,
+                trust: 0.2,
+                cost: 0.1,
+                affinity: 0.1,
+                load: 0.1,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let policy = PolicySet {
+            mode: PolicyMode::All,
+            clauses: vec![
+                PolicyClause::RequireTargetKind(VertexKind::Node),
+                PolicyClause::RequireVertexAttrEq {
+                    key: "zone".into(),
+                    value: "z1".into(),
+                },
+                PolicyClause::MinTrust(0.5),
+            ],
+        };
+
+        let choice = g
+            .solve_best_target_with_policy(
+                "svc{render,company,live}",
+                EdgeKind::Reachability,
+                Some(VertexKind::Node),
+                SolverWeights::default(),
+                &policy,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(choice.target, "nod{edge-a,zone-1,ready}");
+    }
+
+    #[test]
+    fn policy_any_mode_accepts_if_any_clause_matches() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights {
+                latency: 12.0,
+                trust: 0.4,
+                cost: 0.2,
+                affinity: 0.3,
+                load: 0.2,
+            },
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let policy = PolicySet {
+            mode: PolicyMode::Any,
+            clauses: vec![
+                PolicyClause::MaxLatency(5.0),
+                PolicyClause::MinTrust(0.3),
+            ],
+        };
+
+        let choice = g
+            .solve_best_target_with_policy(
+                "svc{render,company,live}",
+                EdgeKind::Reachability,
+                Some(VertexKind::Node),
+                SolverWeights::default(),
+                &policy,
+            )
+            .unwrap();
+        assert!(choice.is_some());
+    }
+
+    #[test]
+    fn policy_can_reject_all_candidates() {
+        let mut g = GraphCore::new();
+        g.upsert_vertex("svc{render,company,live}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_vertex("nod{edge-a,zone-1,ready}", None, BTreeMap::new())
+            .unwrap();
+        g.upsert_edge(
+            "svc{render,company,live}",
+            "nod{edge-a,zone-1,ready}",
+            EdgeKind::Reachability,
+            EdgeWeights::default(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let policy = PolicySet {
+            mode: PolicyMode::All,
+            clauses: vec![PolicyClause::RequireVertexAttrEq {
+                key: "nonexistent".into(),
+                value: "x".into(),
+            }],
+        };
+
+        let out = g
+            .solve_best_target_with_policy(
+                "svc{render,company,live}",
+                EdgeKind::Reachability,
+                Some(VertexKind::Node),
+                SolverWeights::default(),
+                &policy,
             )
             .unwrap();
         assert!(out.is_none());
