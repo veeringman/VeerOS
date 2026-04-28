@@ -1,13 +1,22 @@
+
 # VeerOS Fold
 
 Cross-platform secure compute envelope for VeerOS.
 
-A **Fold** is a lightweight, secure, rapidly-deployable runtime unit — not a
-container, not a VM. This crate is the *host-side* engine and CLI (`fold`)
-used to spawn and manage folds on developer workstations and VeerOS fabric
-nodes.
+A **Fold** is a lightweight, secure, rapidly-deployable runtime unit — not a container, not a VM. This crate is the *host-side* engine and CLI (`fold`) used to spawn and manage folds on Linux, macOS, and (planned) Windows hosts, as well as on VeerOS fabric nodes.
 
-## Status
+**Supported host platforms:**
+- **Linux**: Full-featured (namespaces, cgroups, seccomp, rootless, VM integration)
+- **macOS**: Stub (planned, basic CLI only)
+- **Windows**: Stub (planned)
+
+**Supported guest types:**
+- Native processes (Linux)
+- VeerOS VMs (via `veer-vm`, supports x86_64 and riscv32 guests)
+
+**Backend selection is automatic based on host OS and manifest.**
+
+## Status — Multi-platform, multi-arch
 
 Phase 8B+. Linux backend now supports:
 - PID / mount / UTS / IPC / net namespaces (required), user namespace (optional, rootless)
@@ -15,8 +24,24 @@ Phase 8B+. Linux backend now supports:
 - cgroups v2 resource limits (`cpu.max`, `memory.max`, `memory.swap.max`, `pids.max`)
 - seccomp BPF syscall filter with a curated default denylist + per-fold extensions
 - structured launcher→parent error reporting pipe
+- VeerOS VM launch (x86_64, riscv32 via QEMU TCG fallback)
 
-macOS and Windows backends are stubs.
+**macOS and Windows backends are stubs.**
+
+## Platform backend status
+
+| Host OS   | Backend         | Guest type         | Status         |
+|-----------|-----------------|--------------------|----------------|
+| Linux     | namespaces/cg   | native process     | Stable         |
+| Linux     | veer-vm (KVM)   | x86_64 VM          | Stable         |
+| Linux     | veer-vm (KVM)   | riscv32 VM         | Stable         |
+| Linux     | veer-vm (QEMU)  | riscv32 VM         | Stable         |
+| macOS     | stub            | (planned)          | Not implemented|
+| Windows   | stub            | (planned)          | Not implemented|
+
+**Note:** For riscv32 VMs on non-riscv64 hosts, QEMU TCG is required (`qemu-system-riscv32`).
+
+## Quick start
 
 ## Quick start
 

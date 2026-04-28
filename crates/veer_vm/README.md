@@ -1,5 +1,92 @@
 # veer-vm — VeerOS microVMM
 
+A lightweight, cross-platform microVMM for VeerOS kernels. `veer-vm` aims to be a Firecracker-class VMM, providing a fast, minimal alternative to QEMU for development and deployment.
+
+**Supported host platforms:**
+- **Linux**: Native KVM backend (production-ready)
+- **macOS**: Hypervisor.framework (HVF) backend (experimental, x86_64 only)
+- **Windows**: Planned (stub only)
+
+**Supported guest architectures:**
+- x86_64 (native)
+- riscv32 (ESP32-C6, via QEMU TCG fallback on non-riscv64 hosts)
+- aarch64 (planned)
+
+**Backend selection is automatic based on host OS and guest arch.**
+
+## Status — Multi-platform, multi-arch
+
+`veer-vm` can:
+- Boot VeerOS kernels as Multiboot v1 ELF or from VeerOS ISO images
+- Run on Linux (KVM), macOS (HVF), and (stub) Windows
+- Support x86_64 and riscv32 guests (QEMU TCG fallback for RISC-V on x86_64/aarch64 hosts)
+- Emulate 16550A UART (guest serial → host stdout, host stdin → guest)
+- Clean shutdown (Ctrl-A x, signals)
+- Snapshot/restore (RAM, vCPU, IRQ/PIT, UART state)
+
+**Note:** For riscv32 guests on non-riscv64 hosts, QEMU TCG is required (`qemu-system-riscv32`).
+
+## Example: Booting VeerOS on different platforms
+
+### Linux (KVM, x86_64 guest)
+```bash
+cargo build -p veer_vm
+./target/debug/veer-vm \
+    --kernel ./target/x86_64-unknown-none/debug/kernel-qemu-pc \
+    --memory 128
+```
+
+### macOS (HVF, x86_64 guest)
+```bash
+cargo build -p veer_vm
+./target/debug/veer-vm \
+    --kernel ./target/x86_64-unknown-none/debug/kernel-qemu-pc \
+    --memory 128
+```
+
+### RISC-V guest (ESP32-C6, QEMU TCG fallback)
+```bash
+./target/debug/veer-vm \
+  --arch riscv32 \
+  --kernel ./target/riscv32imc-unknown-none-elf/debug/kernel-qemu-esp32c6 \
+  --memory 128
+# On non-riscv64 hosts, requires qemu-system-riscv32 in PATH
+```
+
+### Boot from VeerOS ISO
+```bash
+./target/debug/veer-vm \
+  --kernel ./build/veeros.iso \
+  --memory 128
+```
+
+### Snapshot/restore
+```bash
+./target/debug/veer-vm \
+  --kernel ./build/veeros.iso \
+  --snapshot-save /tmp/veeros.snap
+./target/debug/veer-vm \
+  --restore /tmp/veeros.snap
+```
+
+## Platform backend status
+
+| Host OS   | Backend         | Guest arch    | Status         |
+|-----------|-----------------|--------------|----------------|
+| Linux     | KVM             | x86_64       | Stable         |
+| Linux     | KVM             | riscv32      | Stable         |
+| macOS     | HVF             | x86_64       | Experimental   |
+| macOS     | QEMU TCG        | riscv32      | Experimental   |
+| Windows   | (stub)          | (planned)    | Not implemented|
+
+## Fold integration
+
+`veer-vm` can be launched inside a VeerOS Fold for full namespace, cgroup, and seccomp isolation. See the [fold_engine README](../fold_engine/README.md) for details.
+
+---
+The rest of this README documents architecture, boot contract, and roadmap.
+# veer-vm — VeerOS microVMM
+
 A lightweight Firecracker-class KVM VMM, built as an alternative to QEMU
 for booting VeerOS kernels. Runs on Linux, requires `/dev/kvm` access.
 
@@ -24,6 +111,9 @@ As of this commit, `veer-vm` can:
 
 Verified boot of `crates/kernel/qemu_pc`:
 
+## Usage
+
+```bash
 ```
 [veer-vm] loaded kernel …/kernel-qemu-pc: entry=0x100010 end=0x408000 memory=128 MiB
 [veer-vm] raw mode engaged — press Ctrl-A x to quit
