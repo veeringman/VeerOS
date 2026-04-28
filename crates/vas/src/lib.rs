@@ -7,6 +7,7 @@
 //!   usr, dev, fld, aur, svc, vlt, agt, zon, nod, evt
 
 use core::fmt;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AddressType {
@@ -52,6 +53,87 @@ impl AddressType {
             "evt" => Ok(AddressType::Event),
             _ => Err(ParseError::UnknownType),
         }
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            AddressType::User => 1,
+            AddressType::Device => 2,
+            AddressType::Fold => 3,
+            AddressType::Aura => 4,
+            AddressType::Service => 5,
+            AddressType::Vault => 6,
+            AddressType::Agent => 7,
+            AddressType::Zone => 8,
+            AddressType::Node => 9,
+            AddressType::Event => 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AtomRegistry {
+    ids: HashMap<String, u32>,
+    atoms: Vec<String>,
+}
+
+impl AtomRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn intern(&mut self, atom: &str) -> u32 {
+        if let Some(id) = self.ids.get(atom) {
+            return *id;
+        }
+        let id = (self.atoms.len() as u32) + 1;
+        self.ids.insert(atom.to_string(), id);
+        self.atoms.push(atom.to_string());
+        id
+    }
+
+    pub fn id_of(&self, atom: &str) -> Option<u32> {
+        self.ids.get(atom).copied()
+    }
+
+    pub fn atom_of(&self, id: u32) -> Option<&str> {
+        if id == 0 {
+            return None;
+        }
+        self.atoms.get((id - 1) as usize).map(|s| s.as_str())
+    }
+
+    pub fn len(&self) -> usize {
+        self.atoms.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.atoms.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryAddress {
+    pub type_code: u8,
+    pub atom_ids: Vec<u32>,
+}
+
+impl BinaryAddress {
+    /// Stable byte format:
+    /// [type_code:1][atom_count:1][atom_id_1:4][atom_id_2:4]...
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + (self.atom_ids.len() * 4));
+        out.push(self.type_code);
+        out.push(self.atom_ids.len() as u8);
+        for id in &self.atom_ids {
+            out.extend_from_slice(&id.to_be_bytes());
+        }
+        out
+    }
+
+    /// Compact deterministic ID derived from encoded bytes.
+    pub fn compact_id(&self) -> u64 {
+        fnv1a64(&self.to_bytes())
     }
 }
 
@@ -151,6 +233,36 @@ pub fn canonicalize(input: &str) -> Result<String, ParseError> {
     VasAddress::parse(input).map(|a| a.canonical())
 }
 
+pub fn encode_with_registry(address: &VasAddress, registry: &mut AtomRegistry) -> BinaryAddress {
+    let atom_ids = address
+        .atoms
+        .iter()
+        .map(|atom| registry.intern(atom))
+        .collect::<Vec<_>>();
+
+    BinaryAddress {
+        type_code: address.kind.code(),
+        atom_ids,
+    }
+}
+
+pub fn parse_and_encode(input: &str, registry: &mut AtomRegistry) -> Result<BinaryAddress, ParseError> {
+    let addr = VasAddress::parse(input)?;
+    Ok(encode_with_registry(&addr, registry))
+}
+
+fn fnv1a64(data: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET_BASIS;
+    for b in data {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +309,37 @@ mod tests {
     fn helper_canonicalize() {
         let s = canonicalize("aur{Design,PRIVATE,open}").unwrap();
         assert_eq!(s, "aur{design,private,open}");
+    }
+
+    #[test]
+    fn registry_intern_is_stable() {
+        let mut reg = AtomRegistry::new();
+        let a1 = reg.intern("render");
+        let a2 = reg.intern("render");
+        let b = reg.intern("company");
+        assert_eq!(a1, a2);
+        assert_ne!(a1, b);
+        assert_eq!(reg.id_of("render"), Some(a1));
+        assert_eq!(reg.atom_of(b), Some("company"));
+    }
+
+    #[test]
+    fn encode_uses_registry_ids() {
+        let mut reg = AtomRegistry::new();
+        let addr = VasAddress::parse("svc{render,company,live}").unwrap();
+        let enc = encode_with_registry(&addr, &mut reg);
+        assert_eq!(enc.type_code, AddressType::Service.code());
+        assert_eq!(enc.atom_ids.len(), 3);
+        assert_eq!(reg.len(), 3);
+    }
+
+    #[test]
+    fn compact_id_is_deterministic() {
+        let mut r1 = AtomRegistry::new();
+        let mut r2 = AtomRegistry::new();
+        let e1 = parse_and_encode("svc{render,company,live}", &mut r1).unwrap();
+        let e2 = parse_and_encode("svc{render,company,live}", &mut r2).unwrap();
+        assert_eq!(e1.to_bytes(), e2.to_bytes());
+        assert_eq!(e1.compact_id(), e2.compact_id());
     }
 }

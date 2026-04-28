@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use vas::canonicalize;
+use vas::{canonicalize, parse_and_encode, AtomRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -58,6 +58,7 @@ pub struct Resolver {
     registry: HashMap<String, Vec<ServiceBinding>>,
     /// cache key = canonical address + sorted caller auras
     cache: HashMap<String, CacheEntry>,
+    atom_registry: AtomRegistry,
     stats: ResolveStats,
 }
 
@@ -122,7 +123,8 @@ impl Resolver {
 
         let resolved = ResolveResult {
             canonical_address: canonical.clone(),
-            object_id: object_id_for(&canonical),
+            object_id: object_id_for(&canonical, &mut self.atom_registry)
+                .expect("canonical address must be re-parseable"),
             selected,
         };
 
@@ -148,17 +150,11 @@ impl Resolver {
 
 /// Deterministic compact object ID for MVP.
 ///
-/// FNV-1a 64-bit over canonical address bytes.
-pub fn object_id_for(canonical_address: &str) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-
-    let mut hash = OFFSET_BASIS;
-    for b in canonical_address.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
+/// Encodes canonical VAS address into compact binary form (type code + atom
+/// IDs via registry), then derives a stable 64-bit compact ID from bytes.
+pub fn object_id_for(canonical_address: &str, registry: &mut AtomRegistry) -> Result<u64, ResolveError> {
+    let enc = parse_and_encode(canonical_address, registry).map_err(|_| ResolveError::InvalidAddress)?;
+    Ok(enc.compact_id())
 }
 
 #[cfg(test)]
@@ -253,8 +249,9 @@ mod tests {
 
     #[test]
     fn object_id_is_deterministic() {
-        let a = object_id_for("svc{render,company,live}");
-        let b = object_id_for("svc{render,company,live}");
+        let mut reg = AtomRegistry::new();
+        let a = object_id_for("svc{render,company,live}", &mut reg).unwrap();
+        let b = object_id_for("svc{render,company,live}", &mut reg).unwrap();
         assert_eq!(a, b);
     }
 }

@@ -27,7 +27,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
 - [ ] **Phase A — Foundation (Control Plane)**
   - [ ] Freeze and publish VAS v1 grammar (`type{atom,...}`) + reserved type prefixes (`usr`, `dev`, `fld`, `aur`, `svc`, `vlt`, `agt`, `zon`, `nod`, `evt`)
   - [x] VAS parser + canonical-form normalizer crate (`crates/vas`)
-  - [ ] Compact binary ID encoding (64/128-bit) + atom registry
+  - [x] Compact binary ID encoding (64/128-bit) + atom registry
   - [x] `VeerResolve` MVP — local resolver with cache + Aura-scoped lookup
   - [ ] Aura object model (identity, members, parent/child links, governor ref)
   - [ ] Fold ↔ Aura membership wiring in `fold_engine` (a Fold can declare `auras = [...]`)
