@@ -8,6 +8,7 @@
 name = "rootless"
 cmd  = "/bin/sh"
 args = ["-c", "id; hostname; echo 'uid 0 inside == outer uid outside'; ls /proc | head -5; sleep 2"]
+auras = ["aur{demo,dev,public}"]
 hostname = "fold-rootless"
 
 [namespaces]

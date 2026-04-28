@@ -5,8 +5,9 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use vas::{canonicalize, AddressType, VasAddress};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -19,6 +20,13 @@ pub struct Manifest {
     /// Arguments passed to `cmd` (argv[1..]).
     #[serde(default)]
     pub args: Vec<String>,
+
+    /// Aura memberships attached to this fold.
+    ///
+    /// Each entry must be a valid Aura VAS address (`aur{...}`).
+    /// Values are canonicalized on load.
+    #[serde(default)]
+    pub auras: Vec<String>,
 
     /// Environment variables. If empty, inherits a minimal set from host.
     #[serde(default)]
@@ -121,8 +129,34 @@ impl Manifest {
         let mut m: Manifest = toml::from_str(&text)
             .with_context(|| format!("parsing manifest {}", path.display()))?;
         m.resolve_relative_paths(path);
+        m.normalize_auras()?;
         m.validate()?;
         Ok(m)
+    }
+
+    fn normalize_auras(&mut self) -> Result<()> {
+        let mut out = Vec::with_capacity(self.auras.len());
+        let mut seen = BTreeSet::new();
+
+        for raw in &self.auras {
+            let canonical = canonicalize(raw)
+                .map_err(|e| anyhow::anyhow!("manifest: invalid aura address '{raw}': {e}"))?;
+            let addr = VasAddress::parse(&canonical)
+                .map_err(|e| anyhow::anyhow!("manifest: invalid aura address '{raw}': {e}"))?;
+            anyhow::ensure!(
+                addr.kind == AddressType::Aura,
+                "manifest: aura entry must use aur{{...}} type, got '{}': {}",
+                raw,
+                canonical
+            );
+
+            if seen.insert(canonical.clone()) {
+                out.push(canonical);
+            }
+        }
+
+        self.auras = out;
+        Ok(())
     }
 
     fn resolve_relative_paths(&mut self, manifest_path: &Path) {
@@ -151,5 +185,47 @@ impl Manifest {
         );
         anyhow::ensure!(!self.cmd.is_empty(), "manifest: cmd must not be empty");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_normalizes_and_dedups_auras() {
+        let mut m: Manifest = toml::from_str(
+            r#"
+name = "a"
+cmd = "/bin/true"
+auras = [" AUR{Design,PRIVATE,Open} ", "aur{design,private,open}", "aur{company,private,open}"]
+"#,
+        )
+        .unwrap();
+
+        m.normalize_auras().unwrap();
+        assert_eq!(
+            m.auras,
+            vec![
+                "aur{design,private,open}".to_string(),
+                "aur{company,private,open}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_non_aura_entry() {
+        let mut m: Manifest = toml::from_str(
+            r#"
+name = "a"
+cmd = "/bin/true"
+auras = ["svc{render,company,live}"]
+"#,
+        )
+        .unwrap();
+
+        let err = m.normalize_auras().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("aura entry must use aur"));
     }
 }

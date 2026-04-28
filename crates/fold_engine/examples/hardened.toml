@@ -6,6 +6,7 @@
 name = "hardened"
 cmd  = "/bin/sh"
 args = ["-c", "echo hi from hardened fold; id; hostname; sleep 2"]
+auras = ["aur{security,prod,private}"]
 hostname = "fold-hardened"
 
 [env]

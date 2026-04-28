@@ -30,7 +30,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - [x] Compact binary ID encoding (64/128-bit) + atom registry
   - [x] `VeerResolve` MVP — local resolver with cache + Aura-scoped lookup
   - [x] Aura object model (identity, members, parent/child links, governor ref)
-  - [ ] Fold ↔ Aura membership wiring in `fold_engine` (a Fold can declare `auras = [...]`)
+  - [x] Fold ↔ Aura membership wiring in `fold_engine` (a Fold can declare `auras = [...]`)
   - [ ] Minimal Aura Governor — static TOML policy, membership add/remove, audit log
   - [ ] CLI/SDK: `veer aura join/create/share/leave`, `veer fold launch --aura ...`, `veer connect svc{...}`
   - [ ] Legacy compatibility gateway (DNS / IP fallback, classic socket bridge)

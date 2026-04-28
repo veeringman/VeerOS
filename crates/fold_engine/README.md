@@ -104,6 +104,7 @@ the host `veer-vm` and `fold` binaries together.
 name = "hello"
 cmd  = "/bin/sh"
 args = ["-c", "echo hi from fold; sleep 3"]
+auras = ["aur{apps,dev,private}", "aur{observability,dev,private}"]
 hostname = "fold-hello"
 
 [env]
@@ -126,6 +127,10 @@ cpu_max    = "50000 100000"   # quota/period microseconds — 0.5 CPU
 memory_max = 268435456        # bytes
 pids_max   = 64
 ```
+
+`auras` binds the fold to one or more Aura memberships using canonical VAS
+Aura addresses (`aur{...}`). Entries are canonicalized and duplicates are
+removed when the manifest is loaded.
 
 ## Roadmap
 

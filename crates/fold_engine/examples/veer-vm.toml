@@ -9,6 +9,7 @@ args = [
   "--memory",
   "128",
 ]
+auras = ["aur{infra,edge,private}", "aur{ops,fleet,private}"]
 hostname = "veeros-vm"
 workdir = "../../.."
 

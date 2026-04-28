@@ -98,6 +98,7 @@ pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
         name,
         cmd: vmm.to_string_lossy().into_owned(),
         args,
+        auras: Vec::new(),
         env,
         rootfs: None, // share host rootfs — /dev/kvm must stay visible
         hostname: Some("veeros-vm".into()),
