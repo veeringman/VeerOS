@@ -11,7 +11,9 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - **Governor** = per-Aura policy + trust + AI stewardship plane.
   - **Vault / Flow** = secure storage / live session primitives.
 - New addressing model: **VAS (VeerOS Addressing Standard)** — typed tuple syntax `type{atom,atom,atom}` (e.g. `svc{render,company,live}`, `aur{design,private,open}`, `fld{worker,gpu,warm}`); resolves to compact binary IDs; replaces URI/slash baggage.
+  - Layering rule: `fabric://...` remains federation trust-domain identity; VAS tuples remain object/service identity.
 - Communication model: **Graph Fabric** — entities as vertices, weighted edges (trust, latency, cost, affinity, membership); requests are *solved* via `argmin` over `αL + βC − γT − δA` rather than statically routed; Auras are subgraphs; Folds are movable compute vertices.
+  - Determinism contract: same policy version + same state snapshot => same decision; adaptive telemetry updates may change future decisions, but remain auditable.
 - Algebraic / category-theoretic v2 layer (longer-term): typed morphisms, permission set algebra, functorial migration across zones, semiring routing scores, monadic side-effect control for AI agents.
 - Updated existing READMEs (`crates/veer_vm/README.md`, `crates/fold_engine/README.md`) to reflect Linux+macOS(HVF)+Windows(stub) host scope and x86_64 / riscv32 / aarch64(planned) guest scope — no longer Linux-only.
 - New design docs landed under `docs/`:

@@ -146,10 +146,12 @@ no API gateways on either side. `invoke("analytics.process", payload, { target:
 "fabric://partner.analytics.eu" })` — the kernel handles identity federation,
 policy enforcement at both boundaries, and end-to-end encrypted transport.
 Compromise one fabric → revoke trust instantly, channels severed in < 1 second.
+`fabric://...` identifies the target trust domain (fabric). Object addressing
+inside and across fabrics uses VAS tuples (for example `svc{...}`, `aur{...}`).
 **→ B2B integration, supply chain, multi-cloud, partner ecosystems, coalition ops.**
 
 ### Fabric Client — Beyond the Browser
-No URLs. No REST. No cookies. No JavaScript frameworks. The Fabric Client
+No user-facing web URLs. No REST. No cookies. No JavaScript frameworks. The Fabric Client
 (VeerFlow) renders composable views directly from fabric state — semantic
 navigation replaces address bars, identity-native auth replaces login forms,
 and AI generates adaptive interfaces that reshape from a serial terminal to a
@@ -233,7 +235,7 @@ Every learning mechanism in VeerOS is **fully deterministic and auditable**:
 | Knowledge distillation | IF/THEN rules extracted from episodes (26E) | Rules are explicit, inspectable |
 | Fleet learning | Gossip replication of proven strategies | Same strategy, same evaluation |
 
-**Given the same history, VeerOS will always make the same decision.** Every
+**Given the same policy version and the same state snapshot, VeerOS will always make the same decision.** Every
 learning step is reproducible, every decision is traceable to specific episodic
 evidence, and every adaptation is explainable in causal terms — not statistical
 correlation.

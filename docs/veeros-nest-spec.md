@@ -4,6 +4,9 @@
 **Date:** April 2026  
 **Author:** VeerOS Team
 
+> Note: `veeros-nest` is an experimental design track.
+> Production runtime path remains `fold_engine` + `veer-vm`.
+
 ---
 
 ## 1. Problem

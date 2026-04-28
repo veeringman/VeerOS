@@ -1,6 +1,6 @@
 # VeerOS macOS Hypervisor.framework Integration
 
-**Status**: Implementation Complete (Phase 1: Bring-up)  
+**Status**: Phase 1 bring-up complete; full runtime validation in progress  
 **Date**: April 27, 2026  
 **Backend Codename**: **VeerHV-Mac** (VeerOS Hypervisor for macOS)
 
@@ -287,7 +287,7 @@ veer-vm could be hardened with sandbox restrictions (Phase 3+):
 
 ### Related Issues
 
-- [Veer-VM Fold Build for macOS (SIP)](./SIP_DISABLE_GUIDE.md) — System Integrity Protection
+- [Veer-VM Fold Build for macOS (SIP)](../SIP_DISABLE_GUIDE.md) — System Integrity Protection
 
 ---
 

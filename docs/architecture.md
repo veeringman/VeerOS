@@ -884,6 +884,9 @@ VeerOS World:
 
 - **Cryptographic fabric identity** — `fabric://name` URI scheme; Ed25519+ML-DSA
   root keypair per fabric; trust established via explicit handshake, never implicit
+- **Layered addressing model** — `fabric://...` identifies a federated fabric
+  trust domain boundary; object/service identity uses VAS tuple addresses
+  (`svc{...}`, `aur{...}`, `vlt{...}`) resolved by VeerResolve.
 - **Scoped identity tokens** — per-invocation, short-lived, CBOR-encoded;
   internal identities (PIDs, service names) never cross the boundary
 - **Bilateral policy enforcement** — both fabrics independently evaluate every

@@ -2,6 +2,16 @@
 
 > **From vision to reality: building the world’s first intent-driven, Aura-native OS.**
 
+This roadmap is an execution overlay for Aura/Graph/VAS work.
+The canonical long-horizon phase ledger remains in `TODO.md` (Phase 1..26).
+
+## Mapping To Master Phase Ledger
+- This roadmap Phase 1 maps primarily to TODO Phase A track + Phase 22/24 prerequisites.
+- This roadmap Phase 2 maps to TODO Phase A/B track + Phase 22 (fabric protocol).
+- This roadmap Phase 3 maps to TODO Phase C track + Phase 14/26 integration.
+- This roadmap Phase 4 maps to TODO Phase D track + Phase 18/21 execution/state work.
+- This roadmap Phase 5 maps to TODO Phase E track + Phase 24 federation milestones.
+
 ---
 
 ## Phase 1: Foundation (Control Plane)

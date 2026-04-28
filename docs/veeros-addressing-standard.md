@@ -76,6 +76,14 @@ A mathematically-native, future-proof addressing system for VeerOS, designed for
 - Expose VAS externally; map to classic DNS/IP internally for legacy support.
 - Gradual rollout: VAS for new apps, gateway for legacy.
 
+## 7A. Layering with Federation Identity
+- VAS is the canonical object/service address format inside VeerOS and across
+  invoke paths (`svc{...}`, `aur{...}`, `vlt{...}`).
+- InterFabric may still use `fabric://...` to identify a remote fabric trust
+  domain boundary (who to federate with), not object endpoints.
+- Resolution order: fabric boundary selection (`fabric://...`) → object
+  resolution (`type{...}`) within policy scope.
+
 ---
 
 ## 8. Why This Is State of the Art
