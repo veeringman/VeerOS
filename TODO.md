@@ -2,6 +2,71 @@
 
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
+## [2026-04-28] Session Sync — Aura / Graph Fabric / VAS Architecture
+- Architecture leap: defined the next-generation VeerOS communication and trust model.
+  - **Fold** = secure compute sandbox (current `fold_engine` + `veer-vm`) — name preserved for runtime cell.
+  - **Aura** = dynamic, overlapping trust context of belonging (personal / family / team / company / city / country / planet); replaces single-network/zone/realm thinking.
+  - **Fabric** = encrypted, multiplexed transport backbone (QUIC-class, identity-routed).
+  - **Zone** = physical / administrative locality (where things reside).
+  - **Governor** = per-Aura policy + trust + AI stewardship plane.
+  - **Vault / Flow** = secure storage / live session primitives.
+- New addressing model: **VAS (VeerOS Addressing Standard)** — typed tuple syntax `type{atom,atom,atom}` (e.g. `svc{render,company,live}`, `aur{design,private,open}`, `fld{worker,gpu,warm}`); resolves to compact binary IDs; replaces URI/slash baggage.
+- Communication model: **Graph Fabric** — entities as vertices, weighted edges (trust, latency, cost, affinity, membership); requests are *solved* via `argmin` over `αL + βC − γT − δA` rather than statically routed; Auras are subgraphs; Folds are movable compute vertices.
+- Algebraic / category-theoretic v2 layer (longer-term): typed morphisms, permission set algebra, functorial migration across zones, semiring routing scores, monadic side-effect control for AI agents.
+- Updated existing READMEs (`crates/veer_vm/README.md`, `crates/fold_engine/README.md`) to reflect Linux+macOS(HVF)+Windows(stub) host scope and x86_64 / riscv32 / aarch64(planned) guest scope — no longer Linux-only.
+- New design docs landed under `docs/`:
+  - `docs/veeros-addressing-standard.md` — VAS v1 grammar, resolution, policy integration.
+  - `docs/veeros-aura-governor-spec.md` — Aura Governor v1 (membership, policy, trust, audit, AI stewardship).
+  - `docs/veeros-graph-fabric-architecture.md` — Graph Fabric v1 (vertices, edges, weights, optimization equation, rollout).
+  - `docs/veeros-implementation-roadmap.md` — 5-phase roadmap from control plane → planetary federation.
+- Tagline locked: **"Folds compute. Auras belong. Fabric connects."**
+
+## VeerOS Aura / Graph Fabric / VAS — Implementation Track (NEW)
+- [ ] **Phase A — Foundation (Control Plane)**
+  - [ ] Freeze and publish VAS v1 grammar (`type{atom,...}`) + reserved type prefixes (`usr`, `dev`, `fld`, `aur`, `svc`, `vlt`, `agt`, `zon`, `nod`, `evt`)
+  - [ ] VAS parser + canonical-form normalizer crate (`crates/vas`)
+  - [ ] Compact binary ID encoding (64/128-bit) + atom registry
+  - [ ] `VeerResolve` MVP — local resolver with cache + Aura-scoped lookup
+  - [ ] Aura object model (identity, members, parent/child links, governor ref)
+  - [ ] Fold ↔ Aura membership wiring in `fold_engine` (a Fold can declare `auras = [...]`)
+  - [ ] Minimal Aura Governor — static TOML policy, membership add/remove, audit log
+  - [ ] CLI/SDK: `veer aura join/create/share/leave`, `veer fold launch --aura ...`, `veer connect svc{...}`
+  - [ ] Legacy compatibility gateway (DNS / IP fallback, classic socket bridge)
+- [ ] **Phase B — Dynamic Graph Fabric**
+  - [ ] Live graph core (in-process, then distributed) — vertices, edges, weights
+  - [ ] Telemetry feed: latency, load, trust score, locality, GPU/CPU availability
+  - [ ] Solver engine: `argmin (αL + βC − γT − δA)` for service / Fold selection
+  - [ ] Algebraic policy engine — composable permission sets, time-bound capability tokens
+  - [ ] Aura Governor v2 — dynamic policy, inheritance, explainability traces
+  - [ ] Fabric transport runtime (QUIC-class, multiplexed, encrypted, resumable)
+  - [ ] Visual graph explorer / decision-trace debugger (why was node X chosen?)
+- [ ] **Phase C — AI-Native & Multi-Aura**
+  - [ ] AI assistant integration in Aura Governor (anomaly detection, policy suggestions)
+  - [ ] Temporary / scoped Aura membership for agents (`expires`, `scope`)
+  - [ ] Multi-Aura participation for Folds, devices, users (overlap graph)
+  - [ ] Policy inheritance + delegation + federation across Auras
+  - [ ] Advanced permission algebra (set ops, intersections, time bounds, context predicates)
+  - [ ] High-level developer SDK for Aura / Fold / Service orchestration
+- [ ] **Phase D — Full Orchestration & Mobility**
+  - [ ] Fold migration + replication across devices and zones (functorial mapping)
+  - [ ] Graph-driven workload placement + continuous re-optimization (with hysteresis)
+  - [ ] Aura-aware resource scheduling (GPU slices, storage, bandwidth quotas)
+  - [ ] Cross-zone, cross-Aura flows and data movement primitives
+  - [ ] Policy-driven, explainable automation (every decision auditable)
+  - [ ] Visual workflow composition + audit trails
+- [ ] **Phase E — Federation & Planetary Scale**
+  - [ ] Federated Aura Governors (city / country / planet tiers)
+  - [ ] Global resolver mesh + signed namespace ownership
+  - [ ] Public / private Aura discovery, signed invite tokens
+  - [ ] Autonomous agent orchestration across federated Auras
+  - [ ] Distributed trust scoring + anomaly detection
+  - [ ] Open API for third-party Aura / Governor / Service extensions
+- [ ] **Always-on / cross-cutting**
+  - [ ] Security, privacy, auditability by design (zero-trust default)
+  - [ ] Human-centric, intent-based UX (`Join Aura`, `Launch Fold`, never `Configure subnet`)
+  - [ ] Legacy compatibility + graceful migration path
+  - [ ] Continuous research feedback loop (graph algebra v2, category-theory layer)
+
 ## [2026-04-25] Session Sync
 - Fold: cgroups v2, seccomp, rootless mode, TOML manifest, state registry, CLI improvements, integration with veer-vm, roadmap updated (see fold_engine/README.md)
 - veer-vm: KVM-based microVMM, snapshot/restore, virtio-mmio, direct ISO boot, sensor feed, integration with fold, see veer_vm/README.md
