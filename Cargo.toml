@@ -34,6 +34,7 @@ members = [
     "crates/veer_resolve",
     "crates/veer_aura",
     "crates/veer_governor",
+    "crates/veer_cli",
     # ── Demo / test ──────────────────────────────────────
     "crates/veeros-demo",
 ]

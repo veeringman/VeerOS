@@ -916,6 +916,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "veer_cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "toml",
+ "vas",
+]
+
+[[package]]
 name = "veer_governor"
 version = "0.1.0"
 dependencies = [

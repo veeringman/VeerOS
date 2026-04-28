@@ -32,7 +32,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - [x] Aura object model (identity, members, parent/child links, governor ref)
   - [x] Fold ↔ Aura membership wiring in `fold_engine` (a Fold can declare `auras = [...]`)
   - [x] Minimal Aura Governor — static TOML policy, membership add/remove, audit log
-  - [ ] CLI/SDK: `veer aura join/create/share/leave`, `veer fold launch --aura ...`, `veer connect svc{...}`
+  - [x] CLI/SDK: `veer aura join/create/share/leave`, `veer fold launch --aura ...`, `veer connect svc{...}`
   - [ ] Legacy compatibility gateway (DNS / IP fallback, classic socket bridge)
 - [ ] **Phase B — Dynamic Graph Fabric**
   - [ ] Live graph core (in-process, then distributed) — vertices, edges, weights
