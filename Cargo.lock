@@ -908,6 +908,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "veer_aura"
+version = "0.1.0"
+dependencies = [
+ "vas",
+]
+
+[[package]]
 name = "veer_resolve"
 version = "0.1.0"
 dependencies = [
