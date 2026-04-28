@@ -16,12 +16,12 @@ The canonical long-horizon phase ledger remains in `TODO.md` (Phase 1..26).
 
 ## Phase 1: Foundation (Control Plane)
 - [ ] Finalize and publish VeerOS Addressing Standard (VAS)
-- [ ] Implement VeerResolve (distributed resolver for VAS)
-- [ ] Build basic Aura and Fold object models (membership, metadata)
-- [ ] Develop minimal Aura Governor (membership, static policy)
-- [ ] Service registry and basic intent resolution (Graph Fabric v1)
-- [ ] CLI/SDK for joining Auras, launching Folds, connecting to services
-- [ ] Legacy compatibility gateway (DNS/IP mapping)
+- [x] Implement VeerResolve (distributed resolver for VAS)
+- [x] Build basic Aura and Fold object models (membership, metadata)
+- [x] Develop minimal Aura Governor (membership, static policy)
+- [x] Service registry and basic intent resolution (Graph Fabric v1)
+- [x] CLI/SDK for joining Auras, launching Folds, connecting to services
+- [x] Legacy compatibility gateway (DNS/IP mapping)
 
 ---
 

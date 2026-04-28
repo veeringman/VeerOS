@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use vas::{canonicalize, AddressType, VasAddress};
+use veer_resolve::{Endpoint, ResolveError, Resolver, ServiceBinding};
 
 #[derive(Parser, Debug)]
 #[command(name = "veer", version, about = "VeerOS unified CLI")]
@@ -99,6 +100,13 @@ struct ConnectArgs {
     /// `$HOME/.config/veeros/legacy-routes.toml`).
     #[arg(long)]
     legacy_map: Option<PathBuf>,
+    /// Optional path to resolver service registry TOML.
+    ///
+    /// If omitted, defaults to
+    /// `$XDG_CONFIG_HOME/veeros/resolve-map.toml` (or
+    /// `$HOME/.config/veeros/resolve-map.toml`).
+    #[arg(long)]
+    resolve_map: Option<PathBuf>,
     #[arg(long = "aura")]
     auras: Vec<String>,
 }
@@ -141,6 +149,28 @@ struct LegacyRoute {
     #[serde(default)]
     ips: Vec<String>,
     port: u16,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ResolveMap {
+    #[serde(default)]
+    services: BTreeMap<String, Vec<ResolveEndpointSpec>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResolveEndpointSpec {
+    node: String,
+    transport: String,
+    #[serde(default = "default_true")]
+    healthy: bool,
+    #[serde(default)]
+    latency_ms: Option<u32>,
+    #[serde(default)]
+    required_aura: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn main() -> Result<()> {
@@ -310,15 +340,20 @@ fn cmd_connect(args: ConnectArgs) -> Result<()> {
         .map(|a| canonical_typed(a, AddressType::Aura, "aura"))
         .collect::<Result<Vec<_>>>()?;
 
+    let resolved_target = resolve_target_from_map(args.resolve_map.as_deref(), &service, &caller_auras)?;
+
     let legacy_route = load_legacy_route(args.legacy_map.as_deref(), &service)?;
+    let resolver_port = resolved_target.as_ref().map(|(_, p)| *p);
     let port = args
         .port
+        .or(resolver_port)
         .or_else(|| legacy_route.as_ref().map(|r| r.port))
         .with_context(|| "no port provided; pass --port or define route port in legacy map")?;
-    let candidate_hosts = build_candidate_hosts(args.host.as_deref(), legacy_route.as_ref());
+    let resolver_host = resolved_target.as_ref().map(|(h, _)| h.as_str());
+    let candidate_hosts = build_candidate_hosts(args.host.as_deref(), resolver_host, legacy_route.as_ref());
     if candidate_hosts.is_empty() {
         bail!(
-            "no target host candidates; pass --host or define dns/ips in legacy route map for {}",
+            "no target host candidates; pass --host, provide resolve-map, or define dns/ips in legacy route map for {}",
             service
         );
     }
@@ -344,6 +379,72 @@ fn cmd_connect(args: ConnectArgs) -> Result<()> {
     Ok(())
 }
 
+fn resolve_target_from_map(
+    path: Option<&Path>,
+    service: &str,
+    caller_auras: &[String],
+) -> Result<Option<(String, u16)>> {
+    let map_path = path
+        .map(ToOwned::to_owned)
+        .unwrap_or(resolve_map_default_path()?);
+    if !map_path.exists() {
+        return Ok(None);
+    }
+
+    let text = std::fs::read_to_string(&map_path)
+        .with_context(|| format!("reading {}", map_path.display()))?;
+    let map: ResolveMap = toml::from_str(&text)
+        .with_context(|| format!("parsing {}", map_path.display()))?;
+
+    let mut resolver = Resolver::new();
+    for (svc_raw, endpoints) in map.services {
+        let svc = canonical_typed(&svc_raw, AddressType::Service, "service")?;
+        for ep in endpoints {
+            let required_aura = if let Some(aura) = ep.required_aura {
+                Some(canonical_typed(&aura, AddressType::Aura, "aura")?)
+            } else {
+                None
+            };
+
+            resolver
+                .register(
+                    &svc,
+                    ServiceBinding {
+                        endpoint: Endpoint {
+                            node: ep.node,
+                            transport: ep.transport,
+                            latency_ms: ep.latency_ms.unwrap_or(10),
+                            healthy: ep.healthy,
+                        },
+                        required_aura,
+                    },
+                )
+                .map_err(|_| anyhow::anyhow!("invalid resolver entry for {svc}"))?;
+        }
+    }
+
+    let aura_refs: Vec<&str> = caller_auras.iter().map(|s| s.as_str()).collect();
+    let out = match resolver.resolve(service, &aura_refs) {
+        Ok(rr) => {
+            let (host, port) = endpoint_host_port(&rr.selected)
+                .with_context(|| format!("resolver endpoint for {} does not contain host/port", service))?;
+            Some((host, port))
+        }
+        Err(ResolveError::NotFound) => None,
+        Err(ResolveError::DeniedByAura) => {
+            bail!("resolver denied by aura policy for {}", service);
+        }
+        Err(ResolveError::NoHealthyEndpoint) => {
+            bail!("resolver has no healthy endpoint for {}", service);
+        }
+        Err(ResolveError::InvalidAddress) => {
+            bail!("resolver rejected invalid address for {}", service);
+        }
+    };
+
+    Ok(out)
+}
+
 fn load_legacy_route(path: Option<&Path>, service: &str) -> Result<Option<LegacyRoute>> {
     let map_path = path
         .map(ToOwned::to_owned)
@@ -367,11 +468,21 @@ fn load_legacy_route(path: Option<&Path>, service: &str) -> Result<Option<Legacy
     Ok(map.services.remove(service))
 }
 
-fn build_candidate_hosts(explicit_host: Option<&str>, route: Option<&LegacyRoute>) -> Vec<String> {
+fn build_candidate_hosts(
+    explicit_host: Option<&str>,
+    resolver_host: Option<&str>,
+    route: Option<&LegacyRoute>,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
 
     if let Some(h) = explicit_host {
+        let h = h.trim().to_string();
+        if !h.is_empty() && seen.insert(h.clone()) {
+            out.push(h);
+        }
+    }
+    if let Some(h) = resolver_host {
         let h = h.trim().to_string();
         if !h.is_empty() && seen.insert(h.clone()) {
             out.push(h);
@@ -413,6 +524,56 @@ fn host_resolves(host: &str, port: u16) -> bool {
         .to_socket_addrs()
         .map(|mut addrs| addrs.next().is_some())
         .unwrap_or(false)
+}
+
+fn endpoint_host_port(ep: &Endpoint) -> Result<(String, u16)> {
+    if let Some((host, port)) = split_host_port(&ep.node) {
+        return Ok((host, port));
+    }
+
+    if let Some(rest) = ep.transport.split_once("://").map(|(_, r)| r) {
+        if let Some((host, port)) = split_host_port(rest) {
+            return Ok((host, port));
+        }
+    }
+
+    if let Some(port_txt) = ep.transport.strip_prefix("tcp:") {
+        let port: u16 = port_txt
+            .parse()
+            .with_context(|| format!("invalid tcp port in transport {}", ep.transport))?;
+        if !ep.node.trim().is_empty() {
+            return Ok((ep.node.trim().to_string(), port));
+        }
+    }
+
+    if let Some(port_txt) = ep.transport.strip_prefix("quic:") {
+        let port: u16 = port_txt
+            .parse()
+            .with_context(|| format!("invalid quic port in transport {}", ep.transport))?;
+        if !ep.node.trim().is_empty() {
+            return Ok((ep.node.trim().to_string(), port));
+        }
+    }
+
+    bail!("cannot extract host:port from endpoint node={} transport={}", ep.node, ep.transport)
+}
+
+fn split_host_port(input: &str) -> Option<(String, u16)> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    if let Ok(addr) = s.parse::<std::net::SocketAddr>() {
+        return Some((addr.ip().to_string(), addr.port()));
+    }
+
+    let (host, port_txt) = s.rsplit_once(':')?;
+    let port: u16 = port_txt.parse().ok()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port))
 }
 
 fn canonical_typed(input: &str, expected: AddressType, what: &str) -> Result<String> {
@@ -509,6 +670,16 @@ fn legacy_map_default_path() -> Result<PathBuf> {
     Ok(base.join("veeros").join("legacy-routes.toml"))
 }
 
+fn resolve_map_default_path() -> Result<PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else {
+        let home = std::env::var("HOME").context("HOME is not set")?;
+        Path::new(&home).join(".config")
+    };
+    Ok(base.join("veeros").join("resolve-map.toml"))
+}
+
 fn load_state() -> Result<AuraState> {
     let path = state_path()?;
     if !path.exists() {
@@ -585,11 +756,12 @@ auras = ["aur{team,private,open}", " AUR{Team,Private,Open } "]
             port: 2232,
         };
 
-        let out = build_candidate_hosts(Some("manual.example"), Some(&route));
+        let out = build_candidate_hosts(Some("manual.example"), Some("resolved.example"), Some(&route));
         assert_eq!(
             out,
             vec![
                 "manual.example".to_string(),
+                "resolved.example".to_string(),
                 "svc.example.local".to_string(),
                 "10.1.1.9".to_string(),
             ]
@@ -605,5 +777,33 @@ auras = ["aur{team,private,open}", " AUR{Team,Private,Open } "]
         .unwrap();
         assert_eq!(host, "127.0.0.1");
         assert!(resolved);
+    }
+
+    #[test]
+    fn endpoint_host_port_accepts_node_socket_form() {
+        let ep = Endpoint {
+            node: "10.0.0.4:2232".into(),
+            transport: "tcp".into(),
+            latency_ms: 10,
+            healthy: true,
+        };
+
+        let (host, port) = endpoint_host_port(&ep).unwrap();
+        assert_eq!(host, "10.0.0.4");
+        assert_eq!(port, 2232);
+    }
+
+    #[test]
+    fn endpoint_host_port_accepts_transport_url_form() {
+        let ep = Endpoint {
+            node: "ignored".into(),
+            transport: "tcp://render.internal:3344".into(),
+            latency_ms: 10,
+            healthy: true,
+        };
+
+        let (host, port) = endpoint_host_port(&ep).unwrap();
+        assert_eq!(host, "render.internal");
+        assert_eq!(port, 3344);
     }
 }

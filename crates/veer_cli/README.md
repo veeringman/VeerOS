@@ -59,6 +59,33 @@ then delegates transport to:
 veer-connect shell <host> <port>
 ```
 
+Resolver-backed selection is enabled by default via:
+
+`$XDG_CONFIG_HOME/veeros/resolve-map.toml` (fallback: `$HOME/.config/veeros/resolve-map.toml`)
+
+```toml
+[[services."svc{render,company,live}"]]
+node = "render-a.internal"
+transport = "tcp:2232"
+latency_ms = 8
+healthy = true
+required_aura = "aur{design,private,open}"
+
+[[services."svc{render,company,live}"]]
+node = "render-b.internal"
+transport = "tcp:2232"
+latency_ms = 14
+healthy = true
+```
+
+Connect target selection order:
+
+1. `--host/--port` explicit overrides
+2. Resolver map (`resolve-map.toml`) via VeerResolve + Aura filtering
+3. Legacy route map (`legacy-routes.toml`) DNS/IP fallback
+
+You can override resolver map path with `--resolve-map <path>`.
+
 Legacy DNS/IP fallback can be driven by a route map:
 
 `$XDG_CONFIG_HOME/veeros/legacy-routes.toml` (fallback: `$HOME/.config/veeros/legacy-routes.toml`)
