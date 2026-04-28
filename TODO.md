@@ -47,7 +47,7 @@ This file is the persistent progress tracker for VeerOS and should be updated in
   - [x] Temporary / scoped Aura membership for agents (`expires`, `scope`)
   - [x] Multi-Aura participation for Folds, devices, users (overlap graph)
   - [x] Policy inheritance + delegation + federation across Auras
-  - [ ] Advanced permission algebra (set ops, intersections, time bounds, context predicates)
+  - [x] Advanced permission algebra (set ops, intersections, time bounds, context predicates)
   - [ ] High-level developer SDK for Aura / Fold / Service orchestration
 - [ ] **Phase D — Full Orchestration & Mobility**
   - [ ] Fold migration + replication across devices and zones (functorial mapping)

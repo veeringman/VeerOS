@@ -7,7 +7,7 @@
 //! - Explainable decision traces
 //! - Append-only JSONL audit records
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -90,6 +90,39 @@ pub struct FederationLink {
     pub inherit_admins: bool,
     pub inherit_member_types: bool,
     pub inherit_allow_removal: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionRule {
+    #[serde(default)]
+    pub allowed_capabilities: BTreeSet<DelegatedCapability>,
+    #[serde(default)]
+    pub allowed_actor_types: BTreeSet<String>,
+    #[serde(default)]
+    pub allowed_actors: BTreeSet<String>,
+    #[serde(default)]
+    pub required_context: BTreeMap<String, String>,
+    pub not_before_unix_ms: Option<u128>,
+    pub not_after_unix_ms: Option<u128>,
+    #[serde(default = "default_true")]
+    pub require_governor_authorization: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionExpr {
+    Rule(PermissionRule),
+    Union(Vec<PermissionExpr>),
+    Intersection(Vec<PermissionExpr>),
+    Difference {
+        base: Box<PermissionExpr>,
+        except: Box<PermissionExpr>,
+    },
+    Not(Box<PermissionExpr>),
 }
 
 #[derive(Debug, Default)]
@@ -913,6 +946,40 @@ impl FederatedGovernor {
         }))
     }
 
+    pub fn is_authorized_with_permission_expr(
+        &self,
+        aura: &str,
+        actor: &str,
+        capability: DelegatedCapability,
+        now_unix_ms: u128,
+        context: &BTreeMap<String, String>,
+        expr: &PermissionExpr,
+    ) -> Result<bool, GovernorError> {
+        let aura = canonical_aura_addr(aura)?;
+        let actor = canonicalize(actor).map_err(|_| GovernorError::InvalidAddress)?;
+        let actor_addr = VasAddress::parse(&actor).map_err(|_| GovernorError::InvalidAddress)?;
+        let effective = self.effective_policy(&aura)?;
+
+        let governor_authorized = effective.is_admin(&actor)?
+            || self.delegations.iter().any(|d| {
+                d.aura == aura
+                    && d.delegate == actor
+                    && d.expires_unix_ms > now_unix_ms
+                    && d.capabilities.contains(&capability)
+            });
+
+        let ctx = PermissionEvalContext {
+            actor: &actor,
+            actor_type: address_type_code(actor_addr.kind),
+            capability,
+            now_unix_ms,
+            attributes: context,
+            governor_authorized,
+        };
+
+        Ok(eval_permission_expr(expr, &ctx))
+    }
+
     fn has_cycle(&self) -> bool {
         for p in self.policies.keys() {
             let mut seen = BTreeSet::new();
@@ -926,6 +993,80 @@ impl FederatedGovernor {
         }
         false
     }
+}
+
+struct PermissionEvalContext<'a> {
+    actor: &'a str,
+    actor_type: &'a str,
+    capability: DelegatedCapability,
+    now_unix_ms: u128,
+    attributes: &'a BTreeMap<String, String>,
+    governor_authorized: bool,
+}
+
+fn eval_permission_expr(expr: &PermissionExpr, ctx: &PermissionEvalContext<'_>) -> bool {
+    match expr {
+        PermissionExpr::Rule(rule) => eval_permission_rule(rule, ctx),
+        PermissionExpr::Union(items) => items.iter().any(|e| eval_permission_expr(e, ctx)),
+        PermissionExpr::Intersection(items) => {
+            !items.is_empty() && items.iter().all(|e| eval_permission_expr(e, ctx))
+        }
+        PermissionExpr::Difference { base, except } => {
+            eval_permission_expr(base, ctx) && !eval_permission_expr(except, ctx)
+        }
+        PermissionExpr::Not(inner) => !eval_permission_expr(inner, ctx),
+    }
+}
+
+fn eval_permission_rule(rule: &PermissionRule, ctx: &PermissionEvalContext<'_>) -> bool {
+    if rule.require_governor_authorization && !ctx.governor_authorized {
+        return false;
+    }
+
+    if !rule.allowed_capabilities.is_empty() && !rule.allowed_capabilities.contains(&ctx.capability) {
+        return false;
+    }
+
+    if !rule.allowed_actor_types.is_empty() {
+        let types: BTreeSet<String> = rule
+            .allowed_actor_types
+            .iter()
+            .map(|t| t.to_ascii_lowercase())
+            .collect();
+        if !types.contains(ctx.actor_type) {
+            return false;
+        }
+    }
+
+    if !rule.allowed_actors.is_empty() {
+        let canon_actors: BTreeSet<String> = rule
+            .allowed_actors
+            .iter()
+            .filter_map(|a| canonicalize(a).ok())
+            .collect();
+        if !canon_actors.contains(ctx.actor) {
+            return false;
+        }
+    }
+
+    if let Some(nb) = rule.not_before_unix_ms {
+        if ctx.now_unix_ms < nb {
+            return false;
+        }
+    }
+    if let Some(na) = rule.not_after_unix_ms {
+        if ctx.now_unix_ms >= na {
+            return false;
+        }
+    }
+
+    for (k, v) in &rule.required_context {
+        if ctx.attributes.get(k) != Some(v) {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn canonical_aura_addr(input: &str) -> Result<String, GovernorError> {
@@ -1608,5 +1749,109 @@ mod tests {
             inherit_allow_removal: false,
         });
         assert!(matches!(err, Err(GovernorError::InvalidPolicy(_))));
+    }
+
+    #[test]
+    fn permission_algebra_supports_set_ops_time_and_context() {
+        let mut fed = FederatedGovernor::new();
+        fed.register_policy(sample_policy()).unwrap();
+
+        let now = 1_000_000u128;
+        fed.grant_delegation(
+            "aur{finance,private,open}",
+            "usr{alice,corp,active}",
+            "agt{opsbot,corp,live}",
+            BTreeSet::from([DelegatedCapability::AddMember]),
+            now + 1_000,
+            now,
+        )
+        .unwrap();
+
+        let mut ctx = BTreeMap::new();
+        ctx.insert("env".to_string(), "prod".to_string());
+        ctx.insert("region".to_string(), "us-east".to_string());
+
+        let allow_prod_rule = PermissionExpr::Rule(PermissionRule {
+            allowed_capabilities: BTreeSet::from([DelegatedCapability::AddMember]),
+            allowed_actor_types: BTreeSet::from(["agt".to_string()]),
+            allowed_actors: BTreeSet::new(),
+            required_context: BTreeMap::from([("env".to_string(), "prod".to_string())]),
+            not_before_unix_ms: Some(now - 10),
+            not_after_unix_ms: Some(now + 10),
+            require_governor_authorization: true,
+        });
+
+        assert!(fed
+            .is_authorized_with_permission_expr(
+                "aur{finance,private,open}",
+                "agt{opsbot,corp,live}",
+                DelegatedCapability::AddMember,
+                now,
+                &ctx,
+                &allow_prod_rule,
+            )
+            .unwrap());
+
+        let deny_if_quarantined = PermissionExpr::Rule(PermissionRule {
+            allowed_capabilities: BTreeSet::new(),
+            allowed_actor_types: BTreeSet::new(),
+            allowed_actors: BTreeSet::new(),
+            required_context: BTreeMap::from([("quarantine".to_string(), "true".to_string())]),
+            not_before_unix_ms: None,
+            not_after_unix_ms: None,
+            require_governor_authorization: false,
+        });
+
+        let expr = PermissionExpr::Difference {
+            base: Box::new(PermissionExpr::Union(vec![allow_prod_rule.clone()])),
+            except: Box::new(deny_if_quarantined),
+        };
+
+        assert!(fed
+            .is_authorized_with_permission_expr(
+                "aur{finance,private,open}",
+                "agt{opsbot,corp,live}",
+                DelegatedCapability::AddMember,
+                now,
+                &ctx,
+                &expr,
+            )
+            .unwrap());
+
+        ctx.insert("quarantine".to_string(), "true".to_string());
+        assert!(!fed
+            .is_authorized_with_permission_expr(
+                "aur{finance,private,open}",
+                "agt{opsbot,corp,live}",
+                DelegatedCapability::AddMember,
+                now,
+                &ctx,
+                &expr,
+            )
+            .unwrap());
+
+        let intersection = PermissionExpr::Intersection(vec![
+            allow_prod_rule,
+            PermissionExpr::Rule(PermissionRule {
+                allowed_capabilities: BTreeSet::new(),
+                allowed_actor_types: BTreeSet::new(),
+                allowed_actors: BTreeSet::new(),
+                required_context: BTreeMap::from([("region".to_string(), "eu-west".to_string())]),
+                not_before_unix_ms: None,
+                not_after_unix_ms: None,
+                require_governor_authorization: false,
+            }),
+        ]);
+
+        assert!(!fed
+            .is_authorized_with_permission_expr(
+                "aur{finance,private,open}",
+                "agt{opsbot,corp,live}",
+                DelegatedCapability::AddMember,
+                now,
+                &ctx,
+                &intersection,
+            )
+            .unwrap());
     }
 }
