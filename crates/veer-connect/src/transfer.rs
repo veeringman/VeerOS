@@ -19,6 +19,7 @@
 //! 5. Server sends file data in encrypted frames
 
 use crate::vsc::{self, SecureChannel, MAX_FRAME_PT, MODE_PULL, MODE_PUSH};
+#[cfg(unix)]
 use libc::{self, termios};
 
 use std::fs;
@@ -78,6 +79,7 @@ fn authenticate(stream: &TcpStream, ch: &mut SecureChannel) -> bool {
 }
 
 /// Read a password from the terminal without echo.
+#[cfg(unix)]
 fn read_password() -> String {
     // Save terminal state, disable echo.
     let stdin_fd = 0i32;
@@ -100,6 +102,14 @@ fn read_password() -> String {
     }
     eprintln!(); // newline after hidden input
 
+    password.trim_end().to_string()
+}
+
+/// Read a password from the terminal.
+#[cfg(not(unix))]
+fn read_password() -> String {
+    let mut password = String::new();
+    io::stdin().read_line(&mut password).ok();
     password.trim_end().to_string()
 }
 

@@ -1131,6 +1131,7 @@ fn build_shell_env(pre_auth: bool) -> ShellEnv {
         dmesg: Some(dmesg_info),
         reboot: None,
         shutdown: Some(do_shutdown),
+        sleep_ms: None,
         caps_cmd: Some(caps_command),
         auditlog_cmd: Some(auditlog_command),
         ifconfig_cmd: None,

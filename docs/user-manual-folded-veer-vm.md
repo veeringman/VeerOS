@@ -17,6 +17,12 @@ This guide explains how to use VeerOS's Fold Engine to securely run and manage `
 - VeerOS workspace built (`cargo build`)
 - Root or delegated cgroup privileges for full isolation (rootless mode supported)
 
+### Windows scope note
+- This manual targets Linux Fold Engine workflows.
+- On Windows, ESP32C6 guest tests currently use direct `veer-vm.exe --backend custom` execution.
+- `scripts/run-veer-vm-windows.ps1` currently validates `-Arch x86_64` only, so it is not the ESP32C6 (`riscv32`) launcher.
+- For Windows `veer-connect` test troubleshooting, see [veer-connect-updates-2026.md](./veer-connect-updates-2026.md).
+
 ---
 
 ## 3. Quick Start
@@ -110,6 +116,7 @@ systemd-run --user --scope --property=Delegate=yes -- \
 - **KVM errors**: Ensure `/dev/kvm` exists and you have permission.
 - **Resource errors**: Check cgroup delegation or run as root.
 - **Logs**: Use `fold logs <name>` for detailed output.
+- **Windows ESP32C6 connect failure**: Most failures are guest launch/port-forward setup rather than `veer-connect` itself; use the Windows checklist in [veer-connect-updates-2026.md](./veer-connect-updates-2026.md).
 
 ---
 
@@ -120,4 +127,4 @@ systemd-run --user --scope --property=Delegate=yes -- \
 
 ---
 
-_Last updated: 2026-04-25_
+_Last updated: 2026-05-03_

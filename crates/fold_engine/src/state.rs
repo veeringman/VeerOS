@@ -95,6 +95,24 @@ fn state_root() -> Result<PathBuf> {
             return Ok(PathBuf::from(xdg).join("veeros").join("fold"));
         }
     }
-    let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".local/state/veeros/fold"))
+
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Ok(PathBuf::from(home).join(".local/state/veeros/fold"));
+        }
+    }
+
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.is_empty() {
+            return Ok(PathBuf::from(profile).join(".veeros").join("fold"));
+        }
+    }
+
+    let drive = std::env::var("HOMEDRIVE").unwrap_or_default();
+    let path = std::env::var("HOMEPATH").unwrap_or_default();
+    if !drive.is_empty() && !path.is_empty() {
+        return Ok(PathBuf::from(format!("{}{}", drive, path)).join(".veeros").join("fold"));
+    }
+
+    anyhow::bail!("unable to determine home directory (HOME/USERPROFILE/HOMEDRIVE+HOMEPATH are unset)")
 }

@@ -219,11 +219,18 @@ fn random_vm_name() -> String {
 }
 
 #[allow(dead_code)]
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
         .map(|m| m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+#[allow(dead_code)]
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.is_file()
 }
 
 #[cfg(test)]

@@ -339,6 +339,73 @@ Manager commands: `create` · `start` · `stop` · `list` · `status` · `logs [
 
 Full reference: `~/VeerOS-VMs/VeerOS-VM-Manual.txt` or [docs/macos-vm-manual.txt](docs/macos-vm-manual.txt)
 
+### Windows Host Tools — veer-vm, fold, veer-connect
+
+Windows now has a host-tools build path aligned with the macOS workflow.
+
+```powershell
+# Build debug host tools for native Windows target
+./scripts/build-windows-host-tools.ps1
+
+# Build release host tools
+./scripts/build-windows-host-tools.ps1 release
+
+# Optional target override:
+#   $env:VEER_VM_WIN_TARGET = "x86_64-pc-windows-msvc"
+#   $env:VEER_VM_WIN_TARGET = "all"
+```
+
+Artifacts are produced under `target/<target-triple>/<profile>/`:
+
+- `veer-vm.exe`
+- `fold.exe`
+- `veer-connect.exe`
+
+Notes:
+
+- `veer-vm` on Windows runs VeerOS guests via QEMU + WHPX (x86_64 ISO path).
+- `fold` on Windows now provides process lifecycle management for guest launch workflows.
+- `veer-connect` builds and supports shell/file operations; interactive shell runs in line mode on non-Unix hosts.
+
+Windows backend options for `veer-vm`:
+
+```powershell
+# Built-in QEMU + WHPX backend
+./target/x86_64-pc-windows-msvc/debug/veer-vm.exe --backend qemu --kernel build/veeros.iso --arch x86_64 --memory 256
+
+# Custom backend runner (default args)
+./target/x86_64-pc-windows-msvc/debug/veer-vm.exe --backend custom --custom-runner C:/tools/my-vmm.exe --kernel build/veeros.iso --arch x86_64 --memory 256
+
+# Custom backend runner (templated args)
+./target/x86_64-pc-windows-msvc/debug/veer-vm.exe --backend custom --custom-runner C:/tools/my-vmm.exe `
+  --custom-arg "--image" --custom-arg "{kernel}" --custom-arg "--mem" --custom-arg "{memory_mib}" --custom-arg "--cpu" --custom-arg "{cpus}"
+```
+
+Custom arg tokens: `{kernel}` `{memory_mib}` `{cpus}` `{arch}` `{disk}` `{disk_ro}` `{mac}`.
+
+Convenience wrapper for Windows guest launch:
+
+```powershell
+# qemu backend (default)
+./scripts/run-veer-vm-windows.ps1 -Build
+
+# custom backend
+./scripts/run-veer-vm-windows.ps1 -Backend custom -CustomRunner C:/tools/my-vmm.exe -Kernel build/veeros.iso -Memory 256
+
+# auto-detect qemu and persist VEER_VM_QEMU for future shells
+./scripts/run-veer-vm-windows.ps1 -Backend qemu -PersistQemuPath
+```
+
+QEMU detection helper:
+
+```powershell
+# print detected qemu path
+./scripts/find-qemu-windows.ps1
+
+# set VEER_VM_QEMU for current process and persist in user env
+./scripts/find-qemu-windows.ps1 -SetProcessEnv -PersistUserEnv
+```
+
 ### Demo Session
 
 ```

@@ -232,9 +232,34 @@ pub fn send_frame(stream: &TcpStream, ch: &mut SecureChannel, data: &[u8]) {
 
 /// Fill buffer with OS-provided random bytes.
 fn os_random(buf: &mut [u8]) {
-    // Linux: /dev/urandom.  Extensible to Windows (BCryptGenRandom)
-    // and macOS (SecRandomCopyBytes).
-    use std::fs::File;
-    let mut f = File::open("/dev/urandom").expect("failed to open /dev/urandom");
-    f.read_exact(buf).expect("failed to read entropy");
+    #[cfg(windows)]
+    {
+        // Windows: use BCryptGenRandom via the documented getrandom path.
+        // SAFETY: BCryptGenRandom is the correct Windows CSPRNG.
+        #[link(name = "Bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                h_algorithm: *mut std::ffi::c_void,
+                pb_buffer: *mut u8,
+                cb_buffer: u32,
+                dw_flags: u32,
+            ) -> i32;
+        }
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
+        let ret = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        assert_eq!(ret, 0, "BCryptGenRandom failed: {ret}");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::fs::File;
+        let mut f = File::open("/dev/urandom").expect("failed to open /dev/urandom");
+        f.read_exact(buf).expect("failed to read entropy");
+    }
 }

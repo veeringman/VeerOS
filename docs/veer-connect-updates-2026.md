@@ -21,6 +21,75 @@ veer-connect pull <host> <port> <remote-path> <local-path>
 - [scripts/veeros-connect](../scripts/veeros-connect)
 - [scripts/veeros-vm](../scripts/veeros-vm)
 
+## Windows Test Notes: folded veer-vm + ESP32C6 guest
+
+This section captures the current Windows test flow when validating `veer-connect` against an ESP32C6 guest launched via `veer-vm --backend custom`.
+
+### Root cause of the failing run
+
+**PowerShell ScriptBlock stripping** — In PowerShell, `{kernel}` without quotes is a ScriptBlock literal. When coerced to string it produces `"kernel"` (braces stripped). `veer-vm` receives the arg `kernel` instead of `{kernel}`, so the template substitution `a.replace("{kernel}", &kernel_path)` never matches, and QEMU is invoked as `-kernel kernel` (a nonexistent file). QEMU exits non-zero → veer-vm exits 1 → port 2323 never opens → `veer-connect` also fails.
+
+`scripts/run-veer-vm-windows.ps1` currently only supports `-Arch x86_64`, so ESP32C6 (`riscv32`) testing must use direct `veer-vm.exe` invocation.
+
+### Correct Windows launch pattern (ESP32C6)
+
+The `{kernel}` template arg must be single-quoted so PowerShell passes the literal string:
+
+```powershell
+$kernel = '.\target\riscv32imc-unknown-none-elf\debug\kernel-qemu-esp32c6'
+& .\target\x86_64-pc-windows-msvc\debug\veer-vm.exe `
+  --backend custom --arch riscv32 `
+  --kernel $kernel --memory 128 --cpus 1 `
+  --custom-runner 'C:\Program Files\qemu\qemu-system-riscv32.exe' `
+  --custom-arg=-M --custom-arg=virt `
+  --custom-arg=-m --custom-arg=128M `
+  --custom-arg=-nographic `
+  --custom-arg=-bios --custom-arg=none `
+  --custom-arg=-kernel --custom-arg='{kernel}' `
+  --custom-arg=-netdev --custom-arg=user,id=n0,hostfwd=tcp::2323-:2323 `
+  --custom-arg=-device --custom-arg=virtio-net-device,netdev=n0
+```
+
+Or avoid the template entirely and pass the kernel path directly (most robust):
+
+```powershell
+$kernel = (Resolve-Path .\target\riscv32imc-unknown-none-elf\debug\kernel-qemu-esp32c6).Path
+& .\target\x86_64-pc-windows-msvc\debug\veer-vm.exe `
+  --backend custom --arch riscv32 `
+  --kernel $kernel --memory 128 --cpus 1 `
+  --custom-runner 'C:\Program Files\qemu\qemu-system-riscv32.exe' `
+  --custom-arg=-M --custom-arg=virt `
+  --custom-arg=-m --custom-arg=128M `
+  --custom-arg=-nographic `
+  --custom-arg=-bios --custom-arg=none `
+  --custom-arg=-kernel --custom-arg=$kernel `
+  --custom-arg=-netdev --custom-arg=user,id=n0,hostfwd=tcp::2323-:2323 `
+  --custom-arg=-device --custom-arg=virtio-net-device,netdev=n0
+```
+
+### Port conflict check (required)
+
+Before starting the guest, verify the forwarded port is free:
+
+```powershell
+Get-NetTCPConnection -LocalPort 2323 -State Listen
+```
+
+If occupied, either stop that process or move to another host port (for example `4023`) and connect with:
+
+```powershell
+.\target\x86_64-pc-windows-msvc\debug\veer-connect.exe shell 127.0.0.1 4023
+```
+
+### Validation checklist
+
+- Ensure `{kernel}` is single-quoted or the kernel path is expanded before launch.
+- Launch `veer-vm` in a background terminal and keep the process running.
+- Wait for QEMU boot output before connecting (or poll the port).
+- Confirm a listener exists: `Get-NetTCPConnection -LocalPort 2323 -State Listen`
+- Run `veer-connect shell <host> <port>` only after listener confirmation.
+- If connect still fails, capture both `veer-vm` stderr and `Get-NetTCPConnection` output for the same run.
+
 ---
 
-_Last updated: 2026-04-25_
+_Last updated: 2026-05-03_

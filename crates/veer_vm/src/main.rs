@@ -154,6 +154,56 @@ struct Cli {
     /// macOS-only bring-up knob; has no effect unless `--hvf-run-once` is set.
     #[arg(long, default_value_t = false)]
     hvf_inject_timer: bool,
+
+    /// Host backend selection.
+    ///
+    /// On Windows:
+    /// - `auto`   chooses qemu unless a custom runner is provided
+    /// - `qemu`   forces QEMU+WHPX
+    /// - `hyperv` runs via Hyper-V cmdlets
+    /// - `custom` runs an external custom launcher
+    #[arg(long, value_enum, default_value_t = HostBackendArg::Auto)]
+    backend: HostBackendArg,
+
+    /// Path to a custom guest runner executable (Windows-only).
+    ///
+    /// If set, `--backend auto` behaves as `--backend custom`.
+    #[arg(long)]
+    custom_runner: Option<PathBuf>,
+
+    /// Argument passed to the custom runner (Windows-only).
+    ///
+    /// Tokens are expanded:
+    /// - `{kernel}` `{memory_mib}` `{cpus}` `{arch}`
+    /// - `{disk}` `{disk_ro}` `{mac}`
+    ///
+    /// May be specified multiple times.
+    #[arg(long = "custom-arg")]
+    custom_args: Vec<String>,
+
+    /// Hyper-V virtual switch name (Windows-only).
+    #[arg(long)]
+    hyperv_switch: Option<String>,
+
+    /// Hyper-V VM name override (Windows-only).
+    #[arg(long)]
+    hyperv_vm_name: Option<String>,
+
+    /// Keep Hyper-V VM definition after shutdown (Windows-only).
+    #[arg(long, default_value_t = false)]
+    hyperv_keep_vm: bool,
+
+    /// Run Hyper-V backend preflight checks and exit (Windows-only).
+    #[arg(long, default_value_t = false)]
+    hyperv_health_check: bool,
+
+    /// Create Hyper-V disk if missing (Windows-only).
+    #[arg(long, default_value_t = false)]
+    hyperv_create_disk_if_missing: bool,
+
+    /// Size in GiB when creating a new Hyper-V disk (Windows-only).
+    #[arg(long, default_value_t = 16)]
+    hyperv_disk_size_gib: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -172,6 +222,18 @@ enum VmnetModeArg {
     Shared,
     #[value(name = "host")]
     Host,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum HostBackendArg {
+    #[value(name = "auto")]
+    Auto,
+    #[value(name = "qemu")]
+    Qemu,
+    #[value(name = "hyperv")]
+    Hyperv,
+    #[value(name = "custom")]
+    Custom,
 }
 
 impl ArchArg {
@@ -251,6 +313,20 @@ fn main() -> Result<()> {
     if cli.vmnet.is_some() {
         anyhow::bail!("--vmnet is macOS-only");
     }
+    if cli.backend != HostBackendArg::Auto
+        || cli.custom_runner.is_some()
+        || !cli.custom_args.is_empty()
+        || cli.hyperv_switch.is_some()
+        || cli.hyperv_vm_name.is_some()
+        || cli.hyperv_keep_vm
+        || cli.hyperv_health_check
+        || cli.hyperv_create_disk_if_missing
+        || cli.hyperv_disk_size_gib != 16
+    {
+        anyhow::bail!(
+            "--backend/--custom-runner/--custom-arg/--hyperv-* are Windows-only"
+        );
+    }
     let restore_path = cli.restore.clone();
     let boot = match (cli.kernel, cli.restore) {
         (Some(kernel), None) => config::BootSource::Kernel(kernel),
@@ -302,6 +378,20 @@ fn main() -> Result<()> {
     if cli.tap.is_some() && cli.vmnet.is_some() {
         anyhow::bail!("--tap and --vmnet are mutually exclusive");
     }
+    if cli.backend != HostBackendArg::Auto
+        || cli.custom_runner.is_some()
+        || !cli.custom_args.is_empty()
+        || cli.hyperv_switch.is_some()
+        || cli.hyperv_vm_name.is_some()
+        || cli.hyperv_keep_vm
+        || cli.hyperv_health_check
+        || cli.hyperv_create_disk_if_missing
+        || cli.hyperv_disk_size_gib != 16
+    {
+        anyhow::bail!(
+            "--backend/--custom-runner/--custom-arg/--hyperv-* are Windows-only"
+        );
+    }
     if cli.hvf_preflight {
         return backend::hvf::preflight();
     }
@@ -348,8 +438,75 @@ fn main() -> Result<()> {
     backend::hvf::run(cfg)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    validate_cpus(cli.cpus)?;
+
+    if cli.hvf_preflight || cli.hvf_probe || cli.probe || cli.hvf_vcpu_probe || cli.hvf_run_once || cli.hvf_inject_timer {
+        anyhow::bail!("HVF options are macOS-only");
+    }
+    if cli.vmnet.is_some() {
+        anyhow::bail!("--vmnet is macOS-only");
+    }
+
+    let boot = match (cli.kernel, cli.restore) {
+        (Some(kernel), None) => config::BootSource::Kernel(kernel),
+        (None, Some(snapshot)) => config::BootSource::Snapshot(snapshot),
+        (Some(_), Some(_)) => anyhow::bail!("pass either --kernel or --restore, not both"),
+        (None, None) => anyhow::bail!("one of --kernel or --restore is required"),
+    };
+
+    let mac = match &cli.mac {
+        Some(s) => parse_mac(s).context("parsing --mac")?,
+        None => default_mac(),
+    };
+
+    let cfg = config::VmConfig {
+        boot,
+        guest_arch: cli.arch.to_guest_arch(),
+        cpus: cli.cpus,
+        memory_bytes: cli.memory * 1024 * 1024,
+        disk_path: cli.disk,
+        disk_read_only: cli.disk_ro,
+        tap_name: cli.tap,
+        vmnet_mode: None,
+        mac,
+        snapshot_save: cli.snapshot_save,
+        cpu_throttle_ms: cli.cpu_throttle_ms,
+        sensor_feed: cli.sensor_feed,
+    };
+
+    let kind = match cli.backend {
+        HostBackendArg::Auto => {
+            if cli.custom_runner.is_some() {
+                backend::windows::WindowsBackendKind::Custom
+            } else {
+                backend::windows::WindowsBackendKind::Qemu
+            }
+        }
+        HostBackendArg::Qemu => backend::windows::WindowsBackendKind::Qemu,
+        HostBackendArg::Hyperv => backend::windows::WindowsBackendKind::Hyperv,
+        HostBackendArg::Custom => backend::windows::WindowsBackendKind::Custom,
+    };
+
+    let opts = backend::windows::WindowsBackendOptions {
+        kind,
+        custom_runner: cli.custom_runner,
+        custom_args: cli.custom_args,
+        hyperv_switch: cli.hyperv_switch,
+        hyperv_vm_name: cli.hyperv_vm_name,
+        hyperv_keep_vm: cli.hyperv_keep_vm,
+        hyperv_health_check: cli.hyperv_health_check,
+        hyperv_create_disk_if_missing: cli.hyperv_create_disk_if_missing,
+        hyperv_disk_size_gib: cli.hyperv_disk_size_gib,
+    };
+
+    backend::windows::run(cfg, opts)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn main() -> Result<()> {
     let _ = Cli::parse();
-    anyhow::bail!("veer-vm currently supports Linux (KVM) and macOS (HVF skeleton)");
+    anyhow::bail!("veer-vm currently supports Linux (KVM), macOS (HVF), and Windows (QEMU/WHPX)");
 }

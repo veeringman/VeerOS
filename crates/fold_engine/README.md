@@ -10,6 +10,8 @@ A **Fold** is a lightweight, secure, rapidly-deployable runtime unit — not a c
 - **macOS**: Stub (planned, basic CLI only)
 - **Windows**: Stub (planned)
 
+**macOS remains stubbed; Windows provides process lifecycle backend.**
+
 **Supported guest types:**
 - Native processes (Linux)
 - VeerOS VMs (via `veer-vm`, supports x86_64 and riscv32 guests)
@@ -26,7 +28,7 @@ Phase 8B+. Linux backend now supports:
 - structured launcher→parent error reporting pipe
 - VeerOS VM launch (x86_64, riscv32 via QEMU TCG fallback)
 
-**macOS and Windows backends are stubs.**
+**macOS backend is stubbed; Windows has a functional process backend.**
 
 ## Platform backend status
 
@@ -37,7 +39,7 @@ Phase 8B+. Linux backend now supports:
 | Linux     | veer-vm (KVM)   | riscv32 VM         | Stable         |
 | Linux     | veer-vm (QEMU)  | riscv32 VM         | Stable         |
 | macOS     | stub            | (planned)          | Not implemented|
-| Windows   | stub            | (planned)          | Not implemented|
+| Windows   | process backend | host process / VM wrapper | Functional |
 
 **Note:** For riscv32 VMs on non-riscv64 hosts, QEMU TCG is required (`qemu-system-riscv32`).
 

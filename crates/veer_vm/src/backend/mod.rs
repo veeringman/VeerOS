@@ -60,3 +60,6 @@ pub mod hvf_aarch64;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use hvf_aarch64 as hvf;
+
+#[cfg(target_os = "windows")]
+pub mod windows;

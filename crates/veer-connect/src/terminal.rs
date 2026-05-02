@@ -4,13 +4,16 @@
 //! stdin/stdout and the encrypted TCP connection.  Ctrl-] disconnects.
 
 use crate::vsc::{self, SecureChannel, MAX_FRAME_PT};
+#[cfg(unix)]
 use libc::{self, termios};
 
 use std::io::{self, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 /// Run the interactive terminal loop.
+#[cfg(unix)]
 pub fn run(stream: &TcpStream, ch: &mut SecureChannel) {
     // Save original terminal settings.
     let stdin_fd = io::stdin().as_raw_fd();
@@ -46,6 +49,99 @@ pub fn run(stream: &TcpStream, ch: &mut SecureChannel) {
     }
 }
 
+#[cfg(not(unix))]
+pub fn run(stream: &TcpStream, ch: &mut SecureChannel) {
+    eprintln!("[vsc] interactive shell on this host uses line mode (Ctrl+C to exit)");
+
+    let stdin = io::stdin();
+    let mut buf = [0u8; MAX_FRAME_PT];
+
+    // Show the initial guest output (login banner + prompt) before blocking
+    // on stdin.  Without this, the Windows line-mode loop would block on
+    // stdin.read_line() and never display the login: / password: prompts.
+    if !drain_guest_output(stream, ch, &mut buf) {
+        return;
+    }
+
+    loop {
+        let mut line = String::new();
+        match stdin.read_line(&mut line) {
+            Ok(0) => {
+                // stdin EOF — drain any final response from the guest then exit.
+                drain_guest_output(stream, ch, &mut buf);
+                break;
+            }
+            Ok(_) => {
+                vsc::send_frame(stream, ch, line.as_bytes());
+                // Drain all frames the guest sends in response (may be several
+                // for multi-line output like `help`).
+                if !drain_guest_output(stream, ch, &mut buf) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Drain all frames the guest has buffered, writing them to stdout.
+///
+/// Uses `TcpStream::peek` with a short read timeout to detect when no more
+/// data is arriving without permanently blocking.  Returns `false` if the
+/// connection was closed by the peer.
+#[cfg(not(unix))]
+fn drain_guest_output(stream: &TcpStream, ch: &mut SecureChannel, buf: &mut [u8]) -> bool {
+    use std::io::ErrorKind;
+    use std::time::Duration;
+
+    // Idle window: if no new byte arrives within this period, assume the
+    // guest has finished sending its current response.
+    const IDLE_MS: u64 = 800;
+
+    stream
+        .set_read_timeout(Some(Duration::from_millis(IDLE_MS)))
+        .ok();
+
+    loop {
+        let mut peek = [0u8; 1];
+        match stream.peek(&mut peek) {
+            Ok(0) => {
+                // Peer closed the connection.
+                stream.set_read_timeout(None).ok();
+                return false;
+            }
+            Ok(_) => {
+                // Data is available — read a full frame without a timeout so
+                // read_exact doesn't bail mid-frame.
+                stream.set_read_timeout(None).ok();
+                match vsc::recv_frame(stream, ch, buf) {
+                    Some(n) => {
+                        let _ = io::stdout().write_all(&buf[..n]);
+                        let _ = io::stdout().flush();
+                    }
+                    None => return false,
+                }
+                // Re-arm the idle window for the next frame.
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(IDLE_MS)))
+                    .ok();
+            }
+            Err(ref e)
+                if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
+            {
+                // Idle window elapsed — no more data for now.
+                stream.set_read_timeout(None).ok();
+                return true;
+            }
+            Err(_) => {
+                stream.set_read_timeout(None).ok();
+                return false;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn terminal_loop(stream: &TcpStream, ch: &mut SecureChannel) -> Result<(), String> {
     let sock_fd = stream.as_raw_fd();
     let stdin_fd = io::stdin().as_raw_fd();
@@ -131,6 +227,7 @@ fn terminal_loop(stream: &TcpStream, ch: &mut SecureChannel) -> Result<(), Strin
         }
     }
 }
+#[cfg(unix)]
 fn get_termios(fd: i32) -> Option<termios> {
     let mut t: termios = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::tcgetattr(fd, &mut t as *mut termios) };
@@ -141,12 +238,14 @@ fn get_termios(fd: i32) -> Option<termios> {
     }
 }
 
+#[cfg(unix)]
 fn set_termios(fd: i32, t: &termios) {
     unsafe {
         libc::tcsetattr(fd, libc::TCSADRAIN, t as *const termios);
     }
 }
 
+#[cfg(unix)]
 fn set_raw_mode(fd: i32) {
     if let Some(mut t) = get_termios(fd) {
         unsafe {
