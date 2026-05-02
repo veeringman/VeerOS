@@ -191,7 +191,7 @@ not a userspace framework.
 `memory_query`, `fabric_status`, `sched_stats`, `agent_count`.
 
 ➡️ **Full design:** [Architecture Documentation](docs/architecture.md)
-➡️ **macOS HVF dev loop:** [macOS Development Guide](docs/macos-dev.md)
+➡️ **macOS HVF dev loop:** [macOS Development Guide](docs/macos-dev.md) · [macOS VM Manual](docs/macos-vm-manual.txt)
 
 ---
 
@@ -302,6 +302,43 @@ Use `./scripts/run-qemu-pc.sh` to attach the required `virtio-net` device and fo
 to the guest SSH service. To allow LAN access from another machine, leave the default
 `HOST_BIND_ADDR=0.0.0.0`; to restrict access to the local host only, run with `HOST_BIND_ADDR=127.0.0.1`.
 
+### macOS Apple Silicon — AArch64 HVF VM Kit
+
+VeerOS runs natively on Apple Silicon using Hypervisor.framework — no QEMU, no Docker.
+The kit ships with a VM manager, a pre-signed runner, a FAT32 persistent disk, SSH, and
+a built-in Veer secure console.
+
+```bash
+# Deploy the macOS VM kit (builds kernel, host tools, signs binary, formats disk)
+./scripts/deploy-macos-veer-vm.sh
+
+# Create and start a normal VM instance
+~/VeerOS-VMs/veeros-vm create --name dev1 --target aarch64-hvf --mode normal
+sudo -v && ~/VeerOS-VMs/veeros-vm start --name dev1
+
+# Connect via Veer secure console
+~/VeerOS-VMs/veeros-vm connect --name dev1
+
+# Connect via SSH  (guest: root / toor)
+ssh -o StrictHostKeyChecking=no root@192.168.2.100
+
+# Create and start a Fold-managed instance
+~/VeerOS-VMs/veeros-vm create --name fold1 --target aarch64-hvf --mode folded
+sudo -v && ~/VeerOS-VMs/veeros-vm start --name fold1
+```
+
+Guest services after boot:
+
+| Service | Address |
+|---|---|
+| SSH | `root@192.168.2.100:22` (password: `toor`) |
+| Veer secure console | `192.168.2.100:2323` |
+| Persistent disk | mounted at `/disk` (FAT32) |
+
+Manager commands: `create` · `start` · `stop` · `list` · `status` · `logs [--follow]` · `connect` · `ssh` · `fold`
+
+Full reference: `~/VeerOS-VMs/VeerOS-VM-Manual.txt` or [docs/macos-vm-manual.txt](docs/macos-vm-manual.txt)
+
 ### Demo Session
 
 ```
@@ -335,7 +372,9 @@ veeros> memory set deploy.target rpi5-edge-01
 
 - **Hardware Spectrum** — from 320 KB ESP32 microcontrollers (C3/C6/H2) through
   Raspberry Pi 5 SBCs to KVM-accelerated virtual machines on cloud metal; Xtensa
-  (ESP32-S3) and ARM64 bring-up in progress.
+  (ESP32-S3) and ARM64 in-progress. On **Apple Silicon** VeerOS runs directly under
+  Hypervisor.framework (`crates/kernel/aarch64_virt`) with virtio-mmio net + block,
+  FAT32 persistent disk, SSH, and a built-in Veer secure console — no QEMU required.
 
 - **Wireless Radio Stack** — Wi-Fi (WPA2/WPA3 STA/AP), BLE 5.0 (GAP/GATT/HOGP),
   and IEEE 802.15.4 with Zigbee, Thread, and Matter layers; all three radios

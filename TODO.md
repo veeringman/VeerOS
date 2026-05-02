@@ -2,6 +2,68 @@
 
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
+## [2026-05-02] Session Sync — macOS AArch64 HVF VM Kit, Shell/Editor Fixes, Persistent Disk
+
+### Closed in this session
+
+#### macOS Apple Silicon VM Kit (AArch64 HVF)
+- [x] New kernel crate `crates/kernel/aarch64_virt` — full VeerOS guest for Apple Silicon HVF
+  - [x] PL011 UART, ARM generic timer, VFS (RamFS 64 KiB), FAT32 disk at `/disk`, virtio-mmio net/blk
+  - [x] TCP/IP stack (smoltcp), SSH server (port 22), Veer secure console (VSC port 2323)
+  - [x] Guest IP `192.168.2.100/24`, login `root` / `toor`
+  - [x] Boot validated: `[boot] vblk0 FAT32 mounted at /disk`, `[net] 192.168.2.100/24`, `[ssh] SSH server ready on port 22`
+- [x] New SoC crate `crates/soc/aarch64_virt` — PL011 UART, ARM generic timer, virtio-mmio net/blk drivers
+- [x] New HVF backend `crates/veer_vm/src/backend/hvf_aarch64.rs` — Apple Silicon Hypervisor.framework runner
+  - [x] virtio-mmio v2 net device with macOS vmnet (shared/host mode) via `vmnet_shim.c`
+  - [x] virtio-mmio v2 block device with raw `.raw` disk image
+  - [x] Guest kick thread (2 ms) for RX delivery; guest RAM mapped at IPA `0x40000000`
+- [x] `crates/veer_vm/src/vmnet_shim.c` — C shim for macOS vmnet framework
+- [x] HVF-only entitlement (`com.apple.security.hypervisor`); removed `com.apple.vm.networking` which caused exit 137 on this host
+- [x] Build script `scripts/build-aarch64-virt.sh`
+- [x] Deploy script `scripts/deploy-macos-veer-vm.sh` — builds kernel + host tools, signs `veer-vm`, creates/formats FAT32 disk, writes launcher/connect/readme/manual
+- [x] VM manager `scripts/veeros-vm-manager.sh` — installed as `~/VeerOS-VMs/veeros-vm`; supports `create/start/stop/list/status/logs/connect/ssh/fold` for normal and folded VMs across targets: `aarch64-hvf`, `raspi5`, `esp32c6`, `qemu-esp32c6`, `qemu-pc`
+- [x] Deployed kit at `~/VeerOS-VMs/VeerOS-AArch64-HVF` with `bin/`, `images/`, `disks/`
+- [x] FAT32 raw disk formatting fixed for macOS: `hdiutil attach -imagekey diskimage-class=CRawDiskImage` + `newfs_msdos -F 32`
+- [x] Smoke test script `scripts/aarch64-virt-connect-smoke.sh`
+
+#### Shell and Editor Fixes
+- [x] `vi FILE` / `vim FILE` now opens the file from VFS (reads via `vfs_read_file`), sets filename correctly, and writes back on `:w` / `:wq` / `:x` via `vfs_write_file`
+  - [x] Added `write_contents_to_slice()` on `Vi` — writes buffer to a `&mut [u8]` without `fmt::Write`
+  - [x] Added `run_with_save()` with caller-supplied save hook; `:w` now triggers `SaveContinue` result (write then continue) rather than just marking dirty=false
+  - [x] `SaveContinue` variant added to `CmdResult`; `:w` and `:wq`/`:x` both go through the hook
+- [x] Shell backspace redraw fixed — `line_ed.rs` now emits `\x08` (BS) to move terminal cursor before calling `delete_at_cursor`; previously redraw left ghost characters
+- [x] `cmd_ls`: ignores flag args (e.g. `ls -l` now lists `.` instead of erroring on `-l`)
+- [x] `cmd_cat`: empty-file handled correctly — `vfs_read_file` returning 0 checked against `path_exists()`; silent for empty files, error only when file is missing
+- [x] `path_exists()` helper added to `Shell` using `vfs_stat`
+- [x] AArch64 target: `full-vi` feature with 2 MiB save buffer constant; kernel stack increased to 16 MiB in linker script
+
+#### FAT32 Persistence
+- [x] `crates/microkernel/src/fat32.rs`: `update_dir_entry`, `mark_dir_entry_deleted`, `unlink_file`; metadata written on file write/truncate
+
+#### Docs
+- [x] `docs/macos-vm-manual.txt` — 417-line plain-text manual covering install paths, fast-path VM start, manager commands, create options, direct kit launch, filesystem/disk, shell/vim notes, networking checks, signing notes, rebuild/redeploy, troubleshooting, current limitations
+- [x] Deploy script copies `docs/macos-vm-manual.txt` to `~/VeerOS-VMs/VeerOS-VM-Manual.txt` on each deploy
+
+### Remaining / Next
+
+#### macOS AArch64 VM
+- [ ] SSH password authentication — currently SSH handshake succeeds but `ssh root@192.168.2.100` exits 255; investigate userauth path in `crates/ssh/src/server.rs`
+- [ ] `veeros-vm ssh` wraps raw `ssh` without `-o PasswordAuthentication=yes` — consider adding `-o PreferredAuthentications=password`
+- [ ] FAT32: long filenames (LFN) not yet implemented; only 8.3-style names on `/disk`
+- [ ] FAT32: directory creation under `/disk` not yet implemented
+- [ ] `veer-vm --vmnet shared` requires sudo; investigate whether `com.apple.vm.networking` can be used without AMFI kill on non-admin users
+- [ ] QEMU launch integration for `qemu-esp32c6` and `qemu-pc` manager targets (currently staged records only)
+- [ ] RasPI5 and ESP32C6 hardware deployment workflows not yet integrated into manager
+
+#### Shell / Editor
+- [ ] Shell: `cp` command not yet implemented
+- [ ] Shell: pipe support (`cmd1 | cmd2`)
+- [ ] vi/vim: `:wq` for new (never-existed) files creates the file — validate FAT32 path restrictions applied correctly
+- [ ] vi/vim: long-file truncation behavior when buffer exceeds `VI_SAVE_BUF_SIZE` (currently `write_contents_to_slice` returns `None`)
+- [ ] Shell: `find` command
+
+---
+
 ## [2026-04-28] Session Sync — Aura / Graph Fabric / VAS Architecture
 - Architecture leap: defined the next-generation VeerOS communication and trust model.
   - **Fold** = secure compute sandbox (current `fold_engine` + `veer-vm`) — name preserved for runtime cell.
