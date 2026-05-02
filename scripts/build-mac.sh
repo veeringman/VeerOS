@@ -10,7 +10,6 @@ MANIFEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VEER_VM_CRATE="${MANIFEST_DIR}/crates/veer_vm"
 cd "${MANIFEST_DIR}"
 
-TARGET_TRIPLE="${VEER_VM_MAC_TARGET:-x86_64-apple-darwin}"
 PROFILE="${VEER_VM_MAC_PROFILE:-debug}"
 TARGET_DIR_RAW="${CARGO_TARGET_DIR:-${MANIFEST_DIR}/target}"
 if [[ "${TARGET_DIR_RAW}" = /* ]]; then
@@ -19,18 +18,46 @@ else
     TARGET_DIR="${MANIFEST_DIR}/${TARGET_DIR_RAW}"
 fi
 
-VEER_VM_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/veer-vm"
-FOLD_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/fold"
-VEER_CONNECT_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/veer-connect"
 ENTITLEMENTS="${VEER_VM_CRATE}/veer-vm.entitlements"
 DEFAULT_TARGET_DIR="${MANIFEST_DIR}/target"
 
+native_macos_target() {
+    case "$(uname -m)" in
+        arm64|aarch64) echo "aarch64-apple-darwin" ;;
+        x86_64|amd64) echo "x86_64-apple-darwin" ;;
+        *)
+            echo "ERROR: unsupported macOS host architecture: $(uname -m)" >&2
+            return 1
+            ;;
+    esac
+}
+
+resolve_targets() {
+    local spec="${VEER_VM_MAC_TARGET:-native}"
+    local native
+    native="$(native_macos_target)"
+
+    case "${spec}" in
+        native) echo "${native}" ;;
+        all) echo "x86_64-apple-darwin aarch64-apple-darwin" ;;
+        *) echo "${spec//,/ }" ;;
+    esac
+}
+
+ensure_rust_target() {
+    local target="$1"
+    if command -v rustup >/dev/null 2>&1; then
+        rustup target add "${target}"
+    fi
+}
+
 build_pkg_for_target() {
     local pkg="$1"
+    local target="$2"
     if [[ "${PROFILE}" == "release" ]]; then
-        cargo build -p "${pkg}" --target "${TARGET_TRIPLE}" --release
+        cargo build -p "${pkg}" --target "${target}" --release
     else
-        cargo build -p "${pkg}" --target "${TARGET_TRIPLE}"
+        cargo build -p "${pkg}" --target "${target}"
     fi
 }
 
@@ -156,50 +183,84 @@ require_binary() {
 require_tool cargo
 require_tool codesign
 
-# Build veer-vm for macOS
-build_pkg_for_target veer_vm
-sign_and_verify "${VEER_VM_BIN}" "${ENTITLEMENTS}"
-
-# Also sign common default-output paths if they exist, so verification against
-# ./target/... does not accidentally hit a stale unsigned artifact.
-for candidate in \
-    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/debug/veer-vm" \
-    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/release/veer-vm"; do
-    if [[ "${candidate}" != "${VEER_VM_BIN}" ]]; then
-        sign_existing_binary_if_present "${candidate}"
-    fi
-done
-
-# Build fold_engine for macOS
-build_pkg_for_target fold_engine
-require_binary "${FOLD_BIN}" "fold"
-
-# Build veer-connect for macOS
-build_pkg_for_target veer-connect
-require_binary "${VEER_CONNECT_BIN}" "veer-connect"
-
-# Final check: ensure veer-vm stayed signed after the complete build pipeline.
-if ! codesign --verify --verbose=4 "${VEER_VM_BIN}" >/dev/null 2>&1 || ! verify_entitlement "${VEER_VM_BIN}"; then
-    echo "⚠ veer-vm signature changed after workspace build; re-signing..."
-    sign_and_verify "${VEER_VM_BIN}" "${ENTITLEMENTS}"
+if [[ "${PROFILE}" != "debug" && "${PROFILE}" != "release" ]]; then
+    echo "ERROR: unsupported VEER_VM_MAC_PROFILE=${PROFILE} (expected debug or release)"
+    exit 1
 fi
 
-# Re-check default output paths too, in case a later build step touched them.
-for candidate in \
-    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/debug/veer-vm" \
-    "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/release/veer-vm"; do
-    if [[ "${candidate}" != "${VEER_VM_BIN}" && -f "${candidate}" ]]; then
-        if ! codesign --verify --verbose=4 "${candidate}" >/dev/null 2>&1 || ! verify_entitlement "${candidate}"; then
-            echo "⚠ ${candidate} is unsigned or missing entitlement; re-signing..."
-            sign_and_verify "${candidate}" "${ENTITLEMENTS}"
+TARGET_TRIPLES=()
+for target in $(resolve_targets); do
+    case "${target}" in
+        x86_64-apple-darwin|aarch64-apple-darwin) ;;
+        *)
+            echo "ERROR: unsupported macOS target: ${target}"
+            echo "Supported targets: native, all, x86_64-apple-darwin, aarch64-apple-darwin"
+            exit 1
+            ;;
+    esac
+    TARGET_TRIPLES+=("${target}")
+done
+
+BUILT_TARGETS=()
+
+for TARGET_TRIPLE in "${TARGET_TRIPLES[@]}"; do
+    VEER_VM_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/veer-vm"
+    FOLD_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/fold"
+    VEER_CONNECT_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/${PROFILE}/veer-connect"
+
+    echo "▶ Building macOS host tools for ${TARGET_TRIPLE} (${PROFILE})"
+    ensure_rust_target "${TARGET_TRIPLE}"
+
+    # Build veer-vm for macOS
+    build_pkg_for_target veer_vm "${TARGET_TRIPLE}"
+    sign_and_verify "${VEER_VM_BIN}" "${ENTITLEMENTS}"
+
+    # Also sign common default-output paths if they exist, so verification against
+    # ./target/... does not accidentally hit a stale unsigned artifact.
+    for candidate in \
+        "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/debug/veer-vm" \
+        "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/release/veer-vm"; do
+        if [[ "${candidate}" != "${VEER_VM_BIN}" ]]; then
+            sign_existing_binary_if_present "${candidate}"
         fi
+    done
+
+    # Build fold_engine for macOS
+    build_pkg_for_target fold_engine "${TARGET_TRIPLE}"
+    require_binary "${FOLD_BIN}" "fold"
+
+    # Build veer-connect for macOS
+    build_pkg_for_target veer-connect "${TARGET_TRIPLE}"
+    require_binary "${VEER_CONNECT_BIN}" "veer-connect"
+
+    # Final check: ensure veer-vm stayed signed after the complete build pipeline.
+    if ! codesign --verify --verbose=4 "${VEER_VM_BIN}" >/dev/null 2>&1 || ! verify_entitlement "${VEER_VM_BIN}"; then
+        echo "⚠ veer-vm signature changed after workspace build; re-signing..."
+        sign_and_verify "${VEER_VM_BIN}" "${ENTITLEMENTS}"
     fi
+
+    # Re-check default output paths too, in case a later build step touched them.
+    for candidate in \
+        "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/debug/veer-vm" \
+        "${DEFAULT_TARGET_DIR}/${TARGET_TRIPLE}/release/veer-vm"; do
+        if [[ "${candidate}" != "${VEER_VM_BIN}" && -f "${candidate}" ]]; then
+            if ! codesign --verify --verbose=4 "${candidate}" >/dev/null 2>&1 || ! verify_entitlement "${candidate}"; then
+                echo "⚠ ${candidate} is unsigned or missing entitlement; re-signing..."
+                sign_and_verify "${candidate}" "${ENTITLEMENTS}"
+            fi
+        fi
+    done
+
+    BUILT_TARGETS+=("${TARGET_TRIPLE}|${VEER_VM_BIN}|${FOLD_BIN}|${VEER_CONNECT_BIN}")
 done
 
 echo "✓ macOS build complete"
-echo "  target      : ${TARGET_TRIPLE}"
 echo "  profile     : ${PROFILE}"
-echo "  veer-vm bin : ${VEER_VM_BIN}"
-echo "  fold bin    : ${FOLD_BIN}"
-echo "  veer-connect: ${VEER_CONNECT_BIN}"
-echo "  verify      : codesign --verify --verbose=4 ${VEER_VM_BIN}"
+for entry in "${BUILT_TARGETS[@]}"; do
+    IFS='|' read -r target veer_vm_bin fold_bin veer_connect_bin <<<"${entry}"
+    echo "  target      : ${target}"
+    echo "  veer-vm bin : ${veer_vm_bin}"
+    echo "  fold bin    : ${fold_bin}"
+    echo "  veer-connect: ${veer_connect_bin}"
+    echo "  verify      : codesign --verify --verbose=4 ${veer_vm_bin}"
+done

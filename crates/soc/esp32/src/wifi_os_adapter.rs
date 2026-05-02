@@ -124,8 +124,8 @@ const QUEUE_BUF_SIZE: usize = 2048;
 /// matching what the WiFi blobs expect from FreeRTOS QueueHandle_t.
 #[repr(C)]
 struct SimpleQueue {
-    pc_head: *mut u8,           // offset 0 — mimics FreeRTOS pcHead
-    pc_write_to: *mut u8,       // offset 4 — mimics FreeRTOS pcWriteTo
+    pc_head: *mut u8,     // offset 0 — mimics FreeRTOS pcHead
+    pc_write_to: *mut u8, // offset 4 — mimics FreeRTOS pcWriteTo
     item_size: usize,
     capacity: usize,
     head: usize,
@@ -194,7 +194,11 @@ fn queue_send_impl(q: &mut SimpleQueue, item: *const c_void) -> bool {
     }
     let offset = q.tail * q.item_size;
     unsafe {
-        ptr::copy_nonoverlapping(item as *const u8, q.data.as_mut_ptr().add(offset), q.item_size);
+        ptr::copy_nonoverlapping(
+            item as *const u8,
+            q.data.as_mut_ptr().add(offset),
+            q.item_size,
+        );
     }
     q.tail = (q.tail + 1) % q.capacity;
     q.count += 1;
@@ -232,8 +236,8 @@ struct SimpleSem {
     max: i32,
     in_use: bool,
     recursive: bool,
-    owner: usize,      // task id that holds the recursive mutex (0 = unowned)
-    recursion: u32,     // nesting depth for recursive mutex
+    owner: usize,   // task id that holds the recursive mutex (0 = unowned)
+    recursion: u32, // nesting depth for recursive mutex
 }
 
 static mut SEMS: [SimpleSem; MAX_SEMS] = [const {
@@ -271,7 +275,9 @@ fn alloc_sem(max: u32, init: u32) -> *mut c_void {
             s.recursive = false;
             s.owner = 0;
             s.recursion = 0;
-            unsafe { SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1); }
+            unsafe {
+                SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1);
+            }
             return s as *mut SimpleSem as *mut c_void;
         }
     }
@@ -288,7 +294,9 @@ fn alloc_recursive_mutex() -> *mut c_void {
             s.recursive = true;
             s.owner = 0;
             s.recursion = 0;
-            unsafe { SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1); }
+            unsafe {
+                SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1);
+            }
             return s as *mut SimpleSem as *mut c_void;
         }
     }
@@ -325,7 +333,10 @@ struct SimpleEventGroup {
 }
 
 static mut EVENT_GROUPS: [SimpleEventGroup; MAX_EVENT_GROUPS] = [const {
-    SimpleEventGroup { bits: 0, in_use: false }
+    SimpleEventGroup {
+        bits: 0,
+        in_use: false,
+    }
 }; MAX_EVENT_GROUPS];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -372,14 +383,16 @@ static mut PHY_CALIBRATED: bool = false;
 static PHY_INIT_DATA: esp_wifi_sys::include::esp_phy_init_data_t =
     esp_wifi_sys::include::esp_phy_init_data_t {
         params: [
-            0x01, 0x00, 0x50, 0x50, 0x50, 0x50, 0x50, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28, 0x28, 0x28,
-            0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28, 0x28, 0x28, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9b, 0x00,
+            0x01, 0x00, 0x50, 0x50, 0x50, 0x50, 0x50, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28,
+            0x28, 0x28, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28, 0x28, 0x28, 0x00, 0x00, 0x00,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x9b, 0x00,
         ],
     };
 
@@ -393,8 +406,7 @@ static mut PHY_CAL_DATA: esp_wifi_sys::include::esp_phy_calibration_data_t =
 
 /// PHY digital register backup memory (21 × 4 = 84 bytes).
 const SOC_PHY_DIG_REGS_MEM_SIZE: usize = 21 * 4;
-static mut SOC_PHY_DIG_REGS_MEM: [u8; SOC_PHY_DIG_REGS_MEM_SIZE] =
-    [0u8; SOC_PHY_DIG_REGS_MEM_SIZE];
+static mut SOC_PHY_DIG_REGS_MEM: [u8; SOC_PHY_DIG_REGS_MEM_SIZE] = [0u8; SOC_PHY_DIG_REGS_MEM_SIZE];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WiFi interrupt ISR storage & dispatch
@@ -454,8 +466,43 @@ static mut BLOB_INTS_OFF_COUNT: u32 = 0;
 static mut BLOB_INTS_SHADOW_MASK: u32 = 0;
 
 /// Return diagnostic counters.
-pub fn wifi_diag(
-) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+pub fn wifi_diag() -> (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+) {
     unsafe {
         let plic_en = core::ptr::read_volatile((PLIC_BASE + PLIC_MXINT_ENABLE) as *const u32);
         let emip = core::ptr::read_volatile((PLIC_BASE + PLIC_EMIP_STATUS) as *const u32);
@@ -466,17 +513,35 @@ pub fn wifi_diag(
         core::arch::asm!("csrr {0}, mip", out(reg) mip, options(nomem, nostack));
         let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
         let intc_type = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_TYPE) as *const u32);
-        let intc_pri_wifi = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT * 4) as *const u32);
-        let intc_pri_wifi_alt = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT_ALT * 4) as *const u32);
-        let intc_thresh = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_THRESH) as *const u32);
-        let map_mac = core::ptr::read_volatile((INTMATRIX_BASE + WIFI_MAC_INTR_SOURCE * 4) as *const u32);
-        let map_mac_nmi = core::ptr::read_volatile((INTMATRIX_BASE + WIFI_MAC_NMI_SOURCE * 4) as *const u32);
-        let map_pwr = core::ptr::read_volatile((INTMATRIX_BASE + WIFI_PWR_INTR_SOURCE * 4) as *const u32);
-        let st0 = core::ptr::read_volatile((INTMATRIX_BASE + INTC_CORE0_INTR_STATUS0) as *const u32);
-        let st1 = core::ptr::read_volatile((INTMATRIX_BASE + INTC_CORE0_INTR_STATUS1) as *const u32);
+        let intc_pri_wifi = core::ptr::read_volatile(
+            (INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT * 4) as *const u32,
+        );
+        let intc_pri_wifi_alt = core::ptr::read_volatile(
+            (INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT_ALT * 4) as *const u32,
+        );
+        let intc_thresh =
+            core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_THRESH) as *const u32);
+        let map_mac =
+            core::ptr::read_volatile((INTMATRIX_BASE + WIFI_MAC_INTR_SOURCE * 4) as *const u32);
+        let map_mac_nmi =
+            core::ptr::read_volatile((INTMATRIX_BASE + WIFI_MAC_NMI_SOURCE * 4) as *const u32);
+        let map_pwr =
+            core::ptr::read_volatile((INTMATRIX_BASE + WIFI_PWR_INTR_SOURCE * 4) as *const u32);
+        let st0 =
+            core::ptr::read_volatile((INTMATRIX_BASE + INTC_CORE0_INTR_STATUS0) as *const u32);
+        let st1 =
+            core::ptr::read_volatile((INTMATRIX_BASE + INTC_CORE0_INTR_STATUS1) as *const u32);
         // Compact blob set_intr calls: pack first 2 as (src0 << 16 | num0) and (src1 << 16 | num1)
-        let si0 = if BLOB_SET_INTR_COUNT > 0 { (BLOB_SET_INTR_SOURCE[0] << 16) | BLOB_SET_INTR_NUM[0] } else { 0xDEAD };
-        let si1 = if BLOB_SET_INTR_COUNT > 1 { (BLOB_SET_INTR_SOURCE[1] << 16) | BLOB_SET_INTR_NUM[1] } else { 0xDEAD };
+        let si0 = if BLOB_SET_INTR_COUNT > 0 {
+            (BLOB_SET_INTR_SOURCE[0] << 16) | BLOB_SET_INTR_NUM[0]
+        } else {
+            0xDEAD
+        };
+        let si1 = if BLOB_SET_INTR_COUNT > 1 {
+            (BLOB_SET_INTR_SOURCE[1] << 16) | BLOB_SET_INTR_NUM[1]
+        } else {
+            0xDEAD
+        };
         (
             WIFI_ISR_COUNT,
             plic_en,
@@ -545,7 +610,8 @@ pub fn setup_wifi_interrupts() {
 
         // Set priority 1 for WIFI_CPU_INT.
         core::ptr::write_volatile(
-            (PLIC_BASE + PLIC_MXINT_PRI_BASE + WIFI_CPU_INT * 4) as *mut u32, 1,
+            (PLIC_BASE + PLIC_MXINT_PRI_BASE + WIFI_CPU_INT * 4) as *mut u32,
+            1,
         );
 
         // Set level-triggered for WiFi line (clear type bit).
@@ -567,7 +633,10 @@ pub fn setup_wifi_interrupts() {
             (INTPRI_BASE + INTC_CPU_INT_TYPE) as *mut u32,
             intc_type & !(1 << WIFI_CPU_INT),
         );
-        core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT * 4) as *mut u32, 1);
+        core::ptr::write_volatile(
+            (INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT * 4) as *mut u32,
+            1,
+        );
         core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_THRESH) as *mut u32, 0);
         core::ptr::write_volatile(
             (INTPRI_BASE + INTC_CPU_INT_CLEAR) as *mut u32,
@@ -596,7 +665,9 @@ pub fn wifi_isr_dispatch(cpu_int: usize) -> bool {
     if cpu_int != WIFI_CPU_INT && cpu_int != WIFI_CPU_INT_ALT && cpu_int != 11 {
         return false;
     }
-    unsafe { WIFI_ISR_COUNT += 1; }
+    unsafe {
+        WIFI_ISR_COUNT += 1;
+    }
     let fnc = unsafe { WIFI_ISR_FN };
     if fnc.is_null() {
         return false;
@@ -615,12 +686,7 @@ unsafe extern "C" fn env_is_chip() -> bool {
     true
 }
 
-unsafe extern "C" fn set_intr(
-    _cpu_no: i32,
-    intr_source: u32,
-    _intr_num: u32,
-    _intr_prio: i32,
-) {
+unsafe extern "C" fn set_intr(_cpu_no: i32, intr_source: u32, _intr_num: u32, _intr_prio: i32) {
     // Record what the blob requests.
     let idx = unsafe { BLOB_SET_INTR_COUNT };
     if idx < 4 {
@@ -646,11 +712,7 @@ unsafe extern "C" fn clear_intr(_intr_source: u32, _intr_num: u32) {
     );
 }
 
-unsafe extern "C" fn set_isr(
-    _n: i32,
-    f: *mut c_void,
-    arg: *mut c_void,
-) {
+unsafe extern "C" fn set_isr(_n: i32, f: *mut c_void, arg: *mut c_void) {
     // Store the WiFi ISR handler. Both WIFI_MAC and WIFI_PWR use the same one.
     WIFI_ISR_FN = f;
     WIFI_ISR_ARG = arg;
@@ -680,7 +742,10 @@ unsafe extern "C" fn set_isr(
             (INTPRI_BASE + INTC_CPU_INT_TYPE) as *mut u32,
             intc_type & !(1 << WIFI_CPU_INT),
         );
-        core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT * 4) as *mut u32, 1);
+        core::ptr::write_volatile(
+            (INTPRI_BASE + INTC_CPU_INT_PRI_BASE + WIFI_CPU_INT * 4) as *mut u32,
+            1,
+        );
         core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_THRESH) as *mut u32, 0);
         core::ptr::write_volatile(
             (INTPRI_BASE + INTC_CPU_INT_CLEAR) as *mut u32,
@@ -697,7 +762,9 @@ unsafe extern "C" fn set_isr(
 }
 
 unsafe extern "C" fn ints_on(mask: u32) {
-    unsafe { BLOB_INTS_ON_MASK |= mask; }
+    unsafe {
+        BLOB_INTS_ON_MASK |= mask;
+    }
     unsafe {
         BLOB_INTS_ON_COUNT = BLOB_INTS_ON_COUNT.wrapping_add(1);
         BLOB_INTS_SHADOW_MASK |= mask;
@@ -705,7 +772,10 @@ unsafe extern "C" fn ints_on(mask: u32) {
     // Match upstream: only touch INTPRI cpu_int_enable.
     // Do NOT toggle PLIC or mie — those are set once during set_isr().
     let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
-    core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32, intc_en | mask);
+    core::ptr::write_volatile(
+        (INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32,
+        intc_en | mask,
+    );
 }
 unsafe extern "C" fn ints_off(mask: u32) {
     unsafe {
@@ -715,7 +785,10 @@ unsafe extern "C" fn ints_off(mask: u32) {
     // Match upstream: only touch INTPRI cpu_int_enable.
     // Do NOT toggle PLIC or mie — those are set once during set_isr().
     let intc_en = core::ptr::read_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *const u32);
-    core::ptr::write_volatile((INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32, intc_en & !mask);
+    core::ptr::write_volatile(
+        (INTPRI_BASE + INTC_CPU_INT_ENABLE) as *mut u32,
+        intc_en & !mask,
+    );
 }
 
 unsafe extern "C" fn is_from_isr() -> bool {
@@ -761,7 +834,11 @@ unsafe extern "C" fn semphr_take(semphr: *mut c_void, block_time_tick: u32) -> i
         // portMAX_DELAY (0xFFFFFFFF) → block indefinitely.
         if block_time_tick > 0 {
             SEM_TAKE_BLOCK_COUNT = SEM_TAKE_BLOCK_COUNT.wrapping_add(1);
-            let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 { u32::MAX } else { block_time_tick.max(500) };
+            let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
+                u32::MAX
+            } else {
+                block_time_tick.max(500)
+            };
             let mut i: u32 = 0;
             loop {
                 poll_timers();
@@ -937,7 +1014,11 @@ unsafe extern "C" fn queue_recv(
     // portMAX_DELAY (0xFFFFFFFF) → block indefinitely.
     if block_time_tick > 0 {
         QUEUE_RECV_BLOCK_COUNT = QUEUE_RECV_BLOCK_COUNT.wrapping_add(1);
-        let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 { u32::MAX } else { block_time_tick.max(500) };
+        let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
+            u32::MAX
+        } else {
+            block_time_tick.max(500)
+        };
         let mut i: u32 = 0;
         loop {
             poll_timers();
@@ -1027,7 +1108,11 @@ unsafe extern "C" fn event_group_wait_bits(
     block_time_tick: u32,
 ) -> u32 {
     if let Some(eg) = get_event_group(event) {
-        let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 { u32::MAX } else { block_time_tick.max(500) };
+        let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
+            u32::MAX
+        } else {
+            block_time_tick.max(500)
+        };
         let mut i: u32 = 0;
         loop {
             let val = eg.bits;
@@ -1165,7 +1250,9 @@ fn sys_task_id() -> usize {
 
 unsafe fn run_blob_task(idx: usize) -> ! {
     unsafe { CURRENT_BLOB_TASK = idx };
-    unsafe { BLOB_TASK_ENTRIES = BLOB_TASK_ENTRIES.wrapping_add(1); }
+    unsafe {
+        BLOB_TASK_ENTRIES = BLOB_TASK_ENTRIES.wrapping_add(1);
+    }
     let (func, param) = unsafe {
         let t = &BLOB_TASKS[idx];
         (t.func, t.param)
@@ -1177,10 +1264,18 @@ unsafe fn run_blob_task(idx: usize) -> ! {
     }
 }
 
-unsafe extern "C" fn blob_task_entry0() -> ! { unsafe { run_blob_task(0) } }
-unsafe extern "C" fn blob_task_entry1() -> ! { unsafe { run_blob_task(1) } }
-unsafe extern "C" fn blob_task_entry2() -> ! { unsafe { run_blob_task(2) } }
-unsafe extern "C" fn blob_task_entry3() -> ! { unsafe { run_blob_task(3) } }
+unsafe extern "C" fn blob_task_entry0() -> ! {
+    unsafe { run_blob_task(0) }
+}
+unsafe extern "C" fn blob_task_entry1() -> ! {
+    unsafe { run_blob_task(1) }
+}
+unsafe extern "C" fn blob_task_entry2() -> ! {
+    unsafe { run_blob_task(2) }
+}
+unsafe extern "C" fn blob_task_entry3() -> ! {
+    unsafe { run_blob_task(3) }
+}
 
 #[inline(always)]
 fn blob_task_entry_for(idx: usize) -> usize {
@@ -1234,7 +1329,9 @@ unsafe extern "C" fn task_create_pinned_to_core(
                 t.task_id = usize::MAX;
                 return 0;
             }
-            unsafe { BLOB_TASKS_SPAWNED += 1; }
+            unsafe {
+                BLOB_TASKS_SPAWNED += 1;
+            }
             return 1;
         }
     }
@@ -1448,18 +1545,50 @@ unsafe extern "C" fn esp_timer_get_time() -> i64 {
 }
 
 // NVS functions — all stubs (no persistent storage).
-unsafe extern "C" fn nvs_set_i8(_handle: u32, _key: *const c_char, _value: i8) -> c_int { -1 }
-unsafe extern "C" fn nvs_get_i8(_handle: u32, _key: *const c_char, _out: *mut i8) -> c_int { -1 }
-unsafe extern "C" fn nvs_set_u8(_handle: u32, _key: *const c_char, _value: u8) -> c_int { -1 }
-unsafe extern "C" fn nvs_get_u8(_handle: u32, _key: *const c_char, _out: *mut u8) -> c_int { -1 }
-unsafe extern "C" fn nvs_set_u16(_handle: u32, _key: *const c_char, _value: u16) -> c_int { -1 }
-unsafe extern "C" fn nvs_get_u16(_handle: u32, _key: *const c_char, _out: *mut u16) -> c_int { -1 }
-unsafe extern "C" fn nvs_open(_name: *const c_char, _mode: c_uint, _handle: *mut u32) -> c_int { -1 }
+unsafe extern "C" fn nvs_set_i8(_handle: u32, _key: *const c_char, _value: i8) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_get_i8(_handle: u32, _key: *const c_char, _out: *mut i8) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_set_u8(_handle: u32, _key: *const c_char, _value: u8) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_get_u8(_handle: u32, _key: *const c_char, _out: *mut u8) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_set_u16(_handle: u32, _key: *const c_char, _value: u16) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_get_u16(_handle: u32, _key: *const c_char, _out: *mut u16) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_open(_name: *const c_char, _mode: c_uint, _handle: *mut u32) -> c_int {
+    -1
+}
 unsafe extern "C" fn nvs_close(_handle: u32) {}
-unsafe extern "C" fn nvs_commit(_handle: u32) -> c_int { -1 }
-unsafe extern "C" fn nvs_set_blob(_handle: u32, _key: *const c_char, _value: *const c_void, _len: usize) -> c_int { -1 }
-unsafe extern "C" fn nvs_get_blob(_handle: u32, _key: *const c_char, _out: *mut c_void, _len: *mut usize) -> c_int { -1 }
-unsafe extern "C" fn nvs_erase_key(_handle: u32, _key: *const c_char) -> c_int { -1 }
+unsafe extern "C" fn nvs_commit(_handle: u32) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_set_blob(
+    _handle: u32,
+    _key: *const c_char,
+    _value: *const c_void,
+    _len: usize,
+) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_get_blob(
+    _handle: u32,
+    _key: *const c_char,
+    _out: *mut c_void,
+    _len: *mut usize,
+) -> c_int {
+    -1
+}
+unsafe extern "C" fn nvs_erase_key(_handle: u32, _key: *const c_char) -> c_int {
+    -1
+}
 
 unsafe extern "C" fn get_random(buf: *mut u8, len: usize) -> c_int {
     for i in 0..len {
@@ -1538,10 +1667,7 @@ unsafe extern "C" fn wifi_zalloc(size: usize) -> *mut c_void {
     unsafe { super::heap::calloc(1, size) }
 }
 
-unsafe extern "C" fn wifi_create_queue(
-    queue_len: c_int,
-    item_size: c_int,
-) -> *mut c_void {
+unsafe extern "C" fn wifi_create_queue(queue_len: c_int, item_size: c_int) -> *mut c_void {
     let h = alloc_queue(queue_len as usize, item_size as usize);
     h
 }
@@ -1553,48 +1679,79 @@ unsafe extern "C" fn wifi_delete_queue(queue: *mut c_void) {
 }
 
 // Coex functions — no-op (single radio, no coexistence needed).
-unsafe extern "C" fn coex_init() -> c_int { 0 }
+unsafe extern "C" fn coex_init() -> c_int {
+    0
+}
 unsafe extern "C" fn coex_deinit() {}
 unsafe extern "C" fn coex_enable() -> c_int {
     0
 }
 unsafe extern "C" fn coex_disable() {}
-unsafe extern "C" fn coex_status_get() -> u32 { 0 }
-unsafe extern "C" fn coex_wifi_request(_event: u32, _latency: u32, _duration: u32) -> c_int { 0 }
-unsafe extern "C" fn coex_wifi_release(_event: u32) -> c_int { 0 }
-unsafe extern "C" fn coex_wifi_channel_set(_primary: u8, _secondary: u8) -> c_int { 0 }
-unsafe extern "C" fn coex_event_duration_get(_event: u32, _duration: *mut u32) -> c_int { 0 }
-unsafe extern "C" fn coex_pti_get(_event: u32, _pti: *mut u8) -> c_int { 0 }
+unsafe extern "C" fn coex_status_get() -> u32 {
+    0
+}
+unsafe extern "C" fn coex_wifi_request(_event: u32, _latency: u32, _duration: u32) -> c_int {
+    0
+}
+unsafe extern "C" fn coex_wifi_release(_event: u32) -> c_int {
+    0
+}
+unsafe extern "C" fn coex_wifi_channel_set(_primary: u8, _secondary: u8) -> c_int {
+    0
+}
+unsafe extern "C" fn coex_event_duration_get(_event: u32, _duration: *mut u32) -> c_int {
+    0
+}
+unsafe extern "C" fn coex_pti_get(_event: u32, _pti: *mut u8) -> c_int {
+    0
+}
 unsafe extern "C" fn coex_schm_status_bit_clear(_type_: u32, _status: u32) {}
 unsafe extern "C" fn coex_schm_status_bit_set(_type_: u32, _status: u32) {}
-unsafe extern "C" fn coex_schm_interval_set(_interval: u32) -> c_int { 0 }
-unsafe extern "C" fn coex_schm_interval_get() -> u32 { 0 }
-unsafe extern "C" fn coex_schm_curr_period_get() -> u8 { 0 }
-unsafe extern "C" fn coex_schm_curr_phase_get() -> *mut c_void { ptr::null_mut() }
-unsafe extern "C" fn coex_schm_process_restart() -> c_int { 0 }
+unsafe extern "C" fn coex_schm_interval_set(_interval: u32) -> c_int {
+    0
+}
+unsafe extern "C" fn coex_schm_interval_get() -> u32 {
+    0
+}
+unsafe extern "C" fn coex_schm_curr_period_get() -> u8 {
+    0
+}
+unsafe extern "C" fn coex_schm_curr_phase_get() -> *mut c_void {
+    ptr::null_mut()
+}
+unsafe extern "C" fn coex_schm_process_restart() -> c_int {
+    0
+}
 unsafe extern "C" fn coex_schm_register_cb(
     _arg1: c_int,
     _cb: Option<unsafe extern "C" fn(c_int) -> c_int>,
-) -> c_int { 0 }
-unsafe extern "C" fn coex_register_start_cb(
-    _cb: Option<unsafe extern "C" fn() -> c_int>,
-) -> c_int { 0 }
+) -> c_int {
+    0
+}
+unsafe extern "C" fn coex_register_start_cb(_cb: Option<unsafe extern "C" fn() -> c_int>) -> c_int {
+    0
+}
 
 unsafe extern "C" fn regdma_link_set_write_wait_content_dummy(
     _arg1: *mut c_void,
     _arg2: u32,
     _arg3: u32,
-) {}
+) {
+}
 
-unsafe extern "C" fn sleep_retention_find_link_by_id_dummy(
-    _arg1: c_int,
-) -> *mut c_void {
+unsafe extern "C" fn sleep_retention_find_link_by_id_dummy(_arg1: c_int) -> *mut c_void {
     ptr::null_mut()
 }
 
-unsafe extern "C" fn coex_schm_flexible_period_set(_arg1: u8) -> c_int { 0 }
-unsafe extern "C" fn coex_schm_flexible_period_get() -> u8 { 0 }
-unsafe extern "C" fn coex_schm_get_phase_by_idx(_arg1: c_int) -> *mut c_void { ptr::null_mut() }
+unsafe extern "C" fn coex_schm_flexible_period_set(_arg1: u8) -> c_int {
+    0
+}
+unsafe extern "C" fn coex_schm_flexible_period_get() -> u8 {
+    0
+}
+unsafe extern "C" fn coex_schm_get_phase_by_idx(_arg1: c_int) -> *mut c_void {
+    ptr::null_mut()
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // The global OSI function table
@@ -1761,13 +1918,19 @@ pub unsafe extern "C" fn esp_phy_disable(_modem: u32) {}
 // register_chipv7_phy and phy_get_romfunc_addr are provided by libphy.a — do not duplicate.
 
 #[no_mangle]
-pub unsafe extern "C" fn esp_phy_erase_cal_data_in_nvs() -> c_int { 0 }
+pub unsafe extern "C" fn esp_phy_erase_cal_data_in_nvs() -> c_int {
+    0
+}
 
 #[no_mangle]
-pub unsafe extern "C" fn coex_bt_request(_event: u32, _latency: u32, _duration: u32) -> c_int { 0 }
+pub unsafe extern "C" fn coex_bt_request(_event: u32, _latency: u32, _duration: u32) -> c_int {
+    0
+}
 
 #[no_mangle]
-pub unsafe extern "C" fn coex_bt_release(_event: u32) -> c_int { 0 }
+pub unsafe extern "C" fn coex_bt_release(_event: u32) -> c_int {
+    0
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Non-ROM stubs required by the blob archives

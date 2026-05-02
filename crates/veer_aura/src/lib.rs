@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use vas::{canonicalize, VasAddress, AddressType};
+use vas::{canonicalize, AddressType, VasAddress};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AuraId(String);
@@ -68,7 +68,8 @@ impl Aura {
     }
 
     pub fn set_governor_ref(&mut self, governor_ref: impl Into<String>) -> Result<(), AuraError> {
-        let canonical = canonicalize(&governor_ref.into()).map_err(|_| AuraError::InvalidAddress)?;
+        let canonical =
+            canonicalize(&governor_ref.into()).map_err(|_| AuraError::InvalidAddress)?;
         self.governor_ref = Some(canonical);
         Ok(())
     }
@@ -139,13 +140,15 @@ impl Aura {
         scopes: &[String],
         now_unix_ms: u128,
     ) -> Result<bool, AuraError> {
-        let canonical_member = canonicalize(member_address).map_err(|_| AuraError::InvalidAddress)?;
+        let canonical_member =
+            canonicalize(member_address).map_err(|_| AuraError::InvalidAddress)?;
         let member = VasAddress::parse(&canonical_member).map_err(|_| AuraError::InvalidAddress)?;
         if member.kind != AddressType::Agent {
             return Err(AuraError::NotAgentAddress);
         }
 
-        let canonical_granted_by = canonicalize(granted_by).map_err(|_| AuraError::InvalidAddress)?;
+        let canonical_granted_by =
+            canonicalize(granted_by).map_err(|_| AuraError::InvalidAddress)?;
         if expires_unix_ms <= now_unix_ms {
             return Err(AuraError::InvalidExpiry);
         }
@@ -263,7 +266,11 @@ impl AuraGraph {
         self.auras.values()
     }
 
-    pub fn add_member_to_aura(&mut self, aura: &AuraId, member_address: &str) -> Result<bool, AuraError> {
+    pub fn add_member_to_aura(
+        &mut self,
+        aura: &AuraId,
+        member_address: &str,
+    ) -> Result<bool, AuraError> {
         let Some(a) = self.auras.get_mut(aura) else {
             return Err(AuraError::NotFound);
         };
@@ -306,7 +313,11 @@ impl AuraGraph {
         Ok(out)
     }
 
-    pub fn overlap_graph(&self, include_active_temporary: bool, now_unix_ms: u128) -> Vec<AuraOverlapEdge> {
+    pub fn overlap_graph(
+        &self,
+        include_active_temporary: bool,
+        now_unix_ms: u128,
+    ) -> Vec<AuraOverlapEdge> {
         let mut nodes: Vec<(&AuraId, &Aura)> = self.auras.iter().collect();
         nodes.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
 
@@ -317,12 +328,11 @@ impl AuraGraph {
                 let (right_id, right) = nodes[j];
 
                 let left_members = members_for_overlap(left, include_active_temporary, now_unix_ms);
-                let right_members = members_for_overlap(right, include_active_temporary, now_unix_ms);
+                let right_members =
+                    members_for_overlap(right, include_active_temporary, now_unix_ms);
 
-                let shared_members: Vec<String> = left_members
-                    .intersection(&right_members)
-                    .cloned()
-                    .collect();
+                let shared_members: Vec<String> =
+                    left_members.intersection(&right_members).cloned().collect();
 
                 if !shared_members.is_empty() {
                     edges.push(AuraOverlapEdge {
@@ -349,7 +359,11 @@ impl AuraGraph {
     }
 }
 
-fn members_for_overlap(aura: &Aura, include_active_temporary: bool, now_unix_ms: u128) -> BTreeSet<String> {
+fn members_for_overlap(
+    aura: &Aura,
+    include_active_temporary: bool,
+    now_unix_ms: u128,
+) -> BTreeSet<String> {
     let mut out = aura.members.clone();
     if include_active_temporary {
         for (member, grant) in &aura.temporary_members {
@@ -441,7 +455,10 @@ mod tests {
         let id = AuraId::parse("aur{finance,private,open}").unwrap();
         let mut aura = Aura::new(id);
         aura.set_governor_ref("SVC{governor,company,live}").unwrap();
-        assert_eq!(aura.governor_ref.as_deref(), Some("svc{governor,company,live}"));
+        assert_eq!(
+            aura.governor_ref.as_deref(),
+            Some("svc{governor,company,live}")
+        );
     }
 
     #[test]

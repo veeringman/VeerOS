@@ -10,7 +10,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use vas::{canonicalize, AddressType, VasAddress};
 use veer_governor::{analyze_audit_records, AnalysisConfig, AuditAnalysisReport, AuditRecord};
-use veer_graph::{Direction, EdgeKind, EdgeWeights, GraphCore, PolicySet, SolverWeights, VertexKind};
+use veer_graph::{
+    Direction, EdgeKind, EdgeWeights, GraphCore, PolicySet, SolverWeights, VertexKind,
+};
 use veer_resolve::{Endpoint, ResolveError, Resolver, ServiceBinding};
 
 #[derive(Parser, Debug)]
@@ -451,10 +453,9 @@ fn cmd_trace_decision(args: TraceDecisionArgs) -> Result<()> {
     let target_kind = args.target_kind.map(|k| k.as_kind());
 
     let policy = if let Some(path) = args.policy.as_deref() {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str::<PolicySet>(&text)
-            .with_context(|| format!("parsing {}", path.display()))?
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str::<PolicySet>(&text).with_context(|| format!("parsing {}", path.display()))?
     } else {
         PolicySet::default()
     };
@@ -538,10 +539,10 @@ fn cmd_trace_decision(args: TraceDecisionArgs) -> Result<()> {
 }
 
 fn load_graph_spec(path: &Path) -> Result<GraphCore> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let spec: GraphSpec = toml::from_str(&text)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let spec: GraphSpec =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
 
     let mut g = GraphCore::new();
     for v in &spec.vertices {
@@ -564,18 +565,30 @@ fn load_graph_spec(path: &Path) -> Result<GraphCore> {
 fn print_decision_report(report: &DecisionTraceReport) {
     println!("source      : {}", report.source);
     println!("edge kind   : {}", report.edge_kind);
-    println!("target kind : {}", report.target_kind.clone().unwrap_or_else(|| "any".to_string()));
+    println!(
+        "target kind : {}",
+        report
+            .target_kind
+            .clone()
+            .unwrap_or_else(|| "any".to_string())
+    );
     println!("policy mode : {}", report.policy_mode);
 
     if let Some(sel) = &report.selected {
-        println!("selected    : {} (score {:.4})", sel.target, sel.score.unwrap_or_default());
+        println!(
+            "selected    : {} (score {:.4})",
+            sel.target,
+            sel.score.unwrap_or_default()
+        );
     } else {
         println!("selected    : none");
     }
 
     println!();
-    println!("{:<30} {:<8} {:<8} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "TARGET", "KIND", "POLICY", "SCORE", "LAT", "TRUST", "COST", "AFF", "LOAD");
+    println!(
+        "{:<30} {:<8} {:<8} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "TARGET", "KIND", "POLICY", "SCORE", "LAT", "TRUST", "COST", "AFF", "LOAD"
+    );
     for c in &report.candidates {
         let score = c
             .score
@@ -585,7 +598,11 @@ fn print_decision_report(report: &DecisionTraceReport) {
             "{:<30} {:<8} {:<8} {:>10} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3}",
             c.target,
             c.target_kind,
-            if c.policy_allowed && c.kind_allowed { "yes" } else { "no" },
+            if c.policy_allowed && c.kind_allowed {
+                "yes"
+            } else {
+                "no"
+            },
             score,
             c.latency,
             c.trust,
@@ -597,8 +614,8 @@ fn print_decision_report(report: &DecisionTraceReport) {
 }
 
 fn load_audit_records(path: &Path) -> Result<Vec<AuditRecord>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
     let mut out = Vec::new();
     for (idx, line) in text.lines().enumerate() {
@@ -637,7 +654,10 @@ fn print_governor_report(report: &AuditAnalysisReport, cfg: &AnalysisConfig, ana
     } else {
         println!("findings:");
         for f in &report.findings {
-            println!("  - [{}] {} (count={}): {}", f.severity, f.code, f.count, f.detail);
+            println!(
+                "  - [{}] {} (count={}): {}",
+                f.severity, f.code, f.count, f.detail
+            );
         }
     }
 
@@ -686,8 +706,8 @@ fn cmd_gateway_bridge(args: BridgeArgs) -> Result<()> {
 }
 
 fn handle_bridge_client(client: TcpStream, target: &str) -> Result<()> {
-    let server = TcpStream::connect(target)
-        .with_context(|| format!("connecting bridge target {target}"))?;
+    let server =
+        TcpStream::connect(target).with_context(|| format!("connecting bridge target {target}"))?;
 
     let mut c_r = client
         .try_clone()
@@ -718,15 +738,19 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
         AuraCmd::Create(args) => {
             let aura = canonical_typed(&args.aura, AddressType::Aura, "aura")?;
             state.joined.insert(aura.clone());
-            state.created.entry(aura.clone()).and_modify(|c| {
-                if args.name.is_some() {
-                    c.display_name = args.name.clone();
-                }
-            }).or_insert(CreatedAura {
-                display_name: args.name,
-                shared_with: BTreeSet::new(),
-                temporary_agents: BTreeMap::new(),
-            });
+            state
+                .created
+                .entry(aura.clone())
+                .and_modify(|c| {
+                    if args.name.is_some() {
+                        c.display_name = args.name.clone();
+                    }
+                })
+                .or_insert(CreatedAura {
+                    display_name: args.name,
+                    shared_with: BTreeSet::new(),
+                    temporary_agents: BTreeMap::new(),
+                });
             save_state(&state)?;
             println!("aura created: {}", aura);
             Ok(())
@@ -744,10 +768,11 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
         }
         AuraCmd::Share(args) => {
             let aura = canonical_typed(&args.aura, AddressType::Aura, "aura")?;
-            let created = state
-                .created
-                .get_mut(&aura)
-                .with_context(|| format!("aura not found in local state: {aura}; create it first with veer aura create"))?;
+            let created = state.created.get_mut(&aura).with_context(|| {
+                format!(
+                    "aura not found in local state: {aura}; create it first with veer aura create"
+                )
+            })?;
             let mut added = 0usize;
             for member in &args.with_members {
                 let canonical = canonical_share_target(member)?;
@@ -767,10 +792,11 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
 
             let aura = canonical_typed(&args.aura, AddressType::Aura, "aura")?;
             let agent = canonical_typed(&args.agent, AddressType::Agent, "agent")?;
-            let created = state
-                .created
-                .get_mut(&aura)
-                .with_context(|| format!("aura not found in local state: {aura}; create it first with veer aura create"))?;
+            let created = state.created.get_mut(&aura).with_context(|| {
+                format!(
+                    "aura not found in local state: {aura}; create it first with veer aura create"
+                )
+            })?;
 
             let mut scopes = BTreeSet::new();
             for scope in &args.scopes {
@@ -849,10 +875,8 @@ fn cmd_aura(cmd: AuraCmd) -> Result<()> {
                     let right = &aura_names[j];
                     let left_set = aura_members.get(left).cloned().unwrap_or_default();
                     let right_set = aura_members.get(right).cloned().unwrap_or_default();
-                    let shared_members: Vec<String> = left_set
-                        .intersection(&right_set)
-                        .cloned()
-                        .collect();
+                    let shared_members: Vec<String> =
+                        left_set.intersection(&right_set).cloned().collect();
                     if !shared_members.is_empty() {
                         edges.push(AuraOverlapEdgeView {
                             left_aura: left.clone(),
@@ -940,7 +964,8 @@ fn cmd_connect(args: ConnectArgs) -> Result<()> {
         .map(|a| canonical_typed(a, AddressType::Aura, "aura"))
         .collect::<Result<Vec<_>>>()?;
 
-    let resolved_target = resolve_target_from_map(args.resolve_map.as_deref(), &service, &caller_auras)?;
+    let resolved_target =
+        resolve_target_from_map(args.resolve_map.as_deref(), &service, &caller_auras)?;
 
     let legacy_route = load_legacy_route(args.legacy_map.as_deref(), &service)?;
     let resolver_port = resolved_target.as_ref().map(|(_, p)| *p);
@@ -950,7 +975,8 @@ fn cmd_connect(args: ConnectArgs) -> Result<()> {
         .or_else(|| legacy_route.as_ref().map(|r| r.port))
         .with_context(|| "no port provided; pass --port or define route port in legacy map")?;
     let resolver_host = resolved_target.as_ref().map(|(h, _)| h.as_str());
-    let candidate_hosts = build_candidate_hosts(args.host.as_deref(), resolver_host, legacy_route.as_ref());
+    let candidate_hosts =
+        build_candidate_hosts(args.host.as_deref(), resolver_host, legacy_route.as_ref());
     if candidate_hosts.is_empty() {
         bail!(
             "no target host candidates; pass --host, provide resolve-map, or define dns/ips in legacy route map for {}",
@@ -964,7 +990,14 @@ fn cmd_connect(args: ConnectArgs) -> Result<()> {
         println!("caller auras: {}", caller_auras.join(","));
     }
     println!("transport target: {}:{}", target_host, port);
-    println!("legacy resolution: {}", if resolved { "resolved" } else { "unresolved-used-first-candidate" });
+    println!(
+        "legacy resolution: {}",
+        if resolved {
+            "resolved"
+        } else {
+            "unresolved-used-first-candidate"
+        }
+    );
 
     let mut cmd = Command::new("veer-connect");
     cmd.arg("shell").arg(&target_host).arg(port.to_string());
@@ -972,7 +1005,9 @@ fn cmd_connect(args: ConnectArgs) -> Result<()> {
     cmd.env("VEER_CALLER_AURAS", caller_auras.join(","));
     cmd.env("VEER_LEGACY_TARGET", format!("{}:{}", target_host, port));
 
-    let status = cmd.status().context("launching veer-connect; ensure veer-connect is on PATH")?;
+    let status = cmd
+        .status()
+        .context("launching veer-connect; ensure veer-connect is on PATH")?;
     if !status.success() {
         bail!("veer-connect shell failed with status: {}", status);
     }
@@ -993,8 +1028,8 @@ fn resolve_target_from_map(
 
     let text = std::fs::read_to_string(&map_path)
         .with_context(|| format!("reading {}", map_path.display()))?;
-    let map: ResolveMap = toml::from_str(&text)
-        .with_context(|| format!("parsing {}", map_path.display()))?;
+    let map: ResolveMap =
+        toml::from_str(&text).with_context(|| format!("parsing {}", map_path.display()))?;
 
     let mut resolver = Resolver::new();
     for (svc_raw, endpoints) in map.services {
@@ -1026,8 +1061,12 @@ fn resolve_target_from_map(
     let aura_refs: Vec<&str> = caller_auras.iter().map(|s| s.as_str()).collect();
     let out = match resolver.resolve(service, &aura_refs) {
         Ok(rr) => {
-            let (host, port) = endpoint_host_port(&rr.selected)
-                .with_context(|| format!("resolver endpoint for {} does not contain host/port", service))?;
+            let (host, port) = endpoint_host_port(&rr.selected).with_context(|| {
+                format!(
+                    "resolver endpoint for {} does not contain host/port",
+                    service
+                )
+            })?;
             Some((host, port))
         }
         Err(ResolveError::NotFound) => None,
@@ -1055,8 +1094,8 @@ fn load_legacy_route(path: Option<&Path>, service: &str) -> Result<Option<Legacy
 
     let text = std::fs::read_to_string(&map_path)
         .with_context(|| format!("reading {}", map_path.display()))?;
-    let mut map: LegacyRouteMap = toml::from_str(&text)
-        .with_context(|| format!("parsing {}", map_path.display()))?;
+    let mut map: LegacyRouteMap =
+        toml::from_str(&text).with_context(|| format!("parsing {}", map_path.display()))?;
 
     let mut canonicalized = BTreeMap::new();
     for (k, v) in map.services {
@@ -1155,7 +1194,11 @@ fn endpoint_host_port(ep: &Endpoint) -> Result<(String, u16)> {
         }
     }
 
-    bail!("cannot extract host:port from endpoint node={} transport={}", ep.node, ep.transport)
+    bail!(
+        "cannot extract host:port from endpoint node={} transport={}",
+        ep.node,
+        ep.transport
+    )
 }
 
 fn split_host_port(input: &str) -> Option<(String, u16)> {
@@ -1182,7 +1225,11 @@ fn canonical_typed(input: &str, expected: AddressType, what: &str) -> Result<Str
     let parsed = VasAddress::parse(&canonical)
         .map_err(|e| anyhow::anyhow!("invalid {} address {}: {}", what, input, e))?;
     if parsed.kind != expected {
-        bail!("{} address must use {}{{...}} type", what, address_type_code(expected));
+        bail!(
+            "{} address must use {}{{...}} type",
+            what,
+            address_type_code(expected)
+        );
     }
     Ok(canonical)
 }
@@ -1268,7 +1315,11 @@ fn set_manifest_auras(doc: &mut toml::Value, auras: &[String]) -> Result<()> {
     let Some(table) = doc.as_table_mut() else {
         bail!("manifest root must be a TOML table");
     };
-    let arr = auras.iter().cloned().map(toml::Value::String).collect::<Vec<_>>();
+    let arr = auras
+        .iter()
+        .cloned()
+        .map(toml::Value::String)
+        .collect::<Vec<_>>();
     table.insert("auras".to_string(), toml::Value::Array(arr));
     Ok(())
 }
@@ -1322,16 +1373,18 @@ fn load_state() -> Result<AuraState> {
     if !path.exists() {
         return Ok(AuraState::default());
     }
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let state: AuraState = serde_json::from_str(&text)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let state: AuraState =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(state)
 }
 
 fn save_state(state: &AuraState) -> Result<()> {
     let path = state_path()?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(state).context("serializing aura state")?;
     std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
@@ -1359,7 +1412,8 @@ mod tests {
 
     #[test]
     fn canonical_typed_accepts_expected_type() {
-        let out = canonical_typed(" SVC{Render,Company,Live}", AddressType::Service, "service").unwrap();
+        let out =
+            canonical_typed(" SVC{Render,Company,Live}", AddressType::Service, "service").unwrap();
         assert_eq!(out, "svc{render,company,live}");
     }
 
@@ -1382,7 +1436,13 @@ auras = ["aur{team,private,open}", " AUR{Team,Private,Open } "]
         .unwrap();
 
         let merged = merged_manifest_auras(&doc, &["aur{ops,private,open}".to_string()]).unwrap();
-        assert_eq!(merged, vec!["aur{team,private,open}".to_string(), "aur{ops,private,open}".to_string()]);
+        assert_eq!(
+            merged,
+            vec![
+                "aur{team,private,open}".to_string(),
+                "aur{ops,private,open}".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1393,7 +1453,11 @@ auras = ["aur{team,private,open}", " AUR{Team,Private,Open } "]
             port: 2232,
         };
 
-        let out = build_candidate_hosts(Some("manual.example"), Some("resolved.example"), Some(&route));
+        let out = build_candidate_hosts(
+            Some("manual.example"),
+            Some("resolved.example"),
+            Some(&route),
+        );
         assert_eq!(
             out,
             vec![

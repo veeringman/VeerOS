@@ -38,7 +38,7 @@
 //! **KEM**: `combined_ss = HKDF(classical_ss ‖ pqc_ss, info="veeros-hybrid-kem-v1")`
 //! **Sigs**: Both signatures produced; verifier checks BOTH (in Hybrid mode).
 
-use crate::{CryptoError, CryptoRng, Kem, Signer, Verifier, Signature};
+use crate::{CryptoError, CryptoRng, Kem, Signature, Signer, Verifier};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Crypto Mode
@@ -101,24 +101,14 @@ pub const MAX_HYBRID_CT_LEN: usize = 32 + 1088 + 4;
 /// If only one shared secret is provided (Classical or PqcOnly mode),
 /// the other is set to an empty slice — HKDF still produces a strong key.
 #[cfg(feature = "sha256")]
-pub fn combine_shared_secrets(
-    classical_ss: &[u8],
-    pqc_ss: &[u8],
-    output: &mut [u8],
-) {
+pub fn combine_shared_secrets(classical_ss: &[u8], pqc_ss: &[u8], output: &mut [u8]) {
     let mut ikm = [0u8; 128]; // X25519(32) + ML-KEM-1024(64) max
     let total = classical_ss.len() + pqc_ss.len();
     debug_assert!(total <= ikm.len());
     ikm[..classical_ss.len()].copy_from_slice(classical_ss);
-    ikm[classical_ss.len()..classical_ss.len() + pqc_ss.len()]
-        .copy_from_slice(pqc_ss);
+    ikm[classical_ss.len()..classical_ss.len() + pqc_ss.len()].copy_from_slice(pqc_ss);
 
-    crate::hkdf_sha256(
-        &ikm[..total],
-        b"",
-        b"veeros-hybrid-kem-v1",
-        output,
-    );
+    crate::hkdf_sha256(&ikm[..total], b"", b"veeros-hybrid-kem-v1", output);
 
     crate::zeroize(&mut ikm);
 }
@@ -369,8 +359,8 @@ pub fn hybrid_verify(
 pub fn encode_mode(mode: CryptoMode) -> u8 {
     match mode {
         CryptoMode::Classical => 0x01,
-        CryptoMode::Hybrid    => 0x02,
-        CryptoMode::PqcOnly   => 0x03,
+        CryptoMode::Hybrid => 0x02,
+        CryptoMode::PqcOnly => 0x03,
     }
 }
 
@@ -380,6 +370,6 @@ pub fn decode_mode(byte: u8) -> Result<CryptoMode, CryptoError> {
         0x01 => Ok(CryptoMode::Classical),
         0x02 => Ok(CryptoMode::Hybrid),
         0x03 => Ok(CryptoMode::PqcOnly),
-        _    => Err(CryptoError::InternalError),
+        _ => Err(CryptoError::InternalError),
     }
 }

@@ -8,6 +8,7 @@ members = [
     "crates/soc/qemu_virt",
     "crates/soc/qemu_pc",
     "crates/soc/raspi5",
+    "crates/soc/aarch64_virt",
 
     # ── Layer 2: Kernel binaries (one per board) ─────────
     "crates/kernel/esp32c3",
@@ -17,6 +18,7 @@ members = [
     "crates/kernel/fold_esp32c6",
     "crates/kernel/qemu_pc",
     "crates/kernel/raspi5",
+    "crates/kernel/aarch64_virt",
 
     # ── Shared OS components ─────────────────────────────
     "crates/crypto",

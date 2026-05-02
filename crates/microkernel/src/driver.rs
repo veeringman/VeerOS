@@ -135,11 +135,7 @@ impl DriverRegistry {
     }
 
     /// Register a new driver.  Returns a driver handle (index).
-    pub fn register(
-        &mut self,
-        name: &'static str,
-        caps: DriverCaps,
-    ) -> Result<usize, DriverError> {
+    pub fn register(&mut self, name: &'static str, caps: DriverCaps) -> Result<usize, DriverError> {
         if self.count >= MAX_DRIVERS {
             return Err(DriverError::RegistryFull);
         }
@@ -156,11 +152,7 @@ impl DriverRegistry {
     }
 
     /// Grant an MMIO region to a registered driver.
-    pub fn grant_mmio(
-        &mut self,
-        handle: usize,
-        region: MemRegion,
-    ) -> Result<(), DriverError> {
+    pub fn grant_mmio(&mut self, handle: usize, region: MemRegion) -> Result<(), DriverError> {
         let drv = &mut self.drivers[handle];
         for slot in drv.mmio.iter_mut() {
             if slot.is_none() {
@@ -214,15 +206,19 @@ impl DriverRegistry {
 
     /// Iterate over active drivers (for diagnostics).
     pub fn iter(&self) -> impl Iterator<Item = &DriverInfo> {
-        self.drivers[..self.count]
-            .iter()
-            .filter(|d| d.active)
+        self.drivers[..self.count].iter().filter(|d| d.active)
     }
 
     /// Write a summary for the shell `drivers` command.
     pub fn write_list(&self, w: &mut dyn fmt::Write) {
-        let _ = fmt::write(w, format_args!("  ID  NAME              MMIO  IRQ  DMA  NET\n"));
-        let _ = fmt::write(w, format_args!("  --  ----------------  ----  ---  ---  ---\n"));
+        let _ = fmt::write(
+            w,
+            format_args!("  ID  NAME              MMIO  IRQ  DMA  NET\n"),
+        );
+        let _ = fmt::write(
+            w,
+            format_args!("  --  ----------------  ----  ---  ---  ---\n"),
+        );
         for (i, drv) in self.drivers[..self.count].iter().enumerate() {
             if !drv.active {
                 continue;
@@ -232,15 +228,18 @@ impl DriverRegistry {
                 Some(n) => n as i32,
                 None => -1,
             };
-            let _ = fmt::write(w, format_args!(
-                "  {:2}  {:16}  {:4}  {:3}  {:3}  {:3}\n",
-                i,
-                drv.name,
-                mmio_count,
-                irq_str,
-                if drv.caps.uses_dma { "yes" } else { " no" },
-                if drv.caps.uses_network { "yes" } else { " no" },
-            ));
+            let _ = fmt::write(
+                w,
+                format_args!(
+                    "  {:2}  {:16}  {:4}  {:3}  {:3}  {:3}\n",
+                    i,
+                    drv.name,
+                    mmio_count,
+                    irq_str,
+                    if drv.caps.uses_dma { "yes" } else { " no" },
+                    if drv.caps.uses_network { "yes" } else { " no" },
+                ),
+            );
         }
     }
 }

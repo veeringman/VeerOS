@@ -48,37 +48,37 @@ pub const MAX_NODE_NAME_LEN: usize = 24;
 #[repr(u8)]
 pub enum NodeCapability {
     /// General-purpose CPU computation.
-    Compute         = 0,
+    Compute = 0,
     /// GPU / accelerator for parallel workloads.
-    GpuCompute      = 1,
+    GpuCompute = 1,
     /// NPU / TPU for neural network inference.
-    NpuInference    = 2,
+    NpuInference = 2,
     /// FPGA for custom hardware logic.
-    FpgaLogic       = 3,
+    FpgaLogic = 3,
     /// Persistent block storage (SD, NVMe, etc.).
-    BlockStorage    = 4,
+    BlockStorage = 4,
     /// Network connectivity (Ethernet, WiFi).
-    Network         = 5,
+    Network = 5,
     /// Wireless radio (BLE, 802.15.4, LoRa).
-    Radio           = 6,
+    Radio = 6,
     /// Sensor input (temperature, motion, camera).
-    Sensors         = 7,
+    Sensors = 7,
     /// Display output (HDMI, LCD, e-ink).
-    Display         = 8,
+    Display = 8,
     /// USB host (keyboards, drives, etc.).
-    UsbHost         = 9,
+    UsbHost = 9,
     /// Cryptographic accelerator (AES, SHA, RSA).
-    CryptoAccel     = 10,
+    CryptoAccel = 10,
     /// Quantum processing unit (gate or annealing).
-    Quantum         = 11,
+    Quantum = 11,
     /// Real-time capable (deterministic scheduling).
-    Realtime        = 12,
+    Realtime = 12,
     /// Low-power / battery optimized.
-    LowPower        = 13,
+    LowPower = 13,
     /// Cloud API access (HTTP, gRPC egress).
-    CloudApi        = 14,
+    CloudApi = 14,
     /// Model inference (can run ML models locally).
-    ModelInference  = 15,
+    ModelInference = 15,
 }
 
 /// Health status of a fabric node.
@@ -86,27 +86,27 @@ pub enum NodeCapability {
 #[repr(u8)]
 pub enum NodeHealth {
     /// Node is healthy and accepting work.
-    Healthy     = 0,
+    Healthy = 0,
     /// Node is overloaded (accept only critical work).
-    Overloaded  = 1,
+    Overloaded = 1,
     /// Node is degraded (some capabilities unavailable).
-    Degraded    = 2,
+    Degraded = 2,
     /// Node is unreachable / offline.
-    Offline     = 3,
+    Offline = 3,
     /// Slot is not in use.
-    Unused      = 255,
+    Unused = 255,
 }
 
 /// Architecture class of a fabric node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum NodeArch {
-    Riscv32     = 0,
-    Riscv64     = 1,
-    Aarch64     = 2,
-    X86_64      = 3,
-    Xtensa      = 4,
-    Unknown     = 255,
+    Riscv32 = 0,
+    Riscv64 = 1,
+    Aarch64 = 2,
+    X86_64 = 3,
+    Xtensa = 4,
+    Unknown = 255,
 }
 
 /// Locality zone — coarse geographic or topological grouping.
@@ -114,15 +114,15 @@ pub enum NodeArch {
 #[repr(u8)]
 pub enum LocalityZone {
     /// Same physical device (intra-node).
-    Local       = 0,
+    Local = 0,
     /// Same rack / room (< 1ms RTT).
-    Rack        = 1,
+    Rack = 1,
     /// Same data center / building (< 5ms RTT).
-    DataCenter  = 2,
+    DataCenter = 2,
     /// Same region (< 20ms RTT).
-    Region      = 3,
+    Region = 3,
     /// Cross-region (> 20ms RTT).
-    Global      = 4,
+    Global = 4,
 }
 
 // ─── Fabric Node descriptor ────────────────────────────────────────────
@@ -414,14 +414,23 @@ impl ExecutionFabric {
 
     /// Count healthy (non-Unused, non-Offline) nodes.
     pub fn healthy_count(&self) -> usize {
-        self.nodes.iter()
-            .filter(|n| matches!(n.health, NodeHealth::Healthy | NodeHealth::Overloaded | NodeHealth::Degraded))
+        self.nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.health,
+                    NodeHealth::Healthy | NodeHealth::Overloaded | NodeHealth::Degraded
+                )
+            })
             .count()
     }
 
     /// Count all registered nodes (including offline).
     pub fn total_count(&self) -> usize {
-        self.nodes.iter().filter(|n| n.health != NodeHealth::Unused).count()
+        self.nodes
+            .iter()
+            .filter(|n| n.health != NodeHealth::Unused)
+            .count()
     }
 
     /// Remove (unregister) a node by index.

@@ -16,10 +16,10 @@ pub const MAX_CPUS: usize = 16;
 /// ACPI 1.0 RSDP structure (20 bytes).
 #[repr(C, packed)]
 struct Rsdp {
-    signature: [u8; 8],  // "RSD PTR "
+    signature: [u8; 8], // "RSD PTR "
     checksum: u8,
     oem_id: [u8; 6],
-    revision: u8,        // 0 = ACPI 1.0, 2 = ACPI 2.0+
+    revision: u8, // 0 = ACPI 1.0, 2 = ACPI 2.0+
     rsdt_address: u32,
 }
 
@@ -139,7 +139,11 @@ pub struct CpuInfo {
 }
 
 impl CpuInfo {
-    pub const EMPTY: Self = Self { apic_id: 0, acpi_id: 0, enabled: false };
+    pub const EMPTY: Self = Self {
+        apic_id: 0,
+        acpi_id: 0,
+        enabled: false,
+    };
 }
 
 /// IRQ source override (ISA IRQ → GSI mapping).
@@ -153,7 +157,13 @@ pub struct IrqOverride {
 }
 
 impl IrqOverride {
-    pub const EMPTY: Self = Self { bus: 0, source_irq: 0, gsi: 0, flags: 0, active: false };
+    pub const EMPTY: Self = Self {
+        bus: 0,
+        source_irq: 0,
+        gsi: 0,
+        flags: 0,
+        active: false,
+    };
 }
 
 /// Parsed ACPI information.
@@ -206,7 +216,11 @@ impl AcpiInfo {
 
     /// Number of APs (application processors, excluding BSP).
     pub fn ap_count(&self) -> usize {
-        if self.cpu_count > 1 { self.cpu_count - 1 } else { 0 }
+        if self.cpu_count > 1 {
+            self.cpu_count - 1
+        } else {
+            0
+        }
     }
 }
 

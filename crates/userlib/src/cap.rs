@@ -7,8 +7,8 @@
 use crate::sys;
 
 // Syscall numbers (must match microkernel::syscall)
-const SYS_CAP_GET: usize       = 0xD0;
-const SYS_CAP_DROP: usize      = 0xD1;
+const SYS_CAP_GET: usize = 0xD0;
+const SYS_CAP_DROP: usize = 0xD1;
 const SYS_CAP_SET_CHILD: usize = 0xD2;
 
 /// Get the current process's capability bitmask.

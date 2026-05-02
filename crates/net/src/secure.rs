@@ -22,11 +22,11 @@
 
 use arch::Serial;
 use core::cell::UnsafeCell;
-use crypto::sha256::Sha256;
 use crypto::chacha20::ChaCha20Poly1305;
-use crypto::x25519::{x25519_keypair, x25519_diffie_hellman, X25519PublicKey};
 use crypto::rng::ChaChaRng;
-use crypto::{Aead, Hash, zeroize};
+use crypto::sha256::Sha256;
+use crypto::x25519::{x25519_diffie_hellman, x25519_keypair, X25519PublicKey};
+use crypto::{zeroize, Aead, Hash};
 
 /// VSC protocol magic + version.
 const VSC_MAGIC: [u8; 4] = [b'V', b'S', b'C', 0x01];
@@ -95,9 +95,10 @@ impl SecureChannel {
         let nonce = Self::make_nonce(self.tx_counter);
         self.tx_counter += 2; // even increments for server
 
-        let total = self.cipher.seal_in_place(
-            &nonce, &[], &mut out_buf[2..], plaintext.len()
-        ).ok()?;
+        let total = self
+            .cipher
+            .seal_in_place(&nonce, &[], &mut out_buf[2..], plaintext.len())
+            .ok()?;
 
         Some(&out_buf[..2 + total])
     }
@@ -113,7 +114,9 @@ impl SecureChannel {
         let nonce = Self::make_nonce(self.rx_counter);
         self.rx_counter += 2; // odd increments for client
 
-        self.cipher.open_in_place(&nonce, &[], frame, frame.len()).ok()
+        self.cipher
+            .open_in_place(&nonce, &[], frame, frame.len())
+            .ok()
     }
 }
 
@@ -133,10 +136,7 @@ impl Drop for SecureChannel {
 /// 4. Derive shared secret → session key
 ///
 /// Returns `Some(SecureChannel)` on success.
-pub fn server_handshake<S: Serial>(
-    serial: &S,
-    seed: [u8; 32],
-) -> Option<SecureChannel> {
+pub fn server_handshake<S: Serial>(serial: &S, seed: [u8; 32]) -> Option<SecureChannel> {
     let mut rng = ChaChaRng::from_seed(seed);
 
     // Generate ephemeral keypair.
@@ -233,10 +233,10 @@ impl<S: Serial> SecureSerialInner<S> {
             return;
         }
         let mut frame = [0u8; MAX_FRAME_CT + 2];
-        if let Some(data) = self.channel.encrypt_frame(
-            &self.tx_buf[..self.tx_len],
-            &mut frame,
-        ) {
+        if let Some(data) = self
+            .channel
+            .encrypt_frame(&self.tx_buf[..self.tx_len], &mut frame)
+        {
             self.serial.write_bytes(data);
             self.serial.flush();
         }
@@ -407,7 +407,10 @@ pub fn handle_push<S: Serial>(
 
     let size_off = 2 + path_len;
     let file_size = u32::from_le_bytes([
-        hdr[size_off], hdr[size_off + 1], hdr[size_off + 2], hdr[size_off + 3],
+        hdr[size_off],
+        hdr[size_off + 1],
+        hdr[size_off + 2],
+        hdr[size_off + 3],
     ]) as usize;
 
     // Read file data.  Accumulate in a stack buffer.
@@ -430,7 +433,11 @@ pub fn handle_push<S: Serial>(
                 return;
             }
         };
-        let take = if received + n > file_size { file_size - received } else { n };
+        let take = if received + n > file_size {
+            file_size - received
+        } else {
+            n
+        };
         file_buf[received..received + take].copy_from_slice(&chunk[..take]);
         received += take;
     }
@@ -499,7 +506,13 @@ pub fn handle_pull<S: Serial>(
 
     // Send response header: [status][file_size:u32 LE].
     let size_bytes = (file_size as u32).to_le_bytes();
-    let resp = [STATUS_OK, size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]];
+    let resp = [
+        STATUS_OK,
+        size_bytes[0],
+        size_bytes[1],
+        size_bytes[2],
+        size_bytes[3],
+    ];
     send_frame(serial, ch, &resp);
 
     // Send file data in chunks.

@@ -37,7 +37,11 @@ pub fn syscall0(nr: usize) -> usize {
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "riscv32",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )))]
     {
         let _ = nr;
         ret = 0;
@@ -76,7 +80,11 @@ pub fn syscall1(nr: usize, a0: usize) -> usize {
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "riscv32",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )))]
     {
         let _ = (nr, a0);
         ret = 0;
@@ -120,7 +128,11 @@ pub fn syscall2(nr: usize, a0: usize, a1: usize) -> (usize, usize) {
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "riscv32",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )))]
     {
         let _ = (nr, a0, a1);
         r0 = 0;
@@ -166,7 +178,11 @@ pub fn syscall3(nr: usize, a0: usize, a1: usize, a2: usize) -> usize {
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "riscv32",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )))]
     {
         let _ = (nr, a0, a1, a2);
         ret = 0;
@@ -215,7 +231,11 @@ pub fn syscall4(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> usize 
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "riscv32",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )))]
     {
         let _ = (nr, a0, a1, a2, a3);
         ret = 0;
@@ -266,7 +286,11 @@ pub fn syscall5(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "riscv32",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )))]
     {
         let _ = (nr, a0, a1, a2, a3, a4);
         ret = 0;
@@ -317,7 +341,11 @@ pub fn syscall_ret4(nr: usize, a0: usize) -> (usize, usize, usize, usize) {
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(any(target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "riscv32",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )))]
     {
         let _ = (nr, a0);
         r0 = 0;

@@ -1,0 +1,11 @@
+[package]
+name = "soc-aarch64-virt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "AArch64 virtual machine platform drivers for VeerOS"
+
+[dependencies]
+arch = { path = "../../arch" }

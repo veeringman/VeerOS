@@ -48,13 +48,9 @@ impl Engine for MacosEngine {
             cmd.current_dir(workdir);
         }
 
-        let child = cmd.spawn().with_context(|| {
-            format!(
-                "spawning '{}' for fold {}",
-                manifest.cmd,
-                manifest.name
-            )
-        })?;
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("spawning '{}' for fold {}", manifest.cmd, manifest.name))?;
 
         let rec = FoldRecord {
             name: manifest.name.clone(),

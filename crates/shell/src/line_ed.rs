@@ -53,11 +53,17 @@ impl History {
 
     /// Push a line into history (skip if empty or same as last).
     pub fn push(&mut self, buf: &[u8], len: usize) {
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
 
         // Deduplicate: skip if same as most recent entry
         if self.count > 0 {
-            let last = if self.head == 0 { HIST_SIZE - 1 } else { self.head - 1 };
+            let last = if self.head == 0 {
+                HIST_SIZE - 1
+            } else {
+                self.head - 1
+            };
             if self.lengths[last] == len && self.entries[last][..len] == buf[..len] {
                 return;
             }
@@ -80,7 +86,9 @@ impl History {
     /// Get the i-th most recent entry (0 = newest).
     /// Returns (data_slice, len).
     pub fn get(&self, age: usize) -> Option<(&[u8], usize)> {
-        if age >= self.count { return None; }
+        if age >= self.count {
+            return None;
+        }
         let idx = if self.head > age {
             self.head - 1 - age
         } else {
@@ -92,7 +100,9 @@ impl History {
 
     /// Get entry by absolute index (0 = oldest).
     pub fn get_absolute(&self, index: usize) -> Option<(&[u8], usize)> {
-        if index >= self.count { return None; }
+        if index >= self.count {
+            return None;
+        }
         // Oldest entry index
         let oldest = if self.count < HIST_SIZE {
             0
@@ -191,6 +201,7 @@ impl LineEditor {
                 BS | DEL => {
                     if self.cursor > 0 {
                         self.cursor -= 1;
+                        con.write_str_raw("\x08");
                         self.delete_at_cursor(con);
                     }
                 }
@@ -285,42 +296,54 @@ impl LineEditor {
     // ── Escape sequence handling ─────────────────────────────────────
 
     fn handle_escape<S: Serial>(&mut self, con: &mut Console<S>) {
-        if !con.has_data() { return; }
+        if !con.has_data() {
+            return;
+        }
         let b2 = con.read_byte();
 
         match b2 {
             b'[' => {
                 // CSI sequence: ESC [ ...
-                if !con.has_data() { return; }
+                if !con.has_data() {
+                    return;
+                }
                 let b3 = con.read_byte();
                 match b3 {
-                    b'A' => self.history_prev(con),      // Up arrow
-                    b'B' => self.history_next(con),      // Down arrow
-                    b'C' => {                            // Right arrow
+                    b'A' => self.history_prev(con), // Up arrow
+                    b'B' => self.history_next(con), // Down arrow
+                    b'C' => {
+                        // Right arrow
                         if self.cursor < self.len {
                             self.move_cursor_to(con, self.cursor + 1);
                         }
                     }
-                    b'D' => {                            // Left arrow
+                    b'D' => {
+                        // Left arrow
                         if self.cursor > 0 {
                             self.move_cursor_to(con, self.cursor - 1);
                         }
                     }
-                    b'H' => self.move_cursor_to(con, 0),       // Home
+                    b'H' => self.move_cursor_to(con, 0), // Home
                     b'F' => self.move_cursor_to(con, self.len), // End
                     b'1' | b'7' => {
                         // ESC [ 1 ~ (Home) or ESC [ 7 ~ (Home)
-                        if con.has_data() { let _ = con.read_byte(); } // consume '~'
+                        if con.has_data() {
+                            let _ = con.read_byte();
+                        } // consume '~'
                         self.move_cursor_to(con, 0);
                     }
                     b'4' | b'8' => {
                         // ESC [ 4 ~ (End) or ESC [ 8 ~ (End)
-                        if con.has_data() { let _ = con.read_byte(); }
+                        if con.has_data() {
+                            let _ = con.read_byte();
+                        }
                         self.move_cursor_to(con, self.len);
                     }
                     b'3' => {
                         // ESC [ 3 ~ (Delete key)
-                        if con.has_data() { let _ = con.read_byte(); }
+                        if con.has_data() {
+                            let _ = con.read_byte();
+                        }
                         self.delete_at_cursor(con);
                     }
                     _ => {} // unknown CSI
@@ -345,7 +368,9 @@ impl LineEditor {
     // ── Edit operations ──────────────────────────────────────────────
 
     fn insert_char<S: Serial>(&mut self, con: &mut Console<S>, byte: u8) {
-        if self.len >= MAX_LINE - 1 { return; }
+        if self.len >= MAX_LINE - 1 {
+            return;
+        }
 
         if self.cursor == self.len {
             // Append at end — fast path, just echo
@@ -371,7 +396,9 @@ impl LineEditor {
     }
 
     fn delete_at_cursor<S: Serial>(&mut self, con: &mut Console<S>) {
-        if self.cursor >= self.len { return; }
+        if self.cursor >= self.len {
+            return;
+        }
         let mut i = self.cursor;
         while i + 1 < self.len {
             self.buf[i] = self.buf[i + 1];
@@ -382,7 +409,9 @@ impl LineEditor {
     }
 
     fn kill_word_backward<S: Serial>(&mut self, con: &mut Console<S>) {
-        if self.cursor == 0 { return; }
+        if self.cursor == 0 {
+            return;
+        }
         let old = self.cursor;
         // Skip spaces
         while self.cursor > 0 && self.buf[self.cursor - 1] == b' ' {
@@ -403,7 +432,9 @@ impl LineEditor {
     }
 
     fn kill_word_forward<S: Serial>(&mut self, con: &mut Console<S>) {
-        if self.cursor >= self.len { return; }
+        if self.cursor >= self.len {
+            return;
+        }
         let start = self.cursor;
         let mut end = self.cursor;
         // Skip word chars
@@ -426,7 +457,9 @@ impl LineEditor {
     // ── History ──────────────────────────────────────────────────────
 
     fn history_prev<S: Serial>(&mut self, con: &mut Console<S>) {
-        if self.hist_idx >= self.history.len() { return; }
+        if self.hist_idx >= self.history.len() {
+            return;
+        }
 
         // Save current line if at idx 0
         if self.hist_idx == 0 {
@@ -436,7 +469,9 @@ impl LineEditor {
 
         if let Some((data, hlen)) = self.history.get(self.hist_idx) {
             // Move cursor to start of input
-            for _ in 0..self.cursor { con.write_str_raw("\x08"); }
+            for _ in 0..self.cursor {
+                con.write_str_raw("\x08");
+            }
             con.write_str_raw("\x1B[K");
             // Load history entry
             self.buf[..hlen].copy_from_slice(&data[..hlen]);
@@ -452,12 +487,16 @@ impl LineEditor {
     }
 
     fn history_next<S: Serial>(&mut self, con: &mut Console<S>) {
-        if self.hist_idx == 0 { return; }
+        if self.hist_idx == 0 {
+            return;
+        }
 
         self.hist_idx -= 1;
 
         // Move cursor to start of input
-        for _ in 0..self.cursor { con.write_str_raw("\x08"); }
+        for _ in 0..self.cursor {
+            con.write_str_raw("\x08");
+        }
         con.write_str_raw("\x1B[K");
 
         if self.hist_idx == 0 {
@@ -484,18 +523,26 @@ impl LineEditor {
     fn word_back_pos(&self) -> usize {
         let mut p = self.cursor;
         // Skip spaces backward
-        while p > 0 && self.buf[p - 1] == b' ' { p -= 1; }
+        while p > 0 && self.buf[p - 1] == b' ' {
+            p -= 1;
+        }
         // Skip word chars backward
-        while p > 0 && self.buf[p - 1] != b' ' { p -= 1; }
+        while p > 0 && self.buf[p - 1] != b' ' {
+            p -= 1;
+        }
         p
     }
 
     fn word_fwd_pos(&self) -> usize {
         let mut p = self.cursor;
         // Skip word chars
-        while p < self.len && self.buf[p] != b' ' { p += 1; }
+        while p < self.len && self.buf[p] != b' ' {
+            p += 1;
+        }
         // Skip spaces
-        while p < self.len && self.buf[p] == b' ' { p += 1; }
+        while p < self.len && self.buf[p] == b' ' {
+            p += 1;
+        }
         p
     }
 
@@ -503,7 +550,9 @@ impl LineEditor {
 
     /// Move terminal cursor to a new buffer position.
     fn move_cursor_to<S: Serial>(&mut self, con: &mut Console<S>, new_pos: usize) {
-        if new_pos == self.cursor { return; }
+        if new_pos == self.cursor {
+            return;
+        }
         if new_pos < self.cursor {
             // Move left
             let n = self.cursor - new_pos;
@@ -527,7 +576,9 @@ impl LineEditor {
         // Move to `from`
         if from < self.cursor {
             let n = self.cursor - from;
-            for _ in 0..n { con.write_str_raw("\x08"); }
+            for _ in 0..n {
+                con.write_str_raw("\x08");
+            }
         }
         // Print from `from` to end of buffer
         for i in from..self.len {
@@ -539,16 +590,20 @@ impl LineEditor {
         // Clear any trailing chars from old content
         con.write_str_raw(" \x08"); // space-back clears ghost char
         con.write_str_raw("\x1B[K"); // clear to end of line
-        // Move back to cursor position
+                                     // Move back to cursor position
         let back = self.len - self.cursor;
-        for _ in 0..back { con.write_str_raw("\x08"); }
+        for _ in 0..back {
+            con.write_str_raw("\x08");
+        }
     }
 
     /// Redraw entire line from scratch.
     /// Uses the stored prompt_len to know where input starts.
     fn redraw_line<S: Serial>(&self, con: &mut Console<S>) {
         // Move cursor to start of input (back up cursor positions)
-        for _ in 0..self.cursor { con.write_str_raw("\x08"); }
+        for _ in 0..self.cursor {
+            con.write_str_raw("\x08");
+        }
         // Clear from here to end of line
         con.write_str_raw("\x1B[K");
         // Re-emit the buffer
@@ -558,7 +613,9 @@ impl LineEditor {
         }
         // Move back to cursor position
         let back = self.len - self.cursor;
-        for _ in 0..back { con.write_str_raw("\x08"); }
+        for _ in 0..back {
+            con.write_str_raw("\x08");
+        }
     }
 
     /// Redraw entire line assuming terminal cursor is at column 0.
@@ -576,6 +633,8 @@ impl LineEditor {
         }
         // Position cursor
         let back = self.len - self.cursor;
-        for _ in 0..back { con.write_str_raw("\x08"); }
+        for _ in 0..back {
+            con.write_str_raw("\x08");
+        }
     }
 }

@@ -22,17 +22,16 @@ use core::fmt;
 use core::ptr;
 
 use esp_wifi_sys::include::{
-    esp_interface_t_ESP_IF_WIFI_AP, esp_interface_t_ESP_IF_WIFI_STA,
+    esp_interface_t_ESP_IF_WIFI_AP, esp_interface_t_ESP_IF_WIFI_STA, esp_supplicant_init,
     esp_wifi_connect_internal, esp_wifi_init_internal, esp_wifi_internal_free_rx_buffer,
     esp_wifi_internal_reg_rxcb, esp_wifi_internal_tx, esp_wifi_scan_get_ap_num,
-    esp_wifi_scan_get_ap_records, esp_wifi_scan_start, esp_wifi_set_config,
-    esp_wifi_set_mode, esp_wifi_set_tx_done_cb, esp_wifi_start, esp_supplicant_init,
-    g_wifi_default_wpa_crypto_funcs, wifi_ap_record_t, wifi_config_t, wifi_init_config_t,
-    wifi_interface_t_WIFI_IF_STA, wifi_mode_t_WIFI_MODE_NULL, wifi_mode_t_WIFI_MODE_STA, wifi_sta_config_t,
-    ESP_OK, WIFI_INIT_CONFIG_MAGIC,
+    esp_wifi_scan_get_ap_records, esp_wifi_scan_start, esp_wifi_set_config, esp_wifi_set_mode,
+    esp_wifi_set_tx_done_cb, esp_wifi_start, g_wifi_default_wpa_crypto_funcs, wifi_ap_record_t,
     wifi_auth_mode_t_WIFI_AUTH_OPEN, wifi_auth_mode_t_WIFI_AUTH_WEP,
-    wifi_auth_mode_t_WIFI_AUTH_WPA_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA2_PSK,
-    wifi_auth_mode_t_WIFI_AUTH_WPA3_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_PSK,
+    wifi_auth_mode_t_WIFI_AUTH_WPA2_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_PSK,
+    wifi_auth_mode_t_WIFI_AUTH_WPA3_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA_PSK, wifi_config_t,
+    wifi_init_config_t, wifi_interface_t_WIFI_IF_STA, wifi_mode_t_WIFI_MODE_NULL,
+    wifi_mode_t_WIFI_MODE_STA, wifi_sta_config_t, ESP_OK, WIFI_INIT_CONFIG_MAGIC,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,12 +61,10 @@ static mut RX_CB_REG_COUNT: u32 = 0;
 static mut RX_CB_REG_LAST_STA_RET: i32 = 0;
 static mut RX_CB_REG_LAST_AP_RET: i32 = 0;
 
-unsafe extern "C" fn recv_cb_sta(
-    buffer: *mut c_void,
-    len: u16,
-    eb: *mut c_void,
-) -> i32 {
-    unsafe { RX_CB_COUNT += 1; }
+unsafe extern "C" fn recv_cb_sta(buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
+    unsafe {
+        RX_CB_COUNT += 1;
+    }
     let frame_len = len as usize;
     if frame_len > 0 && frame_len <= FRAME_SIZE && !buffer.is_null() {
         let wi = RX_WRITE;
@@ -346,8 +343,16 @@ impl WifiManager {
             let _ = writeln!(w, "  No scan results. Run 'wifi scan' first.");
             return;
         }
-        let _ = writeln!(w, "  {:2}  {:<24} {:>4}  {:>3}  {:<6}  SIGNAL", "#", "SSID", "RSSI", "CH", "AUTH");
-        let _ = writeln!(w, "  --  {:─<24} {:─>4}  {:─>3}  {:─<6}  {:─<4}", "", "", "", "", "");
+        let _ = writeln!(
+            w,
+            "  {:2}  {:<24} {:>4}  {:>3}  {:<6}  SIGNAL",
+            "#", "SSID", "RSSI", "CH", "AUTH"
+        );
+        let _ = writeln!(
+            w,
+            "  --  {:─<24} {:─>4}  {:─>3}  {:─<6}  {:─<4}",
+            "", "", "", "", ""
+        );
         for (i, ap) in self.scan_results[..self.scan_count].iter().enumerate() {
             let _ = writeln!(
                 w,
@@ -482,7 +487,7 @@ impl Esp32Wifi {
             wpa_crypto_funcs: unsafe { g_wifi_default_wpa_crypto_funcs },
             static_rx_buf_num: 4,
             dynamic_rx_buf_num: 4,
-            tx_buf_type: 0,           // static TX buffers
+            tx_buf_type: 0, // static TX buffers
             static_tx_buf_num: 4,
             dynamic_tx_buf_num: 0,
             rx_mgmt_buf_type: 0,
@@ -526,7 +531,9 @@ impl Esp32Wifi {
 
         // Step 8: Register RX callbacks and TX done callback.
         // Match esp-wifi: register callbacks for both STA and AP interfaces.
-        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta)) };
+        let ret = unsafe {
+            esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta))
+        };
         unsafe {
             RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
             RX_CB_REG_LAST_STA_RET = ret;
@@ -534,7 +541,9 @@ impl Esp32Wifi {
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
-        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_AP, Some(recv_cb_sta)) };
+        let ret = unsafe {
+            esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_AP, Some(recv_cb_sta))
+        };
         unsafe {
             RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
             RX_CB_REG_LAST_AP_RET = ret;
@@ -559,9 +568,7 @@ impl Esp32Wifi {
         sta_cfg.password[..config.pass_len].copy_from_slice(&config.password[..config.pass_len]);
 
         let mut wifi_cfg = wifi_config_t { sta: sta_cfg };
-        let ret = unsafe {
-            esp_wifi_set_config(wifi_interface_t_WIFI_IF_STA, &mut wifi_cfg)
-        };
+        let ret = unsafe { esp_wifi_set_config(wifi_interface_t_WIFI_IF_STA, &mut wifi_cfg) };
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
@@ -573,7 +580,9 @@ impl Esp32Wifi {
         }
 
         // Some firmware paths can reset callback hooks during start/mode transitions.
-        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta)) };
+        let ret = unsafe {
+            esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta))
+        };
         unsafe {
             RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
             RX_CB_REG_LAST_STA_RET = ret;
@@ -581,7 +590,9 @@ impl Esp32Wifi {
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
-        let ret = unsafe { esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_AP, Some(recv_cb_sta)) };
+        let ret = unsafe {
+            esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_AP, Some(recv_cb_sta))
+        };
         unsafe {
             RX_CB_REG_COUNT = RX_CB_REG_COUNT.wrapping_add(1);
             RX_CB_REG_LAST_AP_RET = ret;
@@ -617,7 +628,13 @@ impl Esp32Wifi {
     }
 
     pub fn rx_reg_diag(&self) -> (u32, i32, i32) {
-        unsafe { (RX_CB_REG_COUNT, RX_CB_REG_LAST_STA_RET, RX_CB_REG_LAST_AP_RET) }
+        unsafe {
+            (
+                RX_CB_REG_COUNT,
+                RX_CB_REG_LAST_STA_RET,
+                RX_CB_REG_LAST_AP_RET,
+            )
+        }
     }
 
     /// Scan for nearby access points using the blob's scan API.
@@ -634,9 +651,10 @@ impl Esp32Wifi {
             return Ok(0);
         }
 
-        let max = ap_count.min(results.len() as u16).min(MAX_SCAN_RESULTS as u16);
-        let mut records: [wifi_ap_record_t; MAX_SCAN_RESULTS] =
-            unsafe { core::mem::zeroed() };
+        let max = ap_count
+            .min(results.len() as u16)
+            .min(MAX_SCAN_RESULTS as u16);
+        let mut records: [wifi_ap_record_t; MAX_SCAN_RESULTS] = unsafe { core::mem::zeroed() };
         let mut num = max;
         unsafe { esp_wifi_scan_get_ap_records(&mut num, records.as_mut_ptr()) };
 
@@ -645,7 +663,12 @@ impl Esp32Wifi {
             let r = &records[i];
             let mut sr = ScanResult::empty();
             // Copy SSID — find null terminator.
-            let ssid_len = r.ssid.iter().position(|&b| b == 0).unwrap_or(33).min(MAX_SSID_LEN);
+            let ssid_len = r
+                .ssid
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(33)
+                .min(MAX_SSID_LEN);
             sr.ssid[..ssid_len].copy_from_slice(&r.ssid[..ssid_len]);
             sr.ssid_len = ssid_len;
             sr.bssid = r.bssid;

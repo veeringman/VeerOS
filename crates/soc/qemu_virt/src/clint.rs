@@ -59,7 +59,9 @@ pub struct Clint {
 
 impl Clint {
     pub const fn new() -> Self {
-        Self { period: Cell::new(0) }
+        Self {
+            period: Cell::new(0),
+        }
     }
 
     /// Read the raw mtime counter.

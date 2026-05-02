@@ -10,7 +10,7 @@
 //! - 8.3 filenames only (no LFN support).
 //! - Two 512-byte scratch buffers (~1 KB RAM overhead).
 
-use crate::vfs::{InodeTable, InodeKind, MAX_INODES, NO_INODE};
+use crate::vfs::{InodeKind, InodeTable, MAX_INODES, NO_INODE};
 
 // ─── Constants ───────────────────────────────────────────────────────
 
@@ -323,8 +323,7 @@ impl Fat32 {
             }
 
             let chunk = (SECTOR_SIZE - off_in_sec).min(to_read - pos);
-            out[pos..pos + chunk]
-                .copy_from_slice(&self.buf[off_in_sec..off_in_sec + chunk]);
+            out[pos..pos + chunk].copy_from_slice(&self.buf[off_in_sec..off_in_sec + chunk]);
             pos += chunk;
             byte_off += chunk;
 
@@ -409,8 +408,7 @@ impl Fat32 {
                 // Read existing sector first.
                 self.read_sector(sec);
             }
-            self.buf[off_in_sec..off_in_sec + chunk]
-                .copy_from_slice(&data[pos..pos + chunk]);
+            self.buf[off_in_sec..off_in_sec + chunk].copy_from_slice(&data[pos..pos + chunk]);
             if !self.write_sector_out(sec) {
                 break;
             }
@@ -445,6 +443,8 @@ impl Fat32 {
             inodes.inodes[idx].size = new_end;
         }
 
+        self.update_dir_entry(inodes, inode_id);
+
         self.flush_fat();
         pos
     }
@@ -464,6 +464,7 @@ impl Fat32 {
         }
         inodes.inodes[idx].data_offset = 0;
         inodes.inodes[idx].size = 0;
+        self.update_dir_entry(inodes, inode_id);
         self.flush_fat();
         true
     }
@@ -511,7 +512,7 @@ impl Fat32 {
                         // Found a free slot — write the new entry.
                         self.buf[off..off + 11].copy_from_slice(&raw83);
                         self.buf[off + DE_ATTR] = 0x20; // ATTR_ARCHIVE
-                        // Zero remaining fields.
+                                                        // Zero remaining fields.
                         for b in &mut self.buf[off + 12..off + 32] {
                             *b = 0;
                         }
@@ -533,8 +534,7 @@ impl Fat32 {
                         inode.dev_minor = 0;
                         inode.set_name(name);
 
-                        let old_head =
-                            inodes.inodes[parent_inode as usize].children_head;
+                        let old_head = inodes.inodes[parent_inode as usize].children_head;
                         inodes.inodes[id as usize].next_sibling = old_head;
                         inodes.inodes[parent_inode as usize].children_head = id;
 
@@ -548,6 +548,25 @@ impl Fat32 {
             };
         }
         None // directory full
+    }
+
+    pub fn unlink_file(&mut self, inodes: &mut InodeTable, inode_id: u16) -> bool {
+        let idx = inode_id as usize;
+        if idx >= MAX_INODES {
+            return false;
+        }
+        if inodes.inodes[idx].kind != InodeKind::File {
+            return false;
+        }
+        if !self.mark_dir_entry_deleted(inodes, inode_id) {
+            return false;
+        }
+        let first_cluster = inodes.inodes[idx].data_offset;
+        if first_cluster >= 2 {
+            self.free_chain(first_cluster);
+        }
+        self.flush_fat();
+        inodes.unlink(inode_id)
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -680,6 +699,104 @@ impl Fat32 {
             write((self.part_offset + sec) as u64, &self.buf)
         } else {
             false
+        }
+    }
+
+    fn update_dir_entry(&mut self, inodes: &InodeTable, inode_id: u16) -> bool {
+        let idx = inode_id as usize;
+        if idx >= MAX_INODES {
+            return false;
+        }
+        let inode = &inodes.inodes[idx];
+        if inode.kind != InodeKind::File || inode.parent == NO_INODE {
+            return false;
+        }
+        let parent = &inodes.inodes[inode.parent as usize];
+        let parent_cluster = if parent.data_offset != 0 {
+            parent.data_offset
+        } else {
+            self.root_clust
+        };
+        let raw83 = make_83(inode.name_str());
+        let mut clust = parent_cluster;
+        loop {
+            let base_sec = self.cluster_to_sector(clust);
+            for sec_off in 0..self.spc as u32 {
+                let sec = base_sec + sec_off;
+                if !self.read_sector(sec) {
+                    return false;
+                }
+                for e in 0..(SECTOR_SIZE / 32) {
+                    let off = e * 32;
+                    let first = self.buf[off];
+                    if first == 0x00 {
+                        return false;
+                    }
+                    if first == 0xE5 || self.buf[off + DE_ATTR] == ATTR_LFN {
+                        continue;
+                    }
+                    if self.buf[off..off + 11] == raw83 {
+                        let cluster = inode.data_offset;
+                        let hi = ((cluster >> 16) as u16).to_le_bytes();
+                        let lo = (cluster as u16).to_le_bytes();
+                        let size = inode.size.to_le_bytes();
+                        self.buf[off + DE_CLUSHI..off + DE_CLUSHI + 2].copy_from_slice(&hi);
+                        self.buf[off + DE_CLUSLO..off + DE_CLUSLO + 2].copy_from_slice(&lo);
+                        self.buf[off + DE_SIZE..off + DE_SIZE + 4].copy_from_slice(&size);
+                        return self.write_sector_out(sec);
+                    }
+                }
+            }
+            clust = match self.next_cluster(clust) {
+                Some(c) => c,
+                None => return false,
+            };
+        }
+    }
+
+    fn mark_dir_entry_deleted(&mut self, inodes: &InodeTable, inode_id: u16) -> bool {
+        let idx = inode_id as usize;
+        if idx >= MAX_INODES {
+            return false;
+        }
+        let inode = &inodes.inodes[idx];
+        if inode.parent == NO_INODE {
+            return false;
+        }
+        let parent = &inodes.inodes[inode.parent as usize];
+        let parent_cluster = if parent.data_offset != 0 {
+            parent.data_offset
+        } else {
+            self.root_clust
+        };
+        let raw83 = make_83(inode.name_str());
+        let mut clust = parent_cluster;
+        loop {
+            let base_sec = self.cluster_to_sector(clust);
+            for sec_off in 0..self.spc as u32 {
+                let sec = base_sec + sec_off;
+                if !self.read_sector(sec) {
+                    return false;
+                }
+                for e in 0..(SECTOR_SIZE / 32) {
+                    let off = e * 32;
+                    let first = self.buf[off];
+                    if first == 0x00 {
+                        return false;
+                    }
+                    if first == 0xE5 || self.buf[off + DE_ATTR] == ATTR_LFN {
+                        continue;
+                    }
+                    if self.buf[off..off + 11] == raw83 {
+                        self.buf[off] = 0xE5;
+                        return self.write_sector_out(sec);
+                    }
+                }
+            }
+            clust = match self.next_cluster(clust) {
+                Some(c) => c,
+                None => return false,
+            };
         }
     }
 }

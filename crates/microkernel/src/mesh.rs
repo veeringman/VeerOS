@@ -35,9 +35,7 @@
 //! When connectivity resumes, gossip re-syncs the peer table and
 //! distributed memory sync resolves conflicts.
 
-use crate::fabric_proto::{
-    NodeId, MsgType, WireMsg, ProtoError, MAX_MSG_LEN, NODE_ID_LEN,
-};
+use crate::fabric_proto::{MsgType, NodeId, ProtoError, WireMsg, MAX_MSG_LEN, NODE_ID_LEN};
 use crate::node_identity::{TrustLevel, MAX_PEERS};
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -331,13 +329,7 @@ impl MeshTransport {
     /// If the destination is a direct peer, the message goes directly.
     /// If indirect, the message is addressed to the next-hop.
     /// Returns true if successfully queued.
-    pub fn enqueue(
-        &mut self,
-        dest: &NodeId,
-        msg: &WireMsg,
-        priority: u8,
-        tick: u64,
-    ) -> bool {
+    pub fn enqueue(&mut self, dest: &NodeId, msg: &WireMsg, priority: u8, tick: u64) -> bool {
         if !self.active {
             return false;
         }
@@ -437,12 +429,7 @@ impl MeshTransport {
     /// If addressed to another node, forwards it (decrements hop count).
     ///
     /// Returns `Some(msg_bytes)` if the message is for us.
-    pub fn receive<'a>(
-        &mut self,
-        from: &NodeId,
-        data: &'a [u8],
-        tick: u64,
-    ) -> Option<&'a [u8]> {
+    pub fn receive<'a>(&mut self, from: &NodeId, data: &'a [u8], tick: u64) -> Option<&'a [u8]> {
         self.stats.msgs_received += 1;
         self.stats.bytes_received += data.len() as u64;
 
@@ -465,9 +452,7 @@ impl MeshTransport {
     /// Periodic tick — expire stale routes.
     pub fn tick(&mut self, current_tick: u64) {
         for route in self.routes.iter_mut() {
-            if route.active
-                && current_tick.saturating_sub(route.last_seen) > PEER_TIMEOUT
-            {
+            if route.active && current_tick.saturating_sub(route.last_seen) > PEER_TIMEOUT {
                 route.active = false;
                 if route.direct {
                     self.stats.direct_peers = self.stats.direct_peers.saturating_sub(1);

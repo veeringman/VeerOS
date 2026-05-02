@@ -32,7 +32,12 @@ pub struct ChanMsg {
 
 impl ChanMsg {
     pub const fn empty() -> Self {
-        Self { word0: 0, word1: 0, word2: 0, word3: 0 }
+        Self {
+            word0: 0,
+            word1: 0,
+            word2: 0,
+            word3: 0,
+        }
     }
 }
 
@@ -102,10 +107,14 @@ impl Channels {
     pub const fn new() -> Self {
         Self {
             chans: [
-                Channel::empty(), Channel::empty(),
-                Channel::empty(), Channel::empty(),
-                Channel::empty(), Channel::empty(),
-                Channel::empty(), Channel::empty(),
+                Channel::empty(),
+                Channel::empty(),
+                Channel::empty(),
+                Channel::empty(),
+                Channel::empty(),
+                Channel::empty(),
+                Channel::empty(),
+                Channel::empty(),
             ],
         }
     }
@@ -200,11 +209,7 @@ impl Channels {
     /// - `Ok(Some(msg))` — message received, wake a sender if any was blocked
     /// - `Ok(None)` — channel empty, caller should be blocked
     /// - `Err(())` — invalid channel or channel closed
-    pub fn recv(
-        &mut self,
-        sched: &mut Scheduler,
-        chan_id: usize,
-    ) -> Result<Option<ChanMsg>, ()> {
+    pub fn recv(&mut self, sched: &mut Scheduler, chan_id: usize) -> Result<Option<ChanMsg>, ()> {
         if chan_id >= MAX_CHANNELS || !self.chans[chan_id].open {
             return Err(());
         }

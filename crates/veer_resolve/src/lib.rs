@@ -87,7 +87,10 @@ impl Resolver {
         }
         self.stats.cache_misses += 1;
 
-        let candidates = self.registry.get(&canonical).ok_or(ResolveError::NotFound)?;
+        let candidates = self
+            .registry
+            .get(&canonical)
+            .ok_or(ResolveError::NotFound)?;
         let mut aura_denied = false;
 
         let allowed_healthy: Vec<&ServiceBinding> = candidates
@@ -128,7 +131,12 @@ impl Resolver {
             selected,
         };
 
-        self.cache.insert(cache_key, CacheEntry { value: resolved.clone() });
+        self.cache.insert(
+            cache_key,
+            CacheEntry {
+                value: resolved.clone(),
+            },
+        );
         Ok(resolved)
     }
 
@@ -152,8 +160,12 @@ impl Resolver {
 ///
 /// Encodes canonical VAS address into compact binary form (type code + atom
 /// IDs via registry), then derives a stable 64-bit compact ID from bytes.
-pub fn object_id_for(canonical_address: &str, registry: &mut AtomRegistry) -> Result<u64, ResolveError> {
-    let enc = parse_and_encode(canonical_address, registry).map_err(|_| ResolveError::InvalidAddress)?;
+pub fn object_id_for(
+    canonical_address: &str,
+    registry: &mut AtomRegistry,
+) -> Result<u64, ResolveError> {
+    let enc =
+        parse_and_encode(canonical_address, registry).map_err(|_| ResolveError::InvalidAddress)?;
     Ok(enc.compact_id())
 }
 
@@ -175,7 +187,10 @@ mod tests {
         let mut r = Resolver::new();
         r.register(
             "svc{render,company,live}",
-            ServiceBinding { endpoint: ep("nod-a", 12, true), required_aura: None },
+            ServiceBinding {
+                endpoint: ep("nod-a", 12, true),
+                required_aura: None,
+            },
         )
         .unwrap();
 
@@ -189,17 +204,26 @@ mod tests {
         let mut r = Resolver::new();
         r.register(
             "svc{render,company,live}",
-            ServiceBinding { endpoint: ep("nod-slow", 40, true), required_aura: None },
+            ServiceBinding {
+                endpoint: ep("nod-slow", 40, true),
+                required_aura: None,
+            },
         )
         .unwrap();
         r.register(
             "svc{render,company,live}",
-            ServiceBinding { endpoint: ep("nod-fast", 8, true), required_aura: None },
+            ServiceBinding {
+                endpoint: ep("nod-fast", 8, true),
+                required_aura: None,
+            },
         )
         .unwrap();
         r.register(
             "svc{render,company,live}",
-            ServiceBinding { endpoint: ep("nod-down", 1, false), required_aura: None },
+            ServiceBinding {
+                endpoint: ep("nod-down", 1, false),
+                required_aura: None,
+            },
         )
         .unwrap();
 
@@ -236,12 +260,19 @@ mod tests {
         let mut r = Resolver::new();
         r.register(
             "svc{render,company,live}",
-            ServiceBinding { endpoint: ep("nod-a", 12, true), required_aura: None },
+            ServiceBinding {
+                endpoint: ep("nod-a", 12, true),
+                required_aura: None,
+            },
         )
         .unwrap();
 
-        let _ = r.resolve("svc{render,company,live}", &["aur{a,b,c}"]).unwrap();
-        let _ = r.resolve("svc{render,company,live}", &["aur{a,b,c}"]).unwrap();
+        let _ = r
+            .resolve("svc{render,company,live}", &["aur{a,b,c}"])
+            .unwrap();
+        let _ = r
+            .resolve("svc{render,company,live}", &["aur{a,b,c}"])
+            .unwrap();
 
         assert_eq!(r.stats().cache_misses, 1);
         assert_eq!(r.stats().cache_hits, 1);

@@ -9,6 +9,7 @@ pub enum BootSource {
 pub enum GuestArch {
     X86_64,
     Riscv32,
+    Aarch64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +32,7 @@ impl GuestArch {
         match self {
             GuestArch::X86_64 => "x86_64",
             GuestArch::Riscv32 => "riscv32",
+            GuestArch::Aarch64 => "aarch64",
         }
     }
 }

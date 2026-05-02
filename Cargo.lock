@@ -458,6 +458,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel-aarch64-virt"
+version = "0.1.0"
+dependencies = [
+ "arch",
+ "crypto",
+ "microkernel",
+ "net",
+ "panic-halt",
+ "shell",
+ "smoltcp",
+ "soc-aarch64-virt",
+ "ssh",
+]
+
+[[package]]
 name = "kernel-esp32c3"
 version = "0.1.0"
 dependencies = [
@@ -981,6 +996,13 @@ dependencies = [
  "cfg-if",
  "heapless",
  "managed",
+]
+
+[[package]]
+name = "soc-aarch64-virt"
+version = "0.1.0"
+dependencies = [
+ "arch",
 ]
 
 [[package]]

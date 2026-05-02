@@ -27,7 +27,10 @@ pub mod x86_64;
 ///
 /// Assembly trap code and kernel binaries use this directly.
 /// The `SavedContext` trait provides architecture-neutral access.
-#[cfg(any(target_arch = "riscv32", not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[cfg(any(
+    target_arch = "riscv32",
+    not(any(target_arch = "aarch64", target_arch = "x86_64"))
+))]
 pub type TaskContext = riscv32::Riscv32Context;
 
 #[cfg(target_arch = "aarch64")]
@@ -61,7 +64,9 @@ pub trait Serial {
     fn read_byte(&self) -> u8;
 
     /// Returns `true` if at least one byte is available to read without blocking.
-    fn has_data(&self) -> bool { false }
+    fn has_data(&self) -> bool {
+        false
+    }
 
     /// Flush any buffered TX data to the wire.  Default is no-op (for
     /// byte-at-a-time UART drivers); USB-CDC drivers should override.
@@ -262,7 +267,11 @@ pub struct TaskMemRegion {
 
 impl TaskMemRegion {
     pub const fn empty() -> Self {
-        Self { base: 0, size: 0, perms: MemPerms::NONE }
+        Self {
+            base: 0,
+            size: 0,
+            perms: MemPerms::NONE,
+        }
     }
 
     /// Returns `true` if the range `[addr, addr+len)` is fully inside this
@@ -315,7 +324,9 @@ pub enum NetMedium {
 /// Ethernet frames.
 pub trait NetworkDevice {
     /// Maximum transmission unit (bytes of payload the device can carry).
-    fn mtu(&self) -> usize { 1514 }
+    fn mtu(&self) -> usize {
+        1514
+    }
 
     /// Returns `true` when at least one received frame is pending.
     fn has_rx(&self) -> bool;
@@ -331,11 +342,15 @@ pub trait NetworkDevice {
     fn mac_address(&self) -> [u8; 6];
 
     /// The network medium. Defaults to Ethernet; 802.15.4 radios override.
-    fn medium(&self) -> NetMedium { NetMedium::Ethernet }
+    fn medium(&self) -> NetMedium {
+        NetMedium::Ethernet
+    }
 
     /// Extended MAC address (EUI-64) for 802.15.4 radios.
     /// Returns zeros by default (Ethernet devices don't need this).
-    fn mac_address_ext(&self) -> [u8; 8] { [0u8; 8] }
+    fn mac_address_ext(&self) -> [u8; 8] {
+        [0u8; 8]
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -543,12 +558,7 @@ pub trait UsbHostController {
     /// - `buf`: buffer to receive data
     ///
     /// Returns number of bytes received, or `None` if no data / NAK.
-    fn interrupt_in(
-        &mut self,
-        addr: u8,
-        ep: u8,
-        buf: &mut [u8],
-    ) -> Option<usize>;
+    fn interrupt_in(&mut self, addr: u8, ep: u8, buf: &mut [u8]) -> Option<usize>;
 
     /// Get info about an enumerated device. Returns `None` if no device.
     fn device_info(&self, addr: u8) -> Option<UsbDeviceInfo>;

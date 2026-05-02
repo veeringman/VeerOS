@@ -23,11 +23,7 @@ const UART0_BASE: usize = 0x6000_0000;
 #[cfg(feature = "h2")]
 const UART0_BASE: usize = 0x6000_0000;
 
-#[cfg(all(
-    not(feature = "c3"),
-    not(feature = "c6"),
-    not(feature = "h2"),
-))]
+#[cfg(all(not(feature = "c3"), not(feature = "c6"), not(feature = "h2"),))]
 const UART0_BASE: usize = 0x6000_0000; // sensible default
 
 // ---------------------------------------------------------------------------

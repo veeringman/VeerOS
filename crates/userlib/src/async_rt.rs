@@ -26,9 +26,10 @@ use crate::poll as kpoll;
 
 fn noop_raw_waker() -> RawWaker {
     fn no_op(_: *const ()) {}
-    fn clone_fn(_: *const ()) -> RawWaker { noop_raw_waker() }
-    static VTABLE: RawWakerVTable =
-        RawWakerVTable::new(clone_fn, no_op, no_op, no_op);
+    fn clone_fn(_: *const ()) -> RawWaker {
+        noop_raw_waker()
+    }
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone_fn, no_op, no_op, no_op);
     RawWaker::new(core::ptr::null(), &VTABLE)
 }
 
@@ -171,7 +172,13 @@ impl AsyncSend {
     /// Create a future that sends `(word0, word1, word2, word3)` to `chan_id`
     /// once the channel has space.
     pub fn new(chan_id: usize, word0: usize, word1: usize, word2: usize, word3: usize) -> Self {
-        Self { chan_id, word0, word1, word2, word3 }
+        Self {
+            chan_id,
+            word0,
+            word1,
+            word2,
+            word3,
+        }
     }
 }
 
@@ -185,7 +192,8 @@ impl Future for AsyncSend {
         let fired = kpoll::poll_wait(0);
 
         if fired & kpoll::POLL_CHAN_WRITABLE != 0 {
-            let ok = crate::channel::send(this.chan_id, this.word0, this.word1, this.word2, this.word3);
+            let ok =
+                crate::channel::send(this.chan_id, this.word0, this.word1, this.word2, this.word3);
             Poll::Ready(ok)
         } else {
             kpoll::poll_set(kpoll::POLL_CHAN_WRITABLE, this.chan_id);

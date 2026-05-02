@@ -8,30 +8,31 @@
 //! The dispatcher receives mutable references to all kernel subsystems so
 //! it can service any syscall without global state lookups.
 
-use arch::{SavedContext, TaskContext, MemPerms, validate_user_ptr};
-use crate::agent::{AgentTable, AgentState, AgentBlockReason, Goal, GoalPriority};
-use crate::channel::{Channels, ChanMsg};
+use crate::agent::{AgentBlockReason, AgentState, AgentTable, Goal, GoalPriority};
+use crate::alloc::Heap;
+use crate::audit::{AuditEvent, AuditLog};
+use crate::channel::{ChanMsg, Channels};
 use crate::driver::DriverRegistry;
 use crate::fabric::ExecutionFabric;
 use crate::fat32::{Fat32, MAX_FAT32};
 use crate::futex::FutexTable;
 use crate::input::InputSubsystem;
-use crate::intent::{IntentEngine, IntentClass, IntentStatus};
+use crate::intent::{IntentClass, IntentEngine, IntentStatus};
 use crate::intent_sched::IntentScheduler;
 use crate::ipc::{Ipc, Message};
-use crate::memory_engine::{MemoryEngine, MemoryTag, MemoryScope};
+use crate::memory_engine::{MemoryEngine, MemoryScope, MemoryTag};
 use crate::poll::PollTable;
-use crate::process::{ProcessTable, ProcessCaps};
+use crate::process::{ProcessCaps, ProcessTable};
 use crate::ramfs::RamFs;
 use crate::socket::SocketTable;
+use crate::syscall::*;
 use crate::task::{BlockReason, Scheduler, TaskState};
 use crate::user::UserTable;
-use crate::vfs::{InodeTable, InodeKind, FileDescriptor, OpenFlags, DirEntry, StatBuf,
-                 MountTable, FsType,
-                 MAX_FDS, NO_INODE, ROOT_INODE, SEEK_SET, SEEK_CUR, SEEK_END};
-use crate::alloc::Heap;
-use crate::audit::{AuditLog, AuditEvent};
-use crate::syscall::*;
+use crate::vfs::{
+    DirEntry, FileDescriptor, FsType, InodeKind, InodeTable, MountTable, OpenFlags, StatBuf,
+    MAX_FDS, NO_INODE, ROOT_INODE, SEEK_CUR, SEEK_END, SEEK_SET,
+};
+use arch::{validate_user_ptr, MemPerms, SavedContext, TaskContext};
 
 /// Result of a syscall dispatch — tells the trap handler what to do next.
 pub enum SyscallAction {
@@ -75,8 +76,7 @@ fn check_user_ptr(
     }
     // Legacy mode: no regions at all → allow.
     if tcb.region_count == 0
-        && (pid >= crate::process::MAX_PROCESSES
-            || procs.processes[pid].region_count == 0)
+        && (pid >= crate::process::MAX_PROCESSES || procs.processes[pid].region_count == 0)
     {
         return true;
     }
@@ -93,7 +93,11 @@ fn fat32_for_mount<'a>(
 ) -> &'a mut Fat32 {
     let idx = if mount_id > 0 && (mount_id as usize) <= crate::vfs::MAX_MOUNTS {
         let blk = mounts.mounts[(mount_id - 1) as usize].blk_index as usize;
-        if blk < MAX_FAT32 { blk } else { 0 }
+        if blk < MAX_FAT32 {
+            blk
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -164,121 +168,96 @@ pub unsafe fn dispatch(
     // with a0 = usize::MAX (EPERM equivalent).
     let required_cap = match nr {
         // Task basics: yield, exit, task_id, priority, count, tls
-        SYS_YIELD | SYS_EXIT | SYS_TASK_ID | SYS_TASK_PRIORITY
-        | SYS_TASK_COUNT | SYS_TLS_GET | SYS_TLS_SET
-            => ProcessCaps::TASK_BASIC,
+        SYS_YIELD | SYS_EXIT | SYS_TASK_ID | SYS_TASK_PRIORITY | SYS_TASK_COUNT | SYS_TLS_GET
+        | SYS_TLS_SET => ProcessCaps::TASK_BASIC,
 
         // Thread/process spawning
-        SYS_SPAWN | SYS_JOIN      => ProcessCaps::SPAWN_THREAD,
-        SYS_SPAWN_PROCESS
-        | SYS_PROCESS_ID | SYS_THREAD_COUNT
-            => ProcessCaps::SPAWN_PROCESS,
+        SYS_SPAWN | SYS_JOIN => ProcessCaps::SPAWN_THREAD,
+        SYS_SPAWN_PROCESS | SYS_PROCESS_ID | SYS_THREAD_COUNT => ProcessCaps::SPAWN_PROCESS,
 
         // IPC
-        SYS_IPC_SEND | SYS_IPC_RECV | SYS_IPC_POLL
-            => ProcessCaps::IPC,
+        SYS_IPC_SEND | SYS_IPC_RECV | SYS_IPC_POLL => ProcessCaps::IPC,
 
         // Console I/O
-        SYS_WRITE_BYTE | SYS_WRITE_BUF | SYS_READ_BYTE
-            => ProcessCaps::CONSOLE_IO,
+        SYS_WRITE_BYTE | SYS_WRITE_BUF | SYS_READ_BYTE => ProcessCaps::CONSOLE_IO,
 
         // Time
         SYS_TICK | SYS_SLEEP => ProcessCaps::TIME,
 
         // Memory
-        SYS_ALLOC | SYS_FREE | SYS_MEM_REGION_COUNT | SYS_MEM_REGION_INFO
-            => ProcessCaps::MEM,
+        SYS_ALLOC | SYS_FREE | SYS_MEM_REGION_COUNT | SYS_MEM_REGION_INFO => ProcessCaps::MEM,
 
         // Synchronization
         SYS_FUTEX_WAIT | SYS_FUTEX_WAKE => ProcessCaps::SYNC,
 
         // Channels
-        SYS_CHAN_CREATE | SYS_CHAN_SEND | SYS_CHAN_RECV
-        | SYS_CHAN_CLOSE | SYS_CHAN_POLL
-            => ProcessCaps::CHANNEL,
+        SYS_CHAN_CREATE | SYS_CHAN_SEND | SYS_CHAN_RECV | SYS_CHAN_CLOSE | SYS_CHAN_POLL => {
+            ProcessCaps::CHANNEL
+        }
 
         // Poll
         SYS_POLL_SET | SYS_POLL_WAIT => ProcessCaps::POLL,
 
         // Sockets
-        SYS_SOCKET | SYS_BIND | SYS_LISTEN | SYS_ACCEPT
-        | SYS_CONNECT | SYS_SOCK_SEND | SYS_SOCK_RECV | SYS_SOCK_CLOSE
-            => ProcessCaps::NET,
+        SYS_SOCKET | SYS_BIND | SYS_LISTEN | SYS_ACCEPT | SYS_CONNECT | SYS_SOCK_SEND
+        | SYS_SOCK_RECV | SYS_SOCK_CLOSE => ProcessCaps::NET,
 
         // User administration
-        SYS_GETUID | SYS_GETGID  => ProcessCaps::TASK_BASIC, // read-only, always allowed
-        SYS_SETUID | SYS_LOGIN | SYS_LOGOUT
-            => ProcessCaps::USER_ADMIN,
+        SYS_GETUID | SYS_GETGID => ProcessCaps::TASK_BASIC, // read-only, always allowed
+        SYS_SETUID | SYS_LOGIN | SYS_LOGOUT => ProcessCaps::USER_ADMIN,
 
         // Filesystem (read/write/stat)
-        SYS_OPEN | SYS_CLOSE | SYS_READ | SYS_WRITE | SYS_SEEK
-        | SYS_STAT | SYS_FSTAT | SYS_MKDIR | SYS_UNLINK
-        | SYS_READDIR | SYS_TRUNCATE | SYS_RENAME
-        | SYS_GETCWD | SYS_CHDIR
-            => ProcessCaps::FS,
+        SYS_OPEN | SYS_CLOSE | SYS_READ | SYS_WRITE | SYS_SEEK | SYS_STAT | SYS_FSTAT
+        | SYS_MKDIR | SYS_UNLINK | SYS_READDIR | SYS_TRUNCATE | SYS_RENAME | SYS_GETCWD
+        | SYS_CHDIR => ProcessCaps::FS,
 
         // Mount / unmount (privileged)
         SYS_MOUNT | SYS_UMOUNT => ProcessCaps::MOUNT,
 
         // Driver MMIO / IRQ
-        SYS_DRV_MMIO_READ32 | SYS_DRV_MMIO_WRITE32
-        | SYS_DRV_IRQ_WAIT | SYS_DRV_IRQ_ACK
-        | SYS_DRV_REGISTER | SYS_DRV_LOG
-            => ProcessCaps::DRIVER,
+        SYS_DRV_MMIO_READ32 | SYS_DRV_MMIO_WRITE32 | SYS_DRV_IRQ_WAIT | SYS_DRV_IRQ_ACK
+        | SYS_DRV_REGISTER | SYS_DRV_LOG => ProcessCaps::DRIVER,
 
         // Hardware GPIO / I2C / SPI / sensors
-        SYS_GPIO_SET_MODE | SYS_GPIO_READ | SYS_GPIO_WRITE | SYS_GPIO_SET_PULL
-        | SYS_I2C_WRITE | SYS_I2C_READ | SYS_SPI_TRANSFER
-        | SYS_GET_TEMP | SYS_HW_INFO
-            => ProcessCaps::HW,
+        SYS_GPIO_SET_MODE | SYS_GPIO_READ | SYS_GPIO_WRITE | SYS_GPIO_SET_PULL | SYS_I2C_WRITE
+        | SYS_I2C_READ | SYS_SPI_TRANSFER | SYS_GET_TEMP | SYS_HW_INFO => ProcessCaps::HW,
 
         // Capability management
-        SYS_CAP_GET => ProcessCaps::TASK_BASIC,  // read-only, always allowed
-        SYS_CAP_DROP | SYS_CAP_SET_CHILD
-            => ProcessCaps::CAP_ADMIN,
+        SYS_CAP_GET => ProcessCaps::TASK_BASIC, // read-only, always allowed
+        SYS_CAP_DROP | SYS_CAP_SET_CHILD => ProcessCaps::CAP_ADMIN,
 
         // Unified accelerator interface (desktop/server only)
         #[cfg(feature = "accel")]
-        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
-        | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
-        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT
-            => ProcessCaps::ACCEL,
+        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
+        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => ProcessCaps::ACCEL,
 
         // Audit syscalls — read-only, always allowed
         SYS_AUDIT_READ | SYS_AUDIT_COUNT => ProcessCaps::TASK_BASIC,
 
         // AI-Native Execution — Agents
-        SYS_AGENT_SPAWN | SYS_AGENT_STATUS | SYS_AGENT_COMPLETE
-        | SYS_AGENT_CTX_SET | SYS_AGENT_CTX_GET | SYS_AGENT_COUNT
-            => ProcessCaps::AGENT,
+        SYS_AGENT_SPAWN | SYS_AGENT_STATUS | SYS_AGENT_COMPLETE | SYS_AGENT_CTX_SET
+        | SYS_AGENT_CTX_GET | SYS_AGENT_COUNT => ProcessCaps::AGENT,
 
         // AI-Native Execution — Intents
-        SYS_INTENT_SUBMIT | SYS_INTENT_STATUS | SYS_INTENT_CANCEL
-            => ProcessCaps::INTENT,
+        SYS_INTENT_SUBMIT | SYS_INTENT_STATUS | SYS_INTENT_CANCEL => ProcessCaps::INTENT,
 
         // AI-Native Execution — Memory Engine
-        SYS_MEMORY_STORE | SYS_MEMORY_QUERY
-            => ProcessCaps::MEMORY_ENGINE,
+        SYS_MEMORY_STORE | SYS_MEMORY_QUERY => ProcessCaps::MEMORY_ENGINE,
 
         // AI-Native Execution — Fabric + Intent Scheduler stats (read-only)
-        SYS_FABRIC_STATUS | SYS_INTENT_SCHED_STATS
-            => ProcessCaps::TASK_BASIC,
+        SYS_FABRIC_STATUS | SYS_INTENT_SCHED_STATS => ProcessCaps::TASK_BASIC,
 
         // Distributed Fabric — Peer management (admin)
-        SYS_PEER_REGISTER | SYS_PEER_VERIFY
-            => ProcessCaps::FABRIC_ADMIN,
+        SYS_PEER_REGISTER | SYS_PEER_VERIFY => ProcessCaps::FABRIC_ADMIN,
 
         // Distributed Fabric — Peer status (read-only)
-        SYS_PEER_STATUS | SYS_MESH_STATUS | SYS_FABRIC_SESSION_COUNT
-            => ProcessCaps::TASK_BASIC,
+        SYS_PEER_STATUS | SYS_MESH_STATUS | SYS_FABRIC_SESSION_COUNT => ProcessCaps::TASK_BASIC,
 
         // Distributed Fabric — ZKP proofs
-        SYS_ZKP_PROVE | SYS_ZKP_VERIFY
-            => ProcessCaps::ZKP,
+        SYS_ZKP_PROVE | SYS_ZKP_VERIFY => ProcessCaps::ZKP,
 
         // Distributed Fabric — Mesh transport
-        SYS_MESH_SEND
-            => ProcessCaps::FABRIC_MIGRATE,
+        SYS_MESH_SEND => ProcessCaps::FABRIC_MIGRATE,
 
         // Debug / platform info — always allowed
         SYS_PANIC | SYS_PLATFORM_NAME => ProcessCaps::TASK_BASIC,
@@ -375,17 +354,22 @@ pub unsafe fn dispatch(
 
         SYS_TASK_PRIORITY => {
             let cur = sched.current;
-            c.set_ret(0, if cur < sched.tasks.len() {
-                sched.tasks[cur].priority as usize
-            } else {
-                0
-            });
+            c.set_ret(
+                0,
+                if cur < sched.tasks.len() {
+                    sched.tasks[cur].priority as usize
+                } else {
+                    0
+                },
+            );
             SyscallAction::Resume
         }
 
         SYS_TASK_COUNT => {
             use crate::task::TaskState;
-            let count = sched.tasks.iter()
+            let count = sched
+                .tasks
+                .iter()
                 .filter(|t| t.state != TaskState::Free)
                 .count();
             c.set_ret(0, count);
@@ -403,7 +387,14 @@ pub unsafe fn dispatch(
             } else {
                 0
             };
-            match sched.create_task("spawned", entry, stack_top, stack_bottom, priority, parent_pid) {
+            match sched.create_task(
+                "spawned",
+                entry,
+                stack_top,
+                stack_bottom,
+                priority,
+                parent_pid,
+            ) {
                 Some(child_id) => {
                     // Inherit caller execution status (M/U mode and interrupt bits).
                     // Required for kernel-spawned helper threads (e.g., WiFi blob tasks)
@@ -469,7 +460,14 @@ pub unsafe fn dispatch(
             match processes.create("process", parent_pid, uid, gid) {
                 Some(new_pid) => {
                     // Create the initial thread in the new process.
-                    match sched.create_task("main", entry, stack_top, stack_bottom, priority, new_pid) {
+                    match sched.create_task(
+                        "main",
+                        entry,
+                        stack_top,
+                        stack_bottom,
+                        priority,
+                        new_pid,
+                    ) {
                         Some(tid) => {
                             sched.tasks[tid].parent = caller;
                             processes.processes[new_pid].thread_count = 1;
@@ -611,8 +609,8 @@ pub unsafe fn dispatch(
         // ── Time ────────────────────────────────────────────────
         SYS_TICK => {
             let ticks = sched.ticks;
-            c.set_ret(0, ticks as usize);           // low word
-            c.set_ret(1, (ticks >> 32) as usize);   // high word (32-bit targets)
+            c.set_ret(0, ticks as usize); // low word
+            c.set_ret(1, (ticks >> 32) as usize); // high word (32-bit targets)
             SyscallAction::Resume
         }
 
@@ -735,7 +733,13 @@ pub unsafe fn dispatch(
             let expected = a1;
             let tid = sched.current;
             // Validate futex address (4-byte read).
-            if !check_user_ptr(sched, processes, addr, core::mem::size_of::<usize>(), MemPerms::READ) {
+            if !check_user_ptr(
+                sched,
+                processes,
+                addr,
+                core::mem::size_of::<usize>(),
+                MemPerms::READ,
+            ) {
                 c.set_ret(0, usize::MAX); // invalid address
                 return SyscallAction::Resume;
             }
@@ -768,7 +772,12 @@ pub unsafe fn dispatch(
 
         SYS_CHAN_SEND => {
             let chan_id = a0;
-            let msg = ChanMsg { word0: a1, word1: a2, word2: a3, word3: a4 };
+            let msg = ChanMsg {
+                word0: a1,
+                word1: a2,
+                word2: a3,
+                word3: a4,
+            };
             match channels.send(sched, chan_id, msg) {
                 Ok(true) => {
                     c.set_ret(0, 1); // success
@@ -884,7 +893,6 @@ pub unsafe fn dispatch(
         }
 
         // ── Sockets (0x70–0x7F) ─────────────────────────────────
-
         SYS_SOCKET => {
             let handle = sockets.create(a0, a1);
             c.set_ret(0, handle);
@@ -1113,23 +1121,33 @@ pub unsafe fn dispatch(
         }
 
         // ── Filesystem (0xA0–0xAF) ─────────────────────────────
-
         SYS_OPEN => {
             let path_ptr = a0;
             let path_len = a1;
             let flags = OpenFlags::from_raw(a2 as u8);
-            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ) || path_len == 0 || path_len > 256 {
+            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ)
+                || path_len == 0
+                || path_len > 256
+            {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
-            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
             let path = match core::str::from_utf8(path_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
 
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1141,11 +1159,15 @@ pub unsafe fn dispatch(
                 match inodes.resolve(cwd, path) {
                     Some(id) => {
                         // File exists — if O_TRUNC, truncate it.
-                        if flags.contains(OpenFlags::O_TRUNC) && inodes.inodes[id as usize].kind == InodeKind::File {
+                        if flags.contains(OpenFlags::O_TRUNC)
+                            && inodes.inodes[id as usize].kind == InodeKind::File
+                        {
                             let mount_id = inodes.inodes[id as usize].dev_major;
                             if mount_id > 0 {
                                 let fat = fat32_for_mount(fat32s, mounts, mount_id);
-                                if fat.mounted { fat.truncate(inodes, id); }
+                                if fat.mounted {
+                                    fat.truncate(inodes, id);
+                                }
                             } else {
                                 ramfs.truncate(inodes, id, 0);
                             }
@@ -1160,21 +1182,31 @@ pub unsafe fn dispatch(
                         } else {
                             match inodes.resolve(cwd, parent_path) {
                                 Some(p) => p,
-                                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                                None => {
+                                    c.set_ret(0, usize::MAX);
+                                    return SyscallAction::Resume;
+                                }
                             }
                         };
                         // Check if the parent is under a FAT32 mount.
                         let parent_mount = inodes.inodes[parent_id as usize].dev_major;
                         let parent_fat = fat32_for_mount(fat32s, mounts, parent_mount);
                         if parent_mount > 0 && parent_fat.mounted {
-                            match parent_fat.create_file(inodes, parent_id, file_name, parent_mount) {
+                            match parent_fat.create_file(inodes, parent_id, file_name, parent_mount)
+                            {
                                 Some(id) => id,
-                                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                                None => {
+                                    c.set_ret(0, usize::MAX);
+                                    return SyscallAction::Resume;
+                                }
                             }
                         } else {
                             match inodes.create_file_in(parent_id, file_name) {
                                 Some(id) => id,
-                                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                                None => {
+                                    c.set_ret(0, usize::MAX);
+                                    return SyscallAction::Resume;
+                                }
                             }
                         }
                     }
@@ -1182,18 +1214,25 @@ pub unsafe fn dispatch(
             } else {
                 match inodes.resolve(cwd, path) {
                     Some(id) => {
-                        if flags.contains(OpenFlags::O_TRUNC) && inodes.inodes[id as usize].kind == InodeKind::File {
+                        if flags.contains(OpenFlags::O_TRUNC)
+                            && inodes.inodes[id as usize].kind == InodeKind::File
+                        {
                             let mount_id = inodes.inodes[id as usize].dev_major;
                             if mount_id > 0 {
                                 let fat = fat32_for_mount(fat32s, mounts, mount_id);
-                                if fat.mounted { fat.truncate(inodes, id); }
+                                if fat.mounted {
+                                    fat.truncate(inodes, id);
+                                }
                             } else {
                                 ramfs.truncate(inodes, id, 0);
                             }
                         }
                         id
                     }
-                    None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                    None => {
+                        c.set_ret(0, usize::MAX);
+                        return SyscallAction::Resume;
+                    }
                 }
             };
 
@@ -1228,7 +1267,11 @@ pub unsafe fn dispatch(
         SYS_CLOSE => {
             let fd = a0;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES || fd >= MAX_FDS {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1249,7 +1292,11 @@ pub unsafe fn dispatch(
             let buf_ptr = a1;
             let count = a2;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES || fd >= MAX_FDS {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1261,7 +1308,10 @@ pub unsafe fn dispatch(
             let proc = &mut processes.processes[pid];
             let file_desc = match proc.fds[fd] {
                 Some(ref f) => *f,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             if !file_desc.flags.readable() {
                 c.set_ret(0, usize::MAX);
@@ -1289,7 +1339,11 @@ pub unsafe fn dispatch(
                     let mount_id = inodes.inodes[idx].dev_major;
                     if mount_id > 0 {
                         let fat = fat32_for_mount(fat32s, mounts, mount_id);
-                        if fat.mounted { fat.read(inodes, inode_id, file_desc.cursor, buf) } else { 0 }
+                        if fat.mounted {
+                            fat.read(inodes, inode_id, file_desc.cursor, buf)
+                        } else {
+                            0
+                        }
                     } else {
                         ramfs.read(inodes, inode_id, file_desc.cursor, buf)
                     }
@@ -1311,7 +1365,11 @@ pub unsafe fn dispatch(
             let buf_ptr = a1;
             let count = a2;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES || fd >= MAX_FDS {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1323,7 +1381,10 @@ pub unsafe fn dispatch(
             let proc = &mut processes.processes[pid];
             let file_desc = match proc.fds[fd] {
                 Some(ref f) => *f,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             if !file_desc.flags.writable() {
                 c.set_ret(0, usize::MAX);
@@ -1356,7 +1417,11 @@ pub unsafe fn dispatch(
                     let mount_id = inodes.inodes[idx].dev_major;
                     if mount_id > 0 {
                         let fat = fat32_for_mount(fat32s, mounts, mount_id);
-                        if fat.mounted { fat.write(inodes, inode_id, cursor, data) } else { 0 }
+                        if fat.mounted {
+                            fat.write(inodes, inode_id, cursor, data)
+                        } else {
+                            0
+                        }
                     } else {
                         ramfs.write(inodes, inode_id, cursor, data)
                     }
@@ -1378,14 +1443,21 @@ pub unsafe fn dispatch(
             let offset = a1;
             let whence = a2;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES || fd >= MAX_FDS {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
             let f = match processes.processes[pid].fds[fd] {
                 Some(ref f) => *f,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let inode_id = f.inode_id;
             let idx = inode_id as usize;
@@ -1407,7 +1479,10 @@ pub unsafe fn dispatch(
                         size - offset as u32
                     }
                 }
-                _ => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                _ => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             if let Some(ref mut fd_ent) = processes.processes[pid].fds[fd] {
                 fd_ent.cursor = new_pos;
@@ -1421,23 +1496,45 @@ pub unsafe fn dispatch(
             let path_len = a1;
             let stat_ptr = a2;
             if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ)
-                || !check_user_ptr(sched, processes, stat_ptr, core::mem::size_of::<StatBuf>(), MemPerms::WRITE)
-                || path_len == 0 || path_len > 256
+                || !check_user_ptr(
+                    sched,
+                    processes,
+                    stat_ptr,
+                    core::mem::size_of::<StatBuf>(),
+                    MemPerms::WRITE,
+                )
+                || path_len == 0
+                || path_len > 256
             {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
-            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
             let path = match core::str::from_utf8(path_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
-            let cwd = if pid < crate::process::MAX_PROCESSES { processes.processes[pid].cwd } else { ROOT_INODE };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
+            let cwd = if pid < crate::process::MAX_PROCESSES {
+                processes.processes[pid].cwd
+            } else {
+                ROOT_INODE
+            };
             let inode_id = match inodes.resolve(cwd, path) {
                 Some(id) => id,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let inode = &inodes.inodes[inode_id as usize];
             let stat = StatBuf {
@@ -1450,7 +1547,9 @@ pub unsafe fn dispatch(
                 parent: inode.parent,
             };
             let dst = stat_ptr as *mut StatBuf;
-            unsafe { dst.write(stat); }
+            unsafe {
+                dst.write(stat);
+            }
             c.set_ret(0, 0);
             SyscallAction::Resume
         }
@@ -1459,16 +1558,30 @@ pub unsafe fn dispatch(
             let fd = a0;
             let stat_ptr = a1;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
-            if pid >= crate::process::MAX_PROCESSES || fd >= MAX_FDS
-                || !check_user_ptr(sched, processes, stat_ptr, core::mem::size_of::<StatBuf>(), MemPerms::WRITE)
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
+            if pid >= crate::process::MAX_PROCESSES
+                || fd >= MAX_FDS
+                || !check_user_ptr(
+                    sched,
+                    processes,
+                    stat_ptr,
+                    core::mem::size_of::<StatBuf>(),
+                    MemPerms::WRITE,
+                )
             {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
             let f = match processes.processes[pid].fds[fd] {
                 Some(ref f) => *f,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let inode_id = f.inode_id;
             let idx = inode_id as usize;
@@ -1487,7 +1600,9 @@ pub unsafe fn dispatch(
                 parent: inode.parent,
             };
             let dst = stat_ptr as *mut StatBuf;
-            unsafe { dst.write(stat); }
+            unsafe {
+                dst.write(stat);
+            }
             c.set_ret(0, 0);
             SyscallAction::Resume
         }
@@ -1495,25 +1610,43 @@ pub unsafe fn dispatch(
         SYS_MKDIR => {
             let path_ptr = a0;
             let path_len = a1;
-            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ) || path_len == 0 || path_len > 256 {
+            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ)
+                || path_len == 0
+                || path_len > 256
+            {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
-            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
             let path = match core::str::from_utf8(path_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
-            let cwd = if pid < crate::process::MAX_PROCESSES { processes.processes[pid].cwd } else { ROOT_INODE };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
+            let cwd = if pid < crate::process::MAX_PROCESSES {
+                processes.processes[pid].cwd
+            } else {
+                ROOT_INODE
+            };
             let (parent_path, dir_name) = split_parent_name(path);
             let parent_id = if parent_path.is_empty() {
                 cwd
             } else {
                 match inodes.resolve(cwd, parent_path) {
                     Some(p) => p,
-                    None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                    None => {
+                        c.set_ret(0, usize::MAX);
+                        return SyscallAction::Resume;
+                    }
                 }
             };
             // Check parent is a directory.
@@ -1537,21 +1670,39 @@ pub unsafe fn dispatch(
         SYS_UNLINK => {
             let path_ptr = a0;
             let path_len = a1;
-            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ) || path_len == 0 || path_len > 256 {
+            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ)
+                || path_len == 0
+                || path_len > 256
+            {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
-            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
             let path = match core::str::from_utf8(path_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
-            let cwd = if pid < crate::process::MAX_PROCESSES { processes.processes[pid].cwd } else { ROOT_INODE };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
+            let cwd = if pid < crate::process::MAX_PROCESSES {
+                processes.processes[pid].cwd
+            } else {
+                ROOT_INODE
+            };
             let inode_id = match inodes.resolve(cwd, path) {
                 Some(id) => id,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             if inodes.unlink(inode_id) {
                 c.set_ret(0, 0);
@@ -1566,19 +1717,32 @@ pub unsafe fn dispatch(
             let entry_ptr = a1;
             let max_entries = a2;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES || fd >= MAX_FDS {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
             let entry_size = core::mem::size_of::<DirEntry>();
-            if !check_user_ptr(sched, processes, entry_ptr, max_entries * entry_size, MemPerms::WRITE) {
+            if !check_user_ptr(
+                sched,
+                processes,
+                entry_ptr,
+                max_entries * entry_size,
+                MemPerms::WRITE,
+            ) {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
             let f = match processes.processes[pid].fds[fd] {
                 Some(ref f) => *f,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let inode_id = f.inode_id;
             let idx = inode_id as usize;
@@ -1594,7 +1758,9 @@ pub unsafe fn dispatch(
             let mut count = 0usize;
             while child != NO_INODE && count < max_entries {
                 let ci = child as usize;
-                if ci >= crate::vfs::MAX_INODES { break; }
+                if ci >= crate::vfs::MAX_INODES {
+                    break;
+                }
                 if skip > 0 {
                     skip -= 1;
                     child = inodes.inodes[ci].next_sibling;
@@ -1614,7 +1780,9 @@ pub unsafe fn dispatch(
                 entry.name[..nlen].copy_from_slice(&name.as_bytes()[..nlen]);
                 entry.name_len = nlen as u8;
                 let dst = (entry_ptr + count * entry_size) as *mut DirEntry;
-                unsafe { dst.write(entry); }
+                unsafe {
+                    dst.write(entry);
+                }
                 count += 1;
                 child = inodes.inodes[ci].next_sibling;
             }
@@ -1632,14 +1800,21 @@ pub unsafe fn dispatch(
             let fd = a0;
             let new_size = a1 as u32;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES || fd >= MAX_FDS {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
             let f = match processes.processes[pid].fds[fd] {
                 Some(ref f) => *f,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             if !f.flags.writable() {
                 c.set_ret(0, usize::MAX);
@@ -1653,7 +1828,11 @@ pub unsafe fn dispatch(
             };
             let ok = if mount_id > 0 {
                 let fat = fat32_for_mount(fat32s, mounts, mount_id);
-                if fat.mounted { fat.truncate(inodes, f.inode_id) } else { false }
+                if fat.mounted {
+                    fat.truncate(inodes, f.inode_id)
+                } else {
+                    false
+                }
             } else {
                 ramfs.truncate(inodes, f.inode_id, new_size)
             };
@@ -1672,7 +1851,10 @@ pub unsafe fn dispatch(
             let new_len = a3;
             if !check_user_ptr(sched, processes, old_ptr, old_len, MemPerms::READ)
                 || !check_user_ptr(sched, processes, new_ptr, new_len, MemPerms::READ)
-                || old_len == 0 || old_len > 256 || new_len == 0 || new_len > 256
+                || old_len == 0
+                || old_len > 256
+                || new_len == 0
+                || new_len > 256
             {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1681,18 +1863,35 @@ pub unsafe fn dispatch(
             let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr as *const u8, new_len) };
             let old_path = match core::str::from_utf8(old_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let new_path = match core::str::from_utf8(new_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
-            let cwd = if pid < crate::process::MAX_PROCESSES { processes.processes[pid].cwd } else { ROOT_INODE };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
+            let cwd = if pid < crate::process::MAX_PROCESSES {
+                processes.processes[pid].cwd
+            } else {
+                ROOT_INODE
+            };
             let src_id = match inodes.resolve(cwd, old_path) {
                 Some(id) => id,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let (parent_path, new_name) = split_parent_name(new_path);
             let new_parent = if parent_path.is_empty() {
@@ -1700,7 +1899,10 @@ pub unsafe fn dispatch(
             } else {
                 match inodes.resolve(cwd, parent_path) {
                     Some(p) => p,
-                    None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                    None => {
+                        c.set_ret(0, usize::MAX);
+                        return SyscallAction::Resume;
+                    }
                 }
             };
             if inodes.rename(src_id, new_parent, new_name) {
@@ -1715,12 +1917,17 @@ pub unsafe fn dispatch(
             let buf_ptr = a0;
             let buf_len = a1;
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
-            if !check_user_ptr(sched, processes, buf_ptr, buf_len, MemPerms::WRITE) || buf_len == 0 {
+            if !check_user_ptr(sched, processes, buf_ptr, buf_len, MemPerms::WRITE) || buf_len == 0
+            {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
@@ -1734,17 +1941,28 @@ pub unsafe fn dispatch(
         SYS_CHDIR => {
             let path_ptr = a0;
             let path_len = a1;
-            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ) || path_len == 0 || path_len > 256 {
+            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ)
+                || path_len == 0
+                || path_len > 256
+            {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
-            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
             let path = match core::str::from_utf8(path_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1752,7 +1970,10 @@ pub unsafe fn dispatch(
             let cwd = processes.processes[pid].cwd;
             let inode_id = match inodes.resolve(cwd, path) {
                 Some(id) => id,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             // Must be a directory.
             let idx = inode_id as usize;
@@ -1774,23 +1995,37 @@ pub unsafe fn dispatch(
             let path_len = a3;
             if !check_user_ptr(sched, processes, label_ptr, label_len, MemPerms::READ)
                 || !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ)
-                || label_len == 0 || label_len > 8 || path_len == 0 || path_len > 256
+                || label_len == 0
+                || label_len > 8
+                || path_len == 0
+                || path_len > 256
             {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
             let _label = unsafe { core::slice::from_raw_parts(label_ptr as *const u8, label_len) };
-            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
             let path = match core::str::from_utf8(path_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let _label_str = match core::str::from_utf8(_label) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1799,7 +2034,10 @@ pub unsafe fn dispatch(
             // Resolve mount target — must be an existing directory.
             let dir_id = match inodes.resolve(cwd, path) {
                 Some(id) => id,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let didx = dir_id as usize;
             if didx >= crate::vfs::MAX_INODES || inodes.inodes[didx].kind != InodeKind::Directory {
@@ -1824,17 +2062,28 @@ pub unsafe fn dispatch(
         SYS_UMOUNT => {
             let path_ptr = a0;
             let path_len = a1;
-            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ) || path_len == 0 || path_len > 256 {
+            if !check_user_ptr(sched, processes, path_ptr, path_len, MemPerms::READ)
+                || path_len == 0
+                || path_len > 256
+            {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
             }
-            let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+            let path_bytes =
+                unsafe { core::slice::from_raw_parts(path_ptr as *const u8, path_len) };
             let path = match core::str::from_utf8(path_bytes) {
                 Ok(s) => s,
-                Err(_) => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             let cur = sched.current;
-            let pid = if cur < sched.tasks.len() { sched.tasks[cur].process_id } else { usize::MAX };
+            let pid = if cur < sched.tasks.len() {
+                sched.tasks[cur].process_id
+            } else {
+                usize::MAX
+            };
             if pid >= crate::process::MAX_PROCESSES {
                 c.set_ret(0, usize::MAX);
                 return SyscallAction::Resume;
@@ -1842,7 +2091,10 @@ pub unsafe fn dispatch(
             let cwd = processes.processes[pid].cwd;
             let dir_id = match inodes.resolve(cwd, path) {
                 Some(id) => id,
-                None => { c.set_ret(0, usize::MAX); return SyscallAction::Resume; }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    return SyscallAction::Resume;
+                }
             };
             if mounts.unmount(dir_id) {
                 // Find and unmount the FAT32 instance for this mount point.
@@ -1868,7 +2120,9 @@ pub unsafe fn dispatch(
             let allowed = if cur < sched.tasks.len() {
                 let tcb = &sched.tasks[cur];
                 // Check thread regions for an MMIO grant (RW permission).
-                tcb.regions[..tcb.region_count].iter().any(|r| r.allows(addr, 4, MemPerms::READ))
+                tcb.regions[..tcb.region_count]
+                    .iter()
+                    .any(|r| r.allows(addr, 4, MemPerms::READ))
             } else {
                 false
             };
@@ -1887,7 +2141,9 @@ pub unsafe fn dispatch(
             let cur = sched.current;
             let allowed = if cur < sched.tasks.len() {
                 let tcb = &sched.tasks[cur];
-                tcb.regions[..tcb.region_count].iter().any(|r| r.allows(addr, 4, MemPerms::RW))
+                tcb.regions[..tcb.region_count]
+                    .iter()
+                    .any(|r| r.allows(addr, 4, MemPerms::RW))
             } else {
                 false
             };
@@ -1965,8 +2221,11 @@ pub unsafe fn dispatch(
                 let uid = processes.processes[pid].uid;
                 processes.drop_caps(pid, to_drop);
                 audit.log(
-                    sched.ticks as u32, pid as u8, uid as u8,
-                    AuditEvent::CapDropped, to_drop.bits(),
+                    sched.ticks as u32,
+                    pid as u8,
+                    uid as u8,
+                    AuditEvent::CapDropped,
+                    to_drop.bits(),
                     processes.processes[pid].caps.bits(),
                 );
                 c.set_ret(0, 0);
@@ -1996,8 +2255,12 @@ pub unsafe fn dispatch(
                     processes.processes[child_pid].caps = new_caps;
                     let uid = processes.processes[parent_pid].uid;
                     audit.log(
-                        sched.ticks as u32, parent_pid as u8, uid as u8,
-                        AuditEvent::CapSetChild, child_pid as u32, new_caps.bits(),
+                        sched.ticks as u32,
+                        parent_pid as u8,
+                        uid as u8,
+                        AuditEvent::CapSetChild,
+                        child_pid as u32,
+                        new_caps.bits(),
                     );
                     c.set_ret(0, 0);
                 } else {
@@ -2028,7 +2291,9 @@ pub unsafe fn dispatch(
                 let dst = a1 as *mut crate::audit::AuditEntry;
                 for i in 0..to_read {
                     if let Some(entry) = audit.get(start + i) {
-                        unsafe { dst.add(i).write(*entry); }
+                        unsafe {
+                            dst.add(i).write(*entry);
+                        }
                     }
                 }
                 c.set_ret(0, to_read);
@@ -2040,8 +2305,7 @@ pub unsafe fn dispatch(
 
         // ── Accelerators / FPGA / Quantum (desktop/server only) ──
         #[cfg(feature = "accel")]
-        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
-        | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
+        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
         | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => {
             // ABI surface is reserved and capability-gated. Platform-specific
             // runtime integration is provided by accelerator drivers.
@@ -2052,8 +2316,7 @@ pub unsafe fn dispatch(
 
         // ── Accelerators / FPGA / Quantum (desktop/server only) ──
         #[cfg(feature = "accel")]
-        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT
-        | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
+        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
         | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => {
             // ABI surface is reserved and capability-gated. Platform-specific
             // runtime integration is provided by accelerator drivers.
@@ -2070,8 +2333,8 @@ pub unsafe fn dispatch(
         SYS_AGENT_SPAWN => {
             let desc_ptr = a0;
             let desc_len = a1;
-            let priority  = a2;
-            let entry     = a3;
+            let priority = a2;
+            let entry = a3;
             let stack_top = a4;
 
             if desc_len == 0 || desc_len > 64 {
@@ -2125,9 +2388,17 @@ pub unsafe fn dispatch(
                 return SyscallAction::Resume;
             }
             match new_state {
-                5 => { agents.complete(aid); c.set_ret(0, 0); }
-                6 => { agents.fail(aid); c.set_ret(0, 0); }
-                _  => { c.set_ret(0, usize::MAX); }
+                5 => {
+                    agents.complete(aid);
+                    c.set_ret(0, 0);
+                }
+                6 => {
+                    agents.fail(aid);
+                    c.set_ret(0, 0);
+                }
+                _ => {
+                    c.set_ret(0, usize::MAX);
+                }
             }
             SyscallAction::Resume
         }
@@ -2142,9 +2413,7 @@ pub unsafe fn dispatch(
             let tid = sched.current;
             let mut found = usize::MAX;
             for i in 0..crate::agent::MAX_AGENTS {
-                if agents.agents[i].task_id == tid
-                    && agents.agents[i].state != AgentState::Free
-                {
+                if agents.agents[i].task_id == tid && agents.agents[i].state != AgentState::Free {
                     found = i;
                     break;
                 }
@@ -2169,9 +2438,7 @@ pub unsafe fn dispatch(
             let tid = sched.current;
             let mut found = usize::MAX;
             for i in 0..crate::agent::MAX_AGENTS {
-                if agents.agents[i].task_id == tid
-                    && agents.agents[i].state != AgentState::Free
-                {
+                if agents.agents[i].task_id == tid && agents.agents[i].state != AgentState::Free {
                     found = i;
                     break;
                 }
@@ -2207,7 +2474,7 @@ pub unsafe fn dispatch(
         SYS_INTENT_SUBMIT => {
             let desc_ptr = a0;
             let desc_len = a1;
-            let class    = a2;
+            let class = a2;
             let priority = a3;
 
             if desc_len == 0 || desc_len > 64 {
@@ -2282,7 +2549,8 @@ pub unsafe fn dispatch(
             let val = core::slice::from_raw_parts(val_ptr as *const u8, val_len);
             let tick = sched.ticks;
             memory.persistent.store(
-                key, val,
+                key,
+                val,
                 MemoryTag::UserKnow,
                 MemoryScope::Global,
                 0,
@@ -2336,9 +2604,13 @@ pub unsafe fn dispatch(
         // defined) so that userlib can reference them on any build.
         // On non-cluster builds they simply return usize::MAX.
         //
-        SYS_PEER_REGISTER | SYS_PEER_VERIFY | SYS_PEER_STATUS
-        | SYS_ZKP_PROVE | SYS_ZKP_VERIFY
-        | SYS_MESH_SEND | SYS_MESH_STATUS
+        SYS_PEER_REGISTER
+        | SYS_PEER_VERIFY
+        | SYS_PEER_STATUS
+        | SYS_ZKP_PROVE
+        | SYS_ZKP_VERIFY
+        | SYS_MESH_SEND
+        | SYS_MESH_STATUS
         | SYS_FABRIC_SESSION_COUNT => {
             // Stub: not available on this build.
             c.set_ret(0, usize::MAX);
@@ -2401,7 +2673,13 @@ fn split_parent_name(path: &str) -> (&str, &str) {
 /// Device read dispatcher (devfs).
 /// Major 0: null/zero/console/random.
 /// Major 1: input devices (keyboard/mouse).
-fn dev_read(major: u8, minor: u8, buf: &mut [u8], console_read: fn() -> u8, input: &mut InputSubsystem) -> usize {
+fn dev_read(
+    major: u8,
+    minor: u8,
+    buf: &mut [u8],
+    console_read: fn() -> u8,
+    input: &mut InputSubsystem,
+) -> usize {
     match (major, minor) {
         // /dev/null — EOF
         (0, 0) => 0,
@@ -2422,9 +2700,7 @@ fn dev_read(major: u8, minor: u8, buf: &mut [u8], console_read: fn() -> u8, inpu
             }
         }
         // /dev/random — cryptographic PRNG (ChaCha20-DRBG)
-        (0, 3) => {
-            crate::system_rng_fill(buf)
-        }
+        (0, 3) => crate::system_rng_fill(buf),
         // /dev/keyboard — read ASCII bytes from keyboard queue
         (1, 0) => input.kbd_read(buf),
         // /dev/mouse — read encoded mouse events

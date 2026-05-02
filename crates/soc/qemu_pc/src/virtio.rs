@@ -7,8 +7,8 @@
 //! QEMU's virtio-blk-pci and virtio-net-pci devices use vendor 0x1AF4,
 //! device IDs 0x1001 (block) and 0x1000 (network).
 
-use crate::{inb, outb};
 use crate::mm::{FrameAllocator, PAGE_SIZE};
+use crate::{inb, outb};
 
 /// VIRTIO PCI vendor ID.
 pub const VIRTIO_VENDOR: u16 = 0x1AF4;
@@ -21,14 +21,14 @@ pub const QUEUE_SIZE: usize = 256;
 
 // ─── Legacy PCI I/O bar register offsets ─────────────────────────────────
 
-const REG_DEVICE_FEATURES:  u16 = 0x00; // 32-bit, RO
-const REG_GUEST_FEATURES:   u16 = 0x04; // 32-bit, RW
-const REG_QUEUE_ADDRESS:    u16 = 0x08; // 32-bit, RW (PFN, multiply by 4096)
-const REG_QUEUE_SIZE:       u16 = 0x0C; // 16-bit, RO
-const REG_QUEUE_SELECT:     u16 = 0x0E; // 16-bit, RW
-const REG_QUEUE_NOTIFY:     u16 = 0x10; // 16-bit, WO
-const REG_DEVICE_STATUS:    u16 = 0x12; // 8-bit, RW
-const REG_ISR_STATUS:       u16 = 0x13; // 8-bit, RO
+const REG_DEVICE_FEATURES: u16 = 0x00; // 32-bit, RO
+const REG_GUEST_FEATURES: u16 = 0x04; // 32-bit, RW
+const REG_QUEUE_ADDRESS: u16 = 0x08; // 32-bit, RW (PFN, multiply by 4096)
+const REG_QUEUE_SIZE: u16 = 0x0C; // 16-bit, RO
+const REG_QUEUE_SELECT: u16 = 0x0E; // 16-bit, RW
+const REG_QUEUE_NOTIFY: u16 = 0x10; // 16-bit, WO
+const REG_DEVICE_STATUS: u16 = 0x12; // 8-bit, RW
+const REG_ISR_STATUS: u16 = 0x13; // 8-bit, RO
 
 // ─── Device status bits ──────────────────────────────────────────────────
 
@@ -64,7 +64,10 @@ pub struct VringDesc {
 
 impl VringDesc {
     pub const EMPTY: Self = Self {
-        addr: 0, len: 0, flags: 0, next: 0,
+        addr: 0,
+        len: 0,
+        flags: 0,
+        next: 0,
     };
 }
 
@@ -143,11 +146,7 @@ impl Virtqueue {
     /// `io_base` — I/O bar base address of the VIRTIO device.
     /// `queue_idx` — which queue (0 = requestq for blk, 0=receiveq/1=transmitq for net).
     /// `alloc` — physical frame allocator.
-    pub fn new(
-        io_base: u16,
-        queue_idx: u16,
-        alloc: &mut FrameAllocator,
-    ) -> Option<Self> {
+    pub fn new(io_base: u16, queue_idx: u16, alloc: &mut FrameAllocator) -> Option<Self> {
         // Select the queue and read its size.
         unsafe {
             write16(io_base + REG_QUEUE_SELECT, queue_idx);
@@ -164,7 +163,9 @@ impl Virtqueue {
         // Allocate contiguous pages.
         let base = alloc.alloc_frame()?;
         // Zero the first page.
-        unsafe { core::ptr::write_bytes(base as *mut u8, 0, PAGE_SIZE); }
+        unsafe {
+            core::ptr::write_bytes(base as *mut u8, 0, PAGE_SIZE);
+        }
         // Allocate remaining pages.
         for i in 1..num_pages {
             let f = alloc.alloc_frame()?;
@@ -173,7 +174,9 @@ impl Virtqueue {
                 // QEMU's allocator returns sequential frames when there's no
                 // fragmentation.
             }
-            unsafe { core::ptr::write_bytes(f as *mut u8, 0, PAGE_SIZE); }
+            unsafe {
+                core::ptr::write_bytes(f as *mut u8, 0, PAGE_SIZE);
+            }
         }
 
         let desc_size = 16 * size as usize;
@@ -279,13 +282,17 @@ impl Virtqueue {
 
 /// Reset a VIRTIO device and begin negotiation.
 pub fn device_reset(io_base: u16) {
-    unsafe { outb(io_base + REG_DEVICE_STATUS, 0); }
+    unsafe {
+        outb(io_base + REG_DEVICE_STATUS, 0);
+    }
 }
 
 /// Set device status bits.
 pub fn device_set_status(io_base: u16, status: u8) {
     let current = unsafe { inb(io_base + REG_DEVICE_STATUS) };
-    unsafe { outb(io_base + REG_DEVICE_STATUS, current | status); }
+    unsafe {
+        outb(io_base + REG_DEVICE_STATUS, current | status);
+    }
 }
 
 /// Read device features.
@@ -295,7 +302,9 @@ pub fn device_features(io_base: u16) -> u32 {
 
 /// Write guest/driver features.
 pub fn guest_features(io_base: u16, features: u32) {
-    unsafe { write32(io_base + REG_GUEST_FEATURES, features); }
+    unsafe {
+        write32(io_base + REG_GUEST_FEATURES, features);
+    }
 }
 
 /// Read ISR status (clears the interrupt).
@@ -329,7 +338,10 @@ unsafe fn read16(port: u16) -> u16 {
         core::arch::asm!("in ax, dx", out("ax") val, in("dx") port, options(nomem, nostack, preserves_flags));
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; val = 0; }
+    {
+        let _ = port;
+        val = 0;
+    }
     val
 }
 
@@ -339,7 +351,9 @@ unsafe fn write16(port: u16, val: u16) {
         core::arch::asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags));
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = (port, val); }
+    {
+        let _ = (port, val);
+    }
 }
 
 unsafe fn read32(port: u16) -> u32 {
@@ -349,7 +363,10 @@ unsafe fn read32(port: u16) -> u32 {
         core::arch::asm!("in eax, dx", out("eax") val, in("dx") port, options(nomem, nostack, preserves_flags));
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; val = 0; }
+    {
+        let _ = port;
+        val = 0;
+    }
     val
 }
 
@@ -359,7 +376,9 @@ unsafe fn write32(port: u16, val: u32) {
         core::arch::asm!("out dx, eax", in("dx") port, in("eax") val, options(nomem, nostack, preserves_flags));
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = (port, val); }
+    {
+        let _ = (port, val);
+    }
 }
 
 /// Align `val` up to the nearest multiple of `align`.

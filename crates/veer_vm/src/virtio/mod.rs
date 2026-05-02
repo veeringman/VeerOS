@@ -19,26 +19,26 @@ pub mod net;
 
 // ── Legacy register offsets (within the I/O BAR) ─────────────────────────
 pub const REG_DEVICE_FEATURES: u16 = 0x00; // 32-bit, RO
-pub const REG_GUEST_FEATURES:  u16 = 0x04; // 32-bit, RW
-pub const REG_QUEUE_ADDRESS:   u16 = 0x08; // 32-bit, RW (PFN)
-pub const REG_QUEUE_SIZE:      u16 = 0x0C; // 16-bit, RO
-pub const REG_QUEUE_SELECT:    u16 = 0x0E; // 16-bit, RW
-pub const REG_QUEUE_NOTIFY:    u16 = 0x10; // 16-bit, WO
-pub const REG_DEVICE_STATUS:   u16 = 0x12; // 8-bit, RW
-pub const REG_ISR_STATUS:      u16 = 0x13; // 8-bit, RO (clear-on-read)
-pub const REG_DEVICE_CONFIG:   u16 = 0x14; // device-specific config starts here
+pub const REG_GUEST_FEATURES: u16 = 0x04; // 32-bit, RW
+pub const REG_QUEUE_ADDRESS: u16 = 0x08; // 32-bit, RW (PFN)
+pub const REG_QUEUE_SIZE: u16 = 0x0C; // 16-bit, RO
+pub const REG_QUEUE_SELECT: u16 = 0x0E; // 16-bit, RW
+pub const REG_QUEUE_NOTIFY: u16 = 0x10; // 16-bit, WO
+pub const REG_DEVICE_STATUS: u16 = 0x12; // 8-bit, RW
+pub const REG_ISR_STATUS: u16 = 0x13; // 8-bit, RO (clear-on-read)
+pub const REG_DEVICE_CONFIG: u16 = 0x14; // device-specific config starts here
 
-pub const VRING_DESC_F_NEXT:  u16 = 1;
+pub const VRING_DESC_F_NEXT: u16 = 1;
 pub const VRING_DESC_F_WRITE: u16 = 2;
 
 /// Advertised queue size (must be a power of two ≤ guest's max of 256).
 pub const QUEUE_SIZE: u16 = 128;
 
 pub const STATUS_ACKNOWLEDGE: u8 = 1;
-pub const STATUS_DRIVER:      u8 = 2;
-pub const STATUS_DRIVER_OK:   u8 = 4;
+pub const STATUS_DRIVER: u8 = 2;
+pub const STATUS_DRIVER_OK: u8 = 4;
 pub const STATUS_FEATURES_OK: u8 = 8;
-pub const STATUS_FAILED:      u8 = 128;
+pub const STATUS_FAILED: u8 = 128;
 
 // ── In-guest split-ring layout ───────────────────────────────────────────
 
@@ -78,13 +78,24 @@ pub struct VirtioTransportSnapshot {
 
 impl QueueState {
     pub fn new() -> Self {
-        Self { pfn: 0, size: QUEUE_SIZE, last_avail_idx: 0, next_used_idx: 0 }
+        Self {
+            pfn: 0,
+            size: QUEUE_SIZE,
+            last_avail_idx: 0,
+            next_used_idx: 0,
+        }
     }
 
-    pub fn is_ready(&self) -> bool { self.pfn != 0 }
-    pub fn base_gpa(&self) -> u64 { (self.pfn as u64) << 12 }
+    pub fn is_ready(&self) -> bool {
+        self.pfn != 0
+    }
+    pub fn base_gpa(&self) -> u64 {
+        (self.pfn as u64) << 12
+    }
 
-    pub fn desc_gpa(&self) -> u64 { self.base_gpa() }
+    pub fn desc_gpa(&self) -> u64 {
+        self.base_gpa()
+    }
     pub fn avail_gpa(&self) -> u64 {
         self.base_gpa() + 16 * self.size as u64
     }
@@ -97,7 +108,9 @@ impl QueueState {
     }
 }
 
-fn align_up(x: u64, a: u64) -> u64 { (x + a - 1) & !(a - 1) }
+fn align_up(x: u64, a: u64) -> u64 {
+    (x + a - 1) & !(a - 1)
+}
 
 // ── Transport (common register block) ────────────────────────────────────
 
@@ -136,11 +149,12 @@ impl VirtioTransport {
     pub fn read_reg(&mut self, offset: u16, buf: &mut [u8]) {
         let val: u32 = match offset {
             REG_DEVICE_FEATURES => self.device_features,
-            REG_GUEST_FEATURES  => self.guest_features,
-            REG_QUEUE_ADDRESS   => {
-                self.queues.get(self.queue_select as usize)
-                    .map(|q| q.pfn).unwrap_or(0)
-            }
+            REG_GUEST_FEATURES => self.guest_features,
+            REG_QUEUE_ADDRESS => self
+                .queues
+                .get(self.queue_select as usize)
+                .map(|q| q.pfn)
+                .unwrap_or(0),
             REG_QUEUE_SIZE => QUEUE_SIZE as u32,
             REG_QUEUE_SELECT => self.queue_select as u32,
             REG_QUEUE_NOTIFY => 0, // write-only; guest never reads
@@ -164,14 +178,20 @@ impl VirtioTransport {
         bytes[..n].copy_from_slice(&data[..n]);
         let val = u32::from_le_bytes(bytes);
         match offset {
-            REG_GUEST_FEATURES => { self.guest_features = val; }
+            REG_GUEST_FEATURES => {
+                self.guest_features = val;
+            }
             REG_QUEUE_ADDRESS => {
                 if let Some(q) = self.queues.get_mut(self.queue_select as usize) {
                     q.pfn = val;
                 }
             }
-            REG_QUEUE_SELECT => { self.queue_select = val as u16; }
-            REG_DEVICE_STATUS => { self.device_status = val as u8; }
+            REG_QUEUE_SELECT => {
+                self.queue_select = val as u16;
+            }
+            REG_DEVICE_STATUS => {
+                self.device_status = val as u8;
+            }
             _ => { /* device_features, queue_size, isr are RO; ignore */ }
         }
     }
@@ -218,11 +238,7 @@ pub struct DescItem {
 /// Walk a descriptor chain starting at `head`. Returns the chain's
 /// descriptors in order. Stops on missing NEXT flag or if the chain
 /// exceeds `queue_size` (malformed guest).
-pub fn walk_chain(
-    mem: &GuestMem,
-    queue: &QueueState,
-    head: u16,
-) -> Result<Vec<DescItem>> {
+pub fn walk_chain(mem: &GuestMem, queue: &QueueState, head: u16) -> Result<Vec<DescItem>> {
     let mut items = Vec::new();
     let mut cur = head;
     for _ in 0..queue.size {

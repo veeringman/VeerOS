@@ -2,7 +2,20 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET_TRIPLE="${VEER_VM_MAC_TARGET:-x86_64-apple-darwin}"
+native_macos_target() {
+  case "$(uname -m)" in
+    arm64|aarch64) echo "aarch64-apple-darwin" ;;
+    x86_64|amd64) echo "x86_64-apple-darwin" ;;
+    *) echo "unsupported macOS host architecture: $(uname -m)" >&2; return 1 ;;
+  esac
+}
+
+TARGET_TRIPLE="${VEER_VM_MAC_TARGET:-native}"
+if [[ "${TARGET_TRIPLE}" == "native" ]]; then
+  TARGET_TRIPLE="$(native_macos_target)"
+elif [[ "${TARGET_TRIPLE}" == "all" ]]; then
+  TARGET_TRIPLE="$(native_macos_target)"
+fi
 PROFILE="${VEER_VM_MAC_PROFILE:-debug}"
 
 if [[ "${PROFILE}" == "release" ]]; then

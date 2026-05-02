@@ -147,9 +147,7 @@ pub struct PageTable {
 
 impl PageTable {
     pub const fn new() -> Self {
-        Self {
-            entries: [0; 512],
-        }
+        Self { entries: [0; 512] }
     }
 
     /// Zero all entries.
@@ -225,7 +223,9 @@ pub fn flush_tlb() {
 #[cfg(not(target_arch = "x86_64"))]
 pub fn load_cr3(_pml4_phys: usize) {}
 #[cfg(not(target_arch = "x86_64"))]
-pub fn read_cr3() -> usize { 0 }
+pub fn read_cr3() -> usize {
+    0
+}
 #[cfg(not(target_arch = "x86_64"))]
 pub fn invlpg(_virt: usize) {}
 #[cfg(not(target_arch = "x86_64"))]
@@ -304,15 +304,21 @@ pub fn map_page(
 /// Unmap a single 4 KiB page. Does NOT free intermediate tables.
 pub fn unmap_page(pml4: &mut PageTable, virt: usize) {
     let pml4i = pml4_index(virt);
-    if pml4.entries[pml4i] & PTE_PRESENT == 0 { return; }
+    if pml4.entries[pml4i] & PTE_PRESENT == 0 {
+        return;
+    }
     let pdpt = unsafe { &mut *((pml4.entries[pml4i] & PTE_ADDR_MASK) as *mut PageTable) };
 
     let pdpti = pdpt_index(virt);
-    if pdpt.entries[pdpti] & PTE_PRESENT == 0 { return; }
+    if pdpt.entries[pdpti] & PTE_PRESENT == 0 {
+        return;
+    }
     let pd = unsafe { &mut *((pdpt.entries[pdpti] & PTE_ADDR_MASK) as *mut PageTable) };
 
     let pdi = pd_index(virt);
-    if pd.entries[pdi] & PTE_PRESENT == 0 { return; }
+    if pd.entries[pdi] & PTE_PRESENT == 0 {
+        return;
+    }
     let pt = unsafe { &mut *((pd.entries[pdi] & PTE_ADDR_MASK) as *mut PageTable) };
 
     let pti = pt_index(virt);
@@ -386,9 +392,9 @@ pub fn remove_identity_map(pml4: &mut PageTable) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// User-space virtual address range (below canonical hole).
-pub const USER_VIRT_BASE: usize = 0x0000_0040_0000_0000;   // 256 GiB mark
+pub const USER_VIRT_BASE: usize = 0x0000_0040_0000_0000; // 256 GiB mark
 /// Default user stack top.
-pub const USER_STACK_TOP: usize = 0x0000_0080_0000_0000;    // 512 GiB mark
+pub const USER_STACK_TOP: usize = 0x0000_0080_0000_0000; // 512 GiB mark
 /// User stack size (64 KiB).
 pub const USER_STACK_SIZE: usize = 64 * 1024;
 

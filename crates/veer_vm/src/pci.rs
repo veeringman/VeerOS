@@ -79,31 +79,47 @@ impl PciHost {
         }
     }
 
-    pub fn set_blk(&mut self, dev: Arc<Mutex<VirtioBlk>>) { self.blk = Some(dev); }
-    pub fn set_net(&mut self, dev: Arc<Mutex<VirtioNet>>) { self.net = Some(dev); }
+    pub fn set_blk(&mut self, dev: Arc<Mutex<VirtioBlk>>) {
+        self.blk = Some(dev);
+    }
+    pub fn set_net(&mut self, dev: Arc<Mutex<VirtioNet>>) {
+        self.net = Some(dev);
+    }
 
     /// Current BAR0 base port for the virtio-blk device (0 if absent).
     pub fn blk_bar0_base(&self) -> u16 {
-        if self.blk.is_none() { return 0; }
+        if self.blk.is_none() {
+            return 0;
+        }
         (self.bar0_blk & BAR0_WRITABLE_MASK) as u16
     }
 
     /// Current BAR0 base port for the virtio-net device (0 if absent).
     pub fn net_bar0_base(&self) -> u16 {
-        if self.net.is_none() { return 0; }
+        if self.net.is_none() {
+            return 0;
+        }
         (self.bar0_net & BAR0_WRITABLE_MASK) as u16
     }
 
-    pub fn write_addr(&mut self, val: u32) { self.addr = val; }
-    pub fn read_addr(&self) -> u32 { self.addr }
+    pub fn write_addr(&mut self, val: u32) {
+        self.addr = val;
+    }
+    pub fn read_addr(&self) -> u32 {
+        self.addr
+    }
 
     fn decoded(&self) -> Option<(Slot, u8)> {
-        if self.addr & 0x8000_0000 == 0 { return None; }
+        if self.addr & 0x8000_0000 == 0 {
+            return None;
+        }
         let bus = ((self.addr >> 16) & 0xFF) as u8;
         let dev = ((self.addr >> 11) & 0x1F) as u8;
         let func = ((self.addr >> 8) & 0x07) as u8;
         let offset = (self.addr & 0xFC) as u8;
-        if bus != 0 || func != 0 { return None; }
+        if bus != 0 || func != 0 {
+            return None;
+        }
         let slot = match dev {
             0 if self.blk.is_some() => Slot::Blk,
             1 if self.net.is_some() => Slot::Net,
@@ -114,18 +130,23 @@ impl PciHost {
 
     pub fn read_data(&self, width: usize, buf: &mut [u8]) {
         let byte_offset = (self.addr & 0x03) as usize;
-        let dword = self.decoded()
+        let dword = self
+            .decoded()
             .map(|(s, off)| self.read_dword(s, off))
             .unwrap_or(0xFFFF_FFFF);
         let bytes = dword.to_le_bytes();
         let n = width.min(buf.len()).min(4 - byte_offset);
         buf[..n].copy_from_slice(&bytes[byte_offset..byte_offset + n]);
-        for b in &mut buf[n..] { *b = 0xFF; }
+        for b in &mut buf[n..] {
+            *b = 0xFF;
+        }
     }
 
     pub fn write_data(&mut self, width: usize, data: &[u8]) {
         let byte_offset = (self.addr & 0x03) as usize;
-        let Some((slot, offset)) = self.decoded() else { return; };
+        let Some((slot, offset)) = self.decoded() else {
+            return;
+        };
         let mut bytes = self.read_dword(slot, offset).to_le_bytes();
         let n = width.min(data.len()).min(4 - byte_offset);
         bytes[byte_offset..byte_offset + n].copy_from_slice(&data[..n]);
@@ -166,8 +187,12 @@ impl PciHost {
 
     fn write_blk_dword(&mut self, offset: u8, val: u32) {
         match offset {
-            0x04 => { self.cmd_blk = (val & 0xFFFF) as u16; }
-            0x10 => { self.bar0_blk = val & BAR0_WRITABLE_MASK; }
+            0x04 => {
+                self.cmd_blk = (val & 0xFFFF) as u16;
+            }
+            0x10 => {
+                self.bar0_blk = val & BAR0_WRITABLE_MASK;
+            }
             _ => {}
         }
     }
@@ -192,8 +217,12 @@ impl PciHost {
 
     fn write_net_dword(&mut self, offset: u8, val: u32) {
         match offset {
-            0x04 => { self.cmd_net = (val & 0xFFFF) as u16; }
-            0x10 => { self.bar0_net = val & BAR0_WRITABLE_MASK; }
+            0x04 => {
+                self.cmd_net = (val & 0xFFFF) as u16;
+            }
+            0x10 => {
+                self.bar0_net = val & BAR0_WRITABLE_MASK;
+            }
             _ => {}
         }
     }

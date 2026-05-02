@@ -275,7 +275,9 @@ impl AuraResourceScheduler {
                 bandwidth_mbps: quota.bandwidth_mbps,
             },
         );
-        self.usage.entry(canonical_typed_addr(&quota.aura, AddressType::Aura)?).or_default();
+        self.usage
+            .entry(canonical_typed_addr(&quota.aura, AddressType::Aura)?)
+            .or_default();
         Ok(())
     }
 
@@ -284,7 +286,10 @@ impl AuraResourceScheduler {
         Ok(self.usage.get(&aura).cloned().unwrap_or_default())
     }
 
-    pub fn allocate(&mut self, request: ResourceRequest) -> Result<ResourceAllocationDecision, GraphError> {
+    pub fn allocate(
+        &mut self,
+        request: ResourceRequest,
+    ) -> Result<ResourceAllocationDecision, GraphError> {
         let aura = canonical_typed_addr(&request.aura, AddressType::Aura)?;
         let fold = canonical_typed_addr(&request.fold, AddressType::Fold)?;
 
@@ -736,15 +741,17 @@ impl GraphCore {
                 switched: false,
                 reason: "no_candidate".to_string(),
             },
-            (Some(current), Some(prev_score), Some(best)) if current == best.target => PlacementDecision {
-                source,
-                selected_target: Some(current.clone()),
-                selected_score: Some(prev_score),
-                previous_target: Some(current),
-                previous_score: Some(prev_score),
-                switched: false,
-                reason: "current_is_optimal".to_string(),
-            },
+            (Some(current), Some(prev_score), Some(best)) if current == best.target => {
+                PlacementDecision {
+                    source,
+                    selected_target: Some(current.clone()),
+                    selected_score: Some(prev_score),
+                    previous_target: Some(current),
+                    previous_score: Some(prev_score),
+                    switched: false,
+                    reason: "current_is_optimal".to_string(),
+                }
+            }
             (Some(current), Some(prev_score), Some(best)) => {
                 let improvement = prev_score - best.score;
                 if improvement > request.hysteresis_margin {
@@ -870,7 +877,10 @@ impl GraphCore {
         locality: Option<String>,
     ) -> Result<(), GraphError> {
         let id = canonicalize(node_raw).map_err(|_| GraphError::InvalidVertexId)?;
-        let vertex = self.vertices.get_mut(&id).ok_or(GraphError::MissingVertex)?;
+        let vertex = self
+            .vertices
+            .get_mut(&id)
+            .ok_or(GraphError::MissingVertex)?;
 
         if vertex.kind != VertexKind::Node {
             return Err(GraphError::VertexKindMismatch);
@@ -880,14 +890,18 @@ impl GraphCore {
             if cpu < 0.0 {
                 return Err(GraphError::InvalidWeight);
             }
-            vertex.attrs.insert("cpu_available".to_string(), format!("{cpu:.4}"));
+            vertex
+                .attrs
+                .insert("cpu_available".to_string(), format!("{cpu:.4}"));
         }
 
         if let Some(gpu) = gpu_available {
             if gpu < 0.0 {
                 return Err(GraphError::InvalidWeight);
             }
-            vertex.attrs.insert("gpu_available".to_string(), format!("{gpu:.4}"));
+            vertex
+                .attrs
+                .insert("gpu_available".to_string(), format!("{gpu:.4}"));
         }
 
         if let Some(loc) = locality {
@@ -963,9 +977,11 @@ fn remaining_for(quota: &AuraResourceQuota, usage: &ResourceUsage) -> ResourceUs
 fn clause_allows(clause: &PolicyClause, target_vertex: &Vertex, edge: &Edge) -> bool {
     match clause {
         PolicyClause::RequireTargetKind(kind) => target_vertex.kind == *kind,
-        PolicyClause::RequireVertexAttrEq { key, value } => {
-            target_vertex.attrs.get(key).map(|v| v == value).unwrap_or(false)
-        }
+        PolicyClause::RequireVertexAttrEq { key, value } => target_vertex
+            .attrs
+            .get(key)
+            .map(|v| v == value)
+            .unwrap_or(false),
         PolicyClause::RequireEdgeAttrEq { key, value } => {
             edge.attrs.get(key).map(|v| v == value).unwrap_or(false)
         }
@@ -1184,9 +1200,18 @@ mod tests {
         .unwrap();
 
         let v = g.get_vertex("nod{edge-a,zone-1,ready}").unwrap();
-        assert_eq!(v.attrs.get("cpu_available").map(String::as_str), Some("0.4200"));
-        assert_eq!(v.attrs.get("gpu_available").map(String::as_str), Some("0.7500"));
-        assert_eq!(v.attrs.get("locality").map(String::as_str), Some("zone-1/rack-2"));
+        assert_eq!(
+            v.attrs.get("cpu_available").map(String::as_str),
+            Some("0.4200")
+        );
+        assert_eq!(
+            v.attrs.get("gpu_available").map(String::as_str),
+            Some("0.7500")
+        );
+        assert_eq!(
+            v.attrs.get("locality").map(String::as_str),
+            Some("zone-1/rack-2")
+        );
     }
 
     #[test]
@@ -1456,10 +1481,7 @@ mod tests {
 
         let policy = PolicySet {
             mode: PolicyMode::Any,
-            clauses: vec![
-                PolicyClause::MaxLatency(5.0),
-                PolicyClause::MinTrust(0.3),
-            ],
+            clauses: vec![PolicyClause::MaxLatency(5.0), PolicyClause::MinTrust(0.3)],
         };
 
         let choice = g
@@ -1559,7 +1581,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(decision.selected_target.as_deref(), Some("nod{edge-b,zone-1,ready}"));
+        assert_eq!(
+            decision.selected_target.as_deref(),
+            Some("nod{edge-b,zone-1,ready}")
+        );
         assert!(decision.switched);
         assert_eq!(decision.reason, "initial_placement");
     }
@@ -1613,7 +1638,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(decision.selected_target.as_deref(), Some("nod{edge-a,zone-1,ready}"));
+        assert_eq!(
+            decision.selected_target.as_deref(),
+            Some("nod{edge-a,zone-1,ready}")
+        );
         assert!(!decision.switched);
         assert_eq!(decision.reason, "stay_due_to_hysteresis");
     }
@@ -1667,7 +1695,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(decision.selected_target.as_deref(), Some("nod{edge-b,zone-1,ready}"));
+        assert_eq!(
+            decision.selected_target.as_deref(),
+            Some("nod{edge-b,zone-1,ready}")
+        );
         assert!(decision.switched);
         assert_eq!(decision.reason, "switch_better_than_hysteresis");
     }

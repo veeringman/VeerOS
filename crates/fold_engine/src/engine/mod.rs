@@ -21,7 +21,9 @@ pub trait Engine {
 
     /// Tear down any engine-specific state (cgroups, etc.) attached to a
     /// fold. Called by `fold rm`. Missing/stale state is not an error.
-    fn cleanup(&self, _rec: &FoldRecord) -> Result<()> { Ok(()) }
+    fn cleanup(&self, _rec: &FoldRecord) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -52,29 +52,29 @@ pub const NODE_ID_LEN: usize = 32;
 #[repr(u8)]
 pub enum MsgType {
     /// Node announces its presence and capabilities.
-    NodeAnnounce        = 0x01,
+    NodeAnnounce = 0x01,
     /// Periodic heartbeat with resource snapshot.
-    NodeHeartbeat       = 0x02,
+    NodeHeartbeat = 0x02,
     /// Forward an intent to a remote node for execution.
-    IntentForward       = 0x03,
+    IntentForward = 0x03,
     /// Migrate an agent to a remote node.
-    AgentMigrate        = 0x04,
+    AgentMigrate = 0x04,
     /// Synchronize a persistent memory entry.
-    MemorySync          = 0x05,
+    MemorySync = 0x05,
     /// Query a remote node's persistent memory.
-    MemoryQuery         = 0x06,
+    MemoryQuery = 0x06,
     /// Zero-knowledge capability proof.
-    CapabilityProof     = 0x07,
+    CapabilityProof = 0x07,
     /// Authentication challenge (nonce).
-    Challenge           = 0x10,
+    Challenge = 0x10,
     /// Authentication challenge response (signed nonce).
-    ChallengeResponse   = 0x11,
+    ChallengeResponse = 0x11,
     /// Session key exchange (KEM ciphertext).
-    KeyExchange         = 0x12,
+    KeyExchange = 0x12,
     /// Positive acknowledgement.
-    Ack                 = 0xF0,
+    Ack = 0xF0,
     /// Negative acknowledgement / error.
-    Nack                = 0xF1,
+    Nack = 0xF1,
 }
 
 impl MsgType {
@@ -93,7 +93,7 @@ impl MsgType {
             0x12 => Some(Self::KeyExchange),
             0xF0 => Some(Self::Ack),
             0xF1 => Some(Self::Nack),
-            _    => None,
+            _ => None,
         }
     }
 }
@@ -132,8 +132,7 @@ impl MsgHeader {
         if buf[1] != FABRIC_PROTO_VERSION {
             return Err(ProtoError::UnsupportedVersion);
         }
-        let msg_type = MsgType::from_u8(buf[2])
-            .ok_or(ProtoError::UnknownMsgType)?;
+        let msg_type = MsgType::from_u8(buf[2]).ok_or(ProtoError::UnknownMsgType)?;
         let payload_len = ((buf[3] as u16) << 8) | (buf[4] as u16);
         if payload_len as usize > MAX_PAYLOAD_LEN {
             return Err(ProtoError::PayloadTooLarge);
@@ -183,8 +182,7 @@ impl WireMsg {
         let mut hdr_buf = [0u8; HEADER_LEN];
         header.encode(&mut hdr_buf);
         msg.buf[..HEADER_LEN].copy_from_slice(&hdr_buf);
-        msg.buf[HEADER_LEN..HEADER_LEN + payload.len()]
-            .copy_from_slice(payload);
+        msg.buf[HEADER_LEN..HEADER_LEN + payload.len()].copy_from_slice(payload);
         msg.len = HEADER_LEN + payload.len() + TAG_LEN;
         Ok(msg)
     }
@@ -216,8 +214,7 @@ impl WireMsg {
         hmac_input[data_len..data_len + 4].copy_from_slice(&seq.to_le_bytes());
         let tag = crypto::hmac_sha256(key, &hmac_input[..data_len + 4]);
         let tag_start = self.len.saturating_sub(TAG_LEN);
-        self.buf[tag_start..self.len]
-            .copy_from_slice(&tag.bytes[..TAG_LEN]);
+        self.buf[tag_start..self.len].copy_from_slice(&tag.bytes[..TAG_LEN]);
     }
 
     /// Verify the HMAC tag.
@@ -310,15 +307,22 @@ impl AnnouncePayload {
 
     /// Decode arch from announce payload.
     pub fn arch(payload: &[u8]) -> Option<u8> {
-        if payload.len() < Self::MIN_LEN { return None; }
+        if payload.len() < Self::MIN_LEN {
+            return None;
+        }
         Some(payload[32])
     }
 
     /// Decode capabilities bitmask from announce payload.
     pub fn capabilities(payload: &[u8]) -> Option<u32> {
-        if payload.len() < Self::MIN_LEN { return None; }
+        if payload.len() < Self::MIN_LEN {
+            return None;
+        }
         Some(u32::from_le_bytes([
-            payload[34], payload[35], payload[36], payload[37],
+            payload[34],
+            payload[35],
+            payload[36],
+            payload[37],
         ]))
     }
 }
@@ -360,19 +364,28 @@ impl HeartbeatPayload {
     }
 
     pub fn sender_id(payload: &[u8]) -> Option<&[u8]> {
-        if payload.len() < Self::LEN { return None; }
+        if payload.len() < Self::LEN {
+            return None;
+        }
         Some(&payload[..32])
     }
 
     pub fn seq(payload: &[u8]) -> Option<u32> {
-        if payload.len() < Self::LEN { return None; }
+        if payload.len() < Self::LEN {
+            return None;
+        }
         Some(u32::from_le_bytes([
-            payload[32], payload[33], payload[34], payload[35],
+            payload[32],
+            payload[33],
+            payload[34],
+            payload[35],
         ]))
     }
 
     pub fn cpu_load(payload: &[u8]) -> Option<u8> {
-        if payload.len() < Self::LEN { return None; }
+        if payload.len() < Self::LEN {
+            return None;
+        }
         Some(payload[36])
     }
 }
@@ -388,11 +401,7 @@ pub struct ChallengePayload;
 impl ChallengePayload {
     pub const LEN: usize = 64;
 
-    pub fn encode(
-        node_id: &NodeId,
-        nonce: &[u8; 32],
-        buf: &mut [u8],
-    ) -> usize {
+    pub fn encode(node_id: &NodeId, nonce: &[u8; 32], buf: &mut [u8]) -> usize {
         if buf.len() < Self::LEN {
             return 0;
         }
@@ -402,7 +411,9 @@ impl ChallengePayload {
     }
 
     pub fn nonce(payload: &[u8]) -> Option<&[u8]> {
-        if payload.len() < Self::LEN { return None; }
+        if payload.len() < Self::LEN {
+            return None;
+        }
         Some(&payload[32..64])
     }
 }
@@ -420,15 +431,10 @@ pub struct ChallengeResponsePayload;
 impl ChallengeResponsePayload {
     pub const MIN_LEN: usize = 129;
 
-    pub fn encode(
-        node_id: &NodeId,
-        nonce: &[u8; 32],
-        signature: &[u8],
-        buf: &mut [u8],
-    ) -> usize {
+    pub fn encode(node_id: &NodeId, nonce: &[u8; 32], signature: &[u8], buf: &mut [u8]) -> usize {
         let sig_len = signature.len().min(64);
         let total = Self::MIN_LEN + sig_len - 1; // -1 because MIN_LEN includes 1 byte for sig_len field, not the sig itself
-        // Actually let's keep it simple: fixed layout
+                                                 // Actually let's keep it simple: fixed layout
         let total = 32 + 32 + sig_len + 1; // node_id + nonce + sig + sig_len_byte
         if buf.len() < total {
             return 0;
@@ -528,13 +534,17 @@ impl MemorySyncPayload {
         buf[40] = klen as u8;
         buf[41..41 + klen].copy_from_slice(&key[..klen]);
         // Zero-pad rest of key field
-        for b in &mut buf[41 + klen..73] { *b = 0; }
+        for b in &mut buf[41 + klen..73] {
+            *b = 0;
+        }
 
         let vlen = value.len().min(64);
         buf[73] = vlen as u8;
         buf[74..74 + vlen].copy_from_slice(&value[..vlen]);
         // Zero-pad rest of value field
-        for b in &mut buf[74 + vlen..138] { *b = 0; }
+        for b in &mut buf[74 + vlen..138] {
+            *b = 0;
+        }
 
         buf[138] = confidence;
         buf[139] = 0; // store

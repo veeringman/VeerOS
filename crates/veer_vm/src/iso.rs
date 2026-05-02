@@ -17,12 +17,10 @@ const ROOT_RECORD_OFFSET: usize = 156;
 const FLAG_DIRECTORY: u8 = 0x02;
 
 pub fn extract_boot_kernel(path: &Path) -> Result<Vec<u8>> {
-    let image = fs::read(path)
-        .with_context(|| format!("reading ISO {}", path.display()))?;
+    let image = fs::read(path).with_context(|| format!("reading ISO {}", path.display()))?;
     let pvd = primary_volume_descriptor(&image)
         .with_context(|| format!("parsing ISO {}", path.display()))?;
-    let root = parse_record(&pvd[ROOT_RECORD_OFFSET..])
-        .context("parsing ISO root directory")?;
+    let root = parse_record(&pvd[ROOT_RECORD_OFFSET..]).context("parsing ISO root directory")?;
     let boot = find_child(&image, root.extent, root.size, "boot")?
         .ok_or_else(|| anyhow::anyhow!("ISO missing /boot directory"))?;
     anyhow::ensure!(boot.is_dir(), "ISO /boot entry is not a directory");
@@ -31,7 +29,8 @@ pub fn extract_boot_kernel(path: &Path) -> Result<Vec<u8>> {
     anyhow::ensure!(!kernel.is_dir(), "ISO /boot/kernel.elf is a directory");
 
     let start = lba_offset(kernel.extent)?;
-    let end = start.checked_add(kernel.size as usize)
+    let end = start
+        .checked_add(kernel.size as usize)
         .context("kernel extent overflow")?;
     if end > image.len() {
         bail!("ISO /boot/kernel.elf extends past end of image");
@@ -42,13 +41,20 @@ pub fn extract_boot_kernel(path: &Path) -> Result<Vec<u8>> {
 fn primary_volume_descriptor(image: &[u8]) -> Result<&[u8]> {
     let mut sector = PVD_SECTOR;
     loop {
-        let start = sector.checked_mul(SECTOR_SIZE).context("PVD sector overflow")?;
-        let end = start.checked_add(SECTOR_SIZE).context("PVD range overflow")?;
+        let start = sector
+            .checked_mul(SECTOR_SIZE)
+            .context("PVD sector overflow")?;
+        let end = start
+            .checked_add(SECTOR_SIZE)
+            .context("PVD range overflow")?;
         if end > image.len() {
             bail!("ISO ended before primary volume descriptor");
         }
         let desc = &image[start..end];
-        anyhow::ensure!(&desc[1..6] == b"CD001", "invalid ISO9660 volume descriptor signature");
+        anyhow::ensure!(
+            &desc[1..6] == b"CD001",
+            "invalid ISO9660 volume descriptor signature"
+        );
         match desc[0] {
             VOLUME_TYPE_PRIMARY => return Ok(desc),
             VOLUME_TYPE_TERMINATOR => bail!("ISO has no primary volume descriptor"),
@@ -57,9 +63,15 @@ fn primary_volume_descriptor(image: &[u8]) -> Result<&[u8]> {
     }
 }
 
-fn find_child(image: &[u8], dir_extent: u32, dir_size: u32, target: &str) -> Result<Option<Record>> {
+fn find_child(
+    image: &[u8],
+    dir_extent: u32,
+    dir_size: u32,
+    target: &str,
+) -> Result<Option<Record>> {
     let start = lba_offset(dir_extent)?;
-    let end = start.checked_add(dir_size as usize)
+    let end = start
+        .checked_add(dir_size as usize)
         .context("directory extent overflow")?;
     if end > image.len() {
         bail!("directory record extends past end of ISO");
@@ -75,7 +87,9 @@ fn find_child(image: &[u8], dir_extent: u32, dir_size: u32, target: &str) -> Res
             offset = next_sector;
             continue;
         }
-        let rec_end = offset.checked_add(len).context("directory record overflow")?;
+        let rec_end = offset
+            .checked_add(len)
+            .context("directory record overflow")?;
         if rec_end > dir.len() {
             bail!("truncated directory record in ISO");
         }
@@ -103,7 +117,9 @@ struct Record {
 }
 
 impl Record {
-    fn is_dir(&self) -> bool { (self.flags & FLAG_DIRECTORY) != 0 }
+    fn is_dir(&self) -> bool {
+        (self.flags & FLAG_DIRECTORY) != 0
+    }
 }
 
 fn parse_record(bytes: &[u8]) -> Result<Record> {
@@ -116,11 +132,18 @@ fn parse_record(bytes: &[u8]) -> Result<Record> {
     let size = u32::from_le_bytes(bytes[10..14].try_into().unwrap());
     let flags = bytes[25];
     let name_len = bytes[32] as usize;
-    let name_end = 33usize.checked_add(name_len).context("ISO filename overflow")?;
+    let name_end = 33usize
+        .checked_add(name_len)
+        .context("ISO filename overflow")?;
     anyhow::ensure!(name_end <= len, "truncated ISO filename");
     let name = normalize_name(&bytes[33..name_end]);
 
-    Ok(Record { extent, size, flags, name })
+    Ok(Record {
+        extent,
+        size,
+        flags,
+        name,
+    })
 }
 
 fn normalize_name(raw: &[u8]) -> String {

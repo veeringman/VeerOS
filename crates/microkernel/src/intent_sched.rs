@@ -39,10 +39,10 @@
 //! - Called from `SYS_INTENT_SUBMIT` for new intent processing.
 //! - Reads/writes the agent table, intent engine, memory engine, fabric.
 
-use crate::agent::{AgentTable, AgentState, AgentBlockReason, Goal, GoalPriority, MAX_AGENTS};
-use crate::intent::{IntentEngine, IntentStatus, IntentClass, MAX_INTENTS};
-use crate::memory_engine::{MemoryEngine, EpisodeKind, EpisodeOutcome, MemoryTag, MemoryScope};
-use crate::fabric::{ExecutionFabric, PlacementConstraint, NodeCapability};
+use crate::agent::{AgentBlockReason, AgentState, AgentTable, Goal, GoalPriority, MAX_AGENTS};
+use crate::fabric::{ExecutionFabric, NodeCapability, PlacementConstraint};
+use crate::intent::{IntentClass, IntentEngine, IntentStatus, MAX_INTENTS};
+use crate::memory_engine::{EpisodeKind, EpisodeOutcome, MemoryEngine, MemoryScope, MemoryTag};
 use crate::task::{Scheduler, TaskState};
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -199,10 +199,8 @@ impl IntentScheduler {
                 }
 
                 // Select placement node.
-                let constraint = self.build_placement_constraint(
-                    &plan.steps[s].goal,
-                    &intents.intents[i],
-                );
+                let constraint =
+                    self.build_placement_constraint(&plan.steps[s].goal, &intents.intents[i]);
                 let _node = fabric.select_node(&constraint);
 
                 // Spawn agent for this step.
@@ -307,7 +305,11 @@ impl IntentScheduler {
             memory.episodic.record(
                 tick,
                 EpisodeKind::BudgetExceeded,
-                if replanned { EpisodeOutcome::Partial } else { EpisodeOutcome::Failure },
+                if replanned {
+                    EpisodeOutcome::Partial
+                } else {
+                    EpisodeOutcome::Failure
+                },
                 agent_id as u16,
                 intent_id,
                 b"budget/deadline exceeded",

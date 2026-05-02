@@ -9,10 +9,10 @@
 //! metadata; we zero it for simple passthrough.
 
 use crate::mm::FrameAllocator;
-use crate::virtio::{self, Virtqueue, VRING_DESC_F_WRITE, VRING_DESC_F_NEXT};
+use crate::virtio::{self, Virtqueue, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
 /// Maximum packet payload size.
-pub const MAX_PACKET_SIZE: usize = 1514;  // standard Ethernet MTU
+pub const MAX_PACKET_SIZE: usize = 1514; // standard Ethernet MTU
 /// VIRTIO net header size (without mergeable rx buffer feature).
 pub const NET_HEADER_SIZE: usize = 10;
 /// Total buffer size per RX descriptor.
@@ -214,7 +214,10 @@ impl VirtioNet {
             return false;
         }
 
-        let d0 = match txq.alloc_desc() { Some(d) => d, None => return false };
+        let d0 = match txq.alloc_desc() {
+            Some(d) => d,
+            None => return false,
+        };
 
         // Copy header + data into the static TX buffer.
         let total_len = NET_HEADER_SIZE + data.len();
@@ -307,13 +310,22 @@ impl VirtioNet {
     /// Format MAC address into a buffer. Returns bytes written.
     pub fn mac_fmt(&self, buf: &mut [u8; 18]) -> usize {
         fn hex(v: u8) -> u8 {
-            if v < 10 { b'0' + v } else { b'a' + v - 10 }
+            if v < 10 {
+                b'0' + v
+            } else {
+                b'a' + v - 10
+            }
         }
         let mut i = 0;
         for (j, &b) in self.mac.iter().enumerate() {
-            buf[i] = hex(b >> 4); i += 1;
-            buf[i] = hex(b & 0xF); i += 1;
-            if j < 5 { buf[i] = b':'; i += 1; }
+            buf[i] = hex(b >> 4);
+            i += 1;
+            buf[i] = hex(b & 0xF);
+            i += 1;
+            if j < 5 {
+                buf[i] = b':';
+                i += 1;
+            }
         }
         i
     }

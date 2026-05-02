@@ -94,7 +94,9 @@ pub struct Seccomp {
     pub deny: Vec<String>,
 }
 
-fn default_profile() -> String { "default".into() }
+fn default_profile() -> String {
+    "default".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Namespaces {
@@ -116,11 +118,20 @@ pub struct Namespaces {
 
 impl Default for Namespaces {
     fn default() -> Self {
-        Self { pid: true, mount: true, uts: true, ipc: true, net: true, user: false }
+        Self {
+            pid: true,
+            mount: true,
+            uts: true,
+            ipc: true,
+            net: true,
+            user: false,
+        }
     }
 }
 
-fn t() -> bool { true }
+fn t() -> bool {
+    true
+}
 
 impl Manifest {
     pub fn load(path: &Path) -> Result<Self> {
@@ -180,7 +191,9 @@ impl Manifest {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.name.is_empty(), "manifest: name must not be empty");
         anyhow::ensure!(
-            self.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            self.name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "manifest: name must match [A-Za-z0-9_-]"
         );
         anyhow::ensure!(!self.cmd.is_empty(), "manifest: cmd must not be empty");

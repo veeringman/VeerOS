@@ -6,7 +6,7 @@
 //! - Priority-aware round-robin for the `RealTime` distribution.
 //! - A `tick()` entry point the timer ISR calls each period.
 
-use arch::{SavedContext, TaskContext, TaskMemRegion, TaskRegions, MemPerms, MAX_TASK_REGIONS};
+use arch::{MemPerms, SavedContext, TaskContext, TaskMemRegion, TaskRegions, MAX_TASK_REGIONS};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -217,7 +217,11 @@ impl Scheduler {
                     join_target: usize::MAX,
                     exit_code: 0,
                     regions,
-                    region_count: if stack_bottom >= STACK_GUARD_SIZE { 2 } else { 1 },
+                    region_count: if stack_bottom >= STACK_GUARD_SIZE {
+                        2
+                    } else {
+                        1
+                    },
                     process_id,
                     tls_base: 0,
                 };

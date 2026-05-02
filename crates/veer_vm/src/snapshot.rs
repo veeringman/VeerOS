@@ -6,9 +6,9 @@
 
 use anyhow::{bail, Context, Result};
 use kvm_bindings::{
-    kvm_debugregs, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_pit_state2, kvm_regs,
-    kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, KVM_IRQCHIP_IOAPIC,
-    KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE,
+    kvm_debugregs, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_pit_state2, kvm_regs, kvm_sregs,
+    kvm_vcpu_events, kvm_xcrs, kvm_xsave, KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER,
+    KVM_IRQCHIP_PIC_SLAVE,
 };
 use kvm_ioctls::{VcpuFd, VmFd};
 use std::fs;
@@ -101,8 +101,7 @@ pub fn save(
     tap_name: Option<&str>,
     mac: [u8; 6],
 ) -> Result<()> {
-    fs::create_dir_all(dir)
-        .with_context(|| format!("creating snapshot dir {}", dir.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("creating snapshot dir {}", dir.display()))?;
 
     let meta = MetaHeader {
         magic: META_MAGIC,
@@ -116,9 +115,18 @@ pub fn save(
     fs::write(dir.join("memory.bin"), guest.as_slice())
         .with_context(|| format!("writing {}/memory.bin", dir.display()))?;
 
-    write_pod(&dir.join("regs.bin"), &vcpu.get_regs().context("KVM_GET_REGS")?)?;
-    write_pod(&dir.join("sregs.bin"), &vcpu.get_sregs().context("KVM_GET_SREGS")?)?;
-    write_pod(&dir.join("lapic.bin"), &vcpu.get_lapic().context("KVM_GET_LAPIC")?)?;
+    write_pod(
+        &dir.join("regs.bin"),
+        &vcpu.get_regs().context("KVM_GET_REGS")?,
+    )?;
+    write_pod(
+        &dir.join("sregs.bin"),
+        &vcpu.get_sregs().context("KVM_GET_SREGS")?,
+    )?;
+    write_pod(
+        &dir.join("lapic.bin"),
+        &vcpu.get_lapic().context("KVM_GET_LAPIC")?,
+    )?;
     write_pod(
         &dir.join("mp_state.bin"),
         &vcpu.get_mp_state().context("KVM_GET_MP_STATE")?,
@@ -127,8 +135,14 @@ pub fn save(
         &dir.join("vcpu_events.bin"),
         &vcpu.get_vcpu_events().context("KVM_GET_VCPU_EVENTS")?,
     )?;
-    write_pod(&dir.join("xsave.bin"), &vcpu.get_xsave().context("KVM_GET_XSAVE")?)?;
-    write_pod(&dir.join("xcrs.bin"), &vcpu.get_xcrs().context("KVM_GET_XCRS")?)?;
+    write_pod(
+        &dir.join("xsave.bin"),
+        &vcpu.get_xsave().context("KVM_GET_XSAVE")?,
+    )?;
+    write_pod(
+        &dir.join("xcrs.bin"),
+        &vcpu.get_xcrs().context("KVM_GET_XCRS")?,
+    )?;
     write_pod(
         &dir.join("debugregs.bin"),
         &vcpu.get_debug_regs().context("KVM_GET_DEBUGREGS")?,
@@ -137,7 +151,10 @@ pub fn save(
     write_irqchip(vm, dir, KVM_IRQCHIP_PIC_MASTER, "pic_master.bin")?;
     write_irqchip(vm, dir, KVM_IRQCHIP_PIC_SLAVE, "pic_slave.bin")?;
     write_irqchip(vm, dir, KVM_IRQCHIP_IOAPIC, "ioapic.bin")?;
-    write_pod(&dir.join("pit.bin"), &vm.get_pit2().context("KVM_GET_PIT2")?)?;
+    write_pod(
+        &dir.join("pit.bin"),
+        &vm.get_pit2().context("KVM_GET_PIT2")?,
+    )?;
 
     write_serial(&dir.join("serial.bin"), &uart.snapshot())?;
     write_blk_state(dir, blk, disk_path, disk_read_only)?;
@@ -173,7 +190,10 @@ pub fn restore(
 
     let memory = fs::read(dir.join("memory.bin"))
         .with_context(|| format!("reading {}/memory.bin", dir.display()))?;
-    anyhow::ensure!(memory.len() == guest.size(), "snapshot memory dump size mismatch");
+    anyhow::ensure!(
+        memory.len() == guest.size(),
+        "snapshot memory dump size mismatch"
+    );
     guest.slice_mut(0, guest.size())?.copy_from_slice(&memory);
 
     let pic_master: kvm_irqchip = read_pod(&dir.join("pic_master.bin"))?;
@@ -293,7 +313,11 @@ fn restore_blk_state(
         };
         let actual = canonical_path_string(actual_path);
         if expected.trim() != actual {
-            bail!("snapshot disk mismatch: expected {}, got {}", expected.trim(), actual);
+            bail!(
+                "snapshot disk mismatch: expected {}, got {}",
+                expected.trim(),
+                actual
+            );
         }
     }
 
@@ -355,7 +379,10 @@ fn restore_blk_state(
             next_used_idx: take_u16(&bytes, &mut idx)?,
         });
     }
-    anyhow::ensure!(idx == bytes.len(), "unexpected trailing bytes in blk snapshot");
+    anyhow::ensure!(
+        idx == bytes.len(),
+        "unexpected trailing bytes in blk snapshot"
+    );
 
     let snap = VirtioBlkSnapshot {
         transport: crate::virtio::VirtioTransportSnapshot {
@@ -457,7 +484,11 @@ fn restore_net_state(
         bail!("snapshot requires --tap {}", expected_tap);
     };
     if expected_tap.trim() != actual_tap {
-        bail!("snapshot tap mismatch: expected {}, got {}", expected_tap.trim(), actual_tap);
+        bail!(
+            "snapshot tap mismatch: expected {}, got {}",
+            expected_tap.trim(),
+            actual_tap
+        );
     }
 
     let bytes = fs::read(dir.join("net.bin"))
@@ -513,7 +544,10 @@ fn restore_net_state(
             next_used_idx: take_u16(&bytes, &mut idx)?,
         });
     }
-    anyhow::ensure!(idx == bytes.len(), "unexpected trailing bytes in net snapshot");
+    anyhow::ensure!(
+        idx == bytes.len(),
+        "unexpected trailing bytes in net snapshot"
+    );
 
     let snap = VirtioNetSnapshot {
         transport: crate::virtio::VirtioTransportSnapshot {
@@ -543,14 +577,7 @@ fn write_irqchip(vm: &VmFd, dir: &Path, chip_id: u32, name: &str) -> Result<()> 
 fn write_serial(path: &Path, state: &SerialSnapshot) -> Result<()> {
     let mut bytes = Vec::with_capacity(12 + state.rx.len());
     bytes.extend_from_slice(&[
-        state.ier,
-        state.lcr,
-        state.mcr,
-        state.scr,
-        state.dll,
-        state.dlm,
-        0,
-        0,
+        state.ier, state.lcr, state.mcr, state.scr, state.dll, state.dlm, 0, 0,
     ]);
     let rx_len = state.rx.len() as u32;
     bytes.extend_from_slice(&rx_len.to_le_bytes());
@@ -561,7 +588,11 @@ fn write_serial(path: &Path, state: &SerialSnapshot) -> Result<()> {
 
 fn read_serial(path: &Path) -> Result<SerialSnapshot> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    anyhow::ensure!(bytes.len() >= 12, "short serial snapshot {}", path.display());
+    anyhow::ensure!(
+        bytes.len() >= 12,
+        "short serial snapshot {}",
+        path.display()
+    );
     let rx_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     anyhow::ensure!(
         bytes.len() == 12 + rx_len,
@@ -580,9 +611,8 @@ fn read_serial(path: &Path) -> Result<SerialSnapshot> {
 }
 
 fn write_pod<T>(path: &Path, value: &T) -> Result<()> {
-    let bytes = unsafe {
-        std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>())
-    };
+    let bytes =
+        unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) };
     fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
@@ -598,11 +628,7 @@ fn read_pod<T>(path: &Path) -> Result<T> {
     );
     let mut value = MaybeUninit::<T>::uninit();
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            value.as_mut_ptr().cast::<u8>(),
-            bytes.len(),
-        );
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), value.as_mut_ptr().cast::<u8>(), bytes.len());
         Ok(value.assume_init())
     }
 }

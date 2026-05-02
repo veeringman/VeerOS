@@ -10,13 +10,15 @@
 //! The server is generic over `arch::Serial` — it works with any byte
 //! transport (UART, TcpSerial, etc.).
 
-use arch::Serial;
-use crypto::CryptoRng;
-use crate::{MAX_PAYLOAD, VERSION_STRING, get_u32, get_string, put_u32, put_string};
-use crate::transport::Transport;
-use crate::kex::{KexConfig, KexState, build_kexinit, process_ecdh_init};
 use crate::auth::{self, AuthResult};
 use crate::channel::{ChannelManager, INITIAL_WINDOW, MAX_CHANNEL_PACKET};
+use crate::kex::{build_kexinit, process_ecdh_init, KexConfig, KexState};
+use crate::transport::Transport;
+use crate::{get_string, get_u32, put_string, put_u32, MAX_PAYLOAD, VERSION_STRING};
+use arch::Serial;
+use crypto::CryptoRng;
+
+const VERSION_EOF_RETRIES: usize = 32 * 1024;
 
 /// SSH connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,16 +89,30 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
     // Send our version string
     serial.write_bytes(VERSION_STRING);
     serial.write_bytes(b"\r\n");
+    serial.flush();
     trace("sent-version");
 
     // Read client's version string (line ending with CR LF or LF)
     let mut version_buf = [0u8; 256];
     let mut vlen = 0;
+    let mut eof_retries = 0usize;
     loop {
         let b = serial.read_byte();
-        if b == 0x04 { return None; } // EOF
-        if b == b'\n' { break; }
-        if b == b'\r' { continue; }
+        if b == 0x04 {
+            eof_retries += 1;
+            if eof_retries >= VERSION_EOF_RETRIES {
+                return None;
+            }
+            core::hint::spin_loop();
+            continue;
+        }
+        eof_retries = 0;
+        if b == b'\n' {
+            break;
+        }
+        if b == b'\r' {
+            continue;
+        }
         if vlen < version_buf.len() {
             version_buf[vlen] = b;
             vlen += 1;
@@ -127,7 +143,9 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
 
     // Read client's KEXINIT
     let n = transport.read_packet(serial, &mut payload);
-    if n == 0 || payload[0] != 20 { return None; } // not KEXINIT
+    if n == 0 || payload[0] != 20 {
+        return None;
+    } // not KEXINIT
 
     kex_state.client_kexinit[..n].copy_from_slice(&payload[..n]);
     kex_state.client_kexinit_len = n;
@@ -136,27 +154,32 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
     // ── Step 3: ECDH Key Exchange ────────────────────────────────────────
     // Read client's KEX_ECDH_INIT (msg type 30)
     let n = transport.read_packet(serial, &mut payload);
-    if n == 0 || payload[0] != 30 { return None; }
+    if n == 0 || payload[0] != 30 {
+        return None;
+    }
     trace("got-ecdh-init");
 
     // Parse client's ephemeral public key Q_C
     let mut off = 1;
     let (q_c_bytes, consumed) = get_string(&payload[off..]);
-    if q_c_bytes.len() != 32 { return None; }
+    if q_c_bytes.len() != 32 {
+        return None;
+    }
     let mut q_c = [0u8; 32];
     q_c.copy_from_slice(q_c_bytes);
 
     // Process ECDH and build reply
-    let (reply, reply_len, keys, exchange_hash, shared_secret, q_s) = match process_ecdh_init(&q_c, &mut kex_state, &kex_config) {
-        Some(result) => result,
-        None => return None,
-    };
+    let (reply, reply_len, keys, exchange_hash, shared_secret, q_s) =
+        match process_ecdh_init(&q_c, &mut kex_state, &kex_config) {
+            Some(result) => result,
+            None => return None,
+        };
 
     // Debug: dump exchange hash H as hex
     {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut hex_buf = [0u8; 4 + 64]; // prefix + 64 hex chars
-        // Dump H
+                                         // Dump H
         hex_buf[0] = b'H';
         hex_buf[1] = b':';
         for i in 0..32 {
@@ -252,7 +275,9 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
 
     // Read client's NEWKEYS
     let n = transport.read_packet(serial, &mut payload);
-    if n == 0 || payload[0] != 21 { return None; }
+    if n == 0 || payload[0] != 21 {
+        return None;
+    }
     trace("got-client-newkeys");
 
     // Install encryption keys
@@ -262,11 +287,15 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
     // ── Step 5: Service Request ──────────────────────────────────────────
     // Client sends SERVICE_REQUEST for "ssh-userauth"
     let n = transport.read_packet(serial, &mut payload);
-    if n == 0 || payload[0] != 5 { return None; }
+    if n == 0 || payload[0] != 5 {
+        return None;
+    }
     trace("got-service-request");
 
     let (service_name, _) = get_string(&payload[1..]);
-    if service_name != b"ssh-userauth" { return None; }
+    if service_name != b"ssh-userauth" {
+        return None;
+    }
 
     // Send SERVICE_ACCEPT
     let mut accept = [0u8; 64];
@@ -278,11 +307,14 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
     // ── Step 6: User Authentication ──────────────────────────────────────
     loop {
         let n = transport.read_packet(serial, &mut payload);
-        if n == 0 { return None; }
+        if n == 0 {
+            return None;
+        }
 
         if payload[0] == 50 {
             // USERAUTH_REQUEST
-            let (result, _ulen) = auth::check_userauth(&payload[..n], config.password_verify, &mut user);
+            let (result, _ulen) =
+                auth::check_userauth(&payload[..n], config.password_verify, &mut user);
             match result {
                 AuthResult::Success => {
                     let slen = auth::build_userauth_success(&mut payload);
@@ -311,7 +343,9 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
 
     loop {
         let n = transport.read_packet(serial, &mut payload);
-        if n == 0 { return None; }
+        if n == 0 {
+            return None;
+        }
 
         match payload[0] {
             90 => {
@@ -336,8 +370,9 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
                 let server_id = get_u32(&payload[1..]);
                 let bytes_to_add = get_u32(&payload[5..]);
                 if let Some(idx) = channels.find(server_id) {
-                    channels.channels[idx].tx_window =
-                        channels.channels[idx].tx_window.saturating_add(bytes_to_add);
+                    channels.channels[idx].tx_window = channels.channels[idx]
+                        .tx_window
+                        .saturating_add(bytes_to_add);
                 }
             }
             2 => {
@@ -367,7 +402,9 @@ pub fn run_ssh_handshake_with_trace<S: Serial, F: FnMut(&str)>(
         auth_user_len: {
             // Find the actual username length (set by check_userauth)
             let mut len = 0;
-            while len < 64 && user[len] != 0 { len += 1; }
+            while len < 64 && user[len] != 0 {
+                len += 1;
+            }
             len
         },
     })
@@ -440,11 +477,15 @@ impl SshShellBridge {
                     self.rx_len = copy_len;
 
                     // Consume window and send WINDOW_ADJUST if needed
-                    self.channels.consume_rx_window(self.chan_idx, copy_len as u32);
+                    self.channels
+                        .consume_rx_window(self.chan_idx, copy_len as u32);
                     if self.channels.channels[self.chan_idx].rx_window < INITIAL_WINDOW / 2 {
-                        let adjust = INITIAL_WINDOW - self.channels.channels[self.chan_idx].rx_window;
+                        let adjust =
+                            INITIAL_WINDOW - self.channels.channels[self.chan_idx].rx_window;
                         let mut adj_buf = [0u8; 64];
-                        let adj_len = self.channels.build_window_adjust(self.chan_idx, adjust, &mut adj_buf);
+                        let adj_len =
+                            self.channels
+                                .build_window_adjust(self.chan_idx, adjust, &mut adj_buf);
                         self.transport.write_packet(serial, &adj_buf[..adj_len]);
                         self.channels.channels[self.chan_idx].rx_window = INITIAL_WINDOW;
                     }
@@ -453,8 +494,10 @@ impl SshShellBridge {
                     // WINDOW_ADJUST
                     let _server_id = get_u32(&payload[1..]);
                     let bytes = get_u32(&payload[5..]);
-                    self.channels.channels[self.chan_idx].tx_window =
-                        self.channels.channels[self.chan_idx].tx_window.saturating_add(bytes);
+                    self.channels.channels[self.chan_idx].tx_window = self.channels.channels
+                        [self.chan_idx]
+                        .tx_window
+                        .saturating_add(bytes);
                 }
                 96 => {
                     // CHANNEL_EOF
@@ -465,7 +508,9 @@ impl SshShellBridge {
                     // CHANNEL_CLOSE
                     // Send close back
                     let mut close_buf = [0u8; 16];
-                    let close_len = self.channels.build_channel_close(self.chan_idx, &mut close_buf);
+                    let close_len = self
+                        .channels
+                        .build_channel_close(self.chan_idx, &mut close_buf);
                     self.transport.write_packet(serial, &close_buf[..close_len]);
                     self.channels.close(self.chan_idx);
                     self.closed = true;
@@ -490,11 +535,15 @@ impl SshShellBridge {
 
     /// Write a byte to the SSH channel.
     pub fn write_byte_to<S: Serial>(&mut self, serial: &S, byte: u8) {
-        if self.closed { return; }
+        if self.closed {
+            return;
+        }
 
         let mut buf = [0u8; MAX_PAYLOAD];
         let data = [byte];
-        let plen = self.channels.build_channel_data(self.chan_idx, &data, &mut buf);
+        let plen = self
+            .channels
+            .build_channel_data(self.chan_idx, &data, &mut buf);
         if plen > 0 {
             self.transport.write_packet(serial, &buf[..plen]);
         }
@@ -502,10 +551,14 @@ impl SshShellBridge {
 
     /// Write multiple bytes to the SSH channel (more efficient than one at a time).
     pub fn write_bytes_to<S: Serial>(&mut self, serial: &S, data: &[u8]) {
-        if self.closed || data.is_empty() { return; }
+        if self.closed || data.is_empty() {
+            return;
+        }
 
         let mut buf = [0u8; MAX_PAYLOAD];
-        let plen = self.channels.build_channel_data(self.chan_idx, data, &mut buf);
+        let plen = self
+            .channels
+            .build_channel_data(self.chan_idx, data, &mut buf);
         if plen > 0 {
             self.transport.write_packet(serial, &buf[..plen]);
         }
@@ -513,7 +566,9 @@ impl SshShellBridge {
 
     /// Send EOF and CLOSE to cleanly shut down the channel.
     pub fn close_channel<S: Serial>(&mut self, serial: &S) {
-        if self.closed { return; }
+        if self.closed {
+            return;
+        }
         self.closed = true;
 
         let mut buf = [0u8; 16];

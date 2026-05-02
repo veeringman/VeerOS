@@ -35,27 +35,61 @@ use arch::InputEvent;
 static HID_TO_ASCII: [u8; 128] = {
     let mut t = [0u8; 128];
     // Letters a-z (HID 0x04–0x1D)
-    t[0x04] = b'a'; t[0x05] = b'b'; t[0x06] = b'c'; t[0x07] = b'd';
-    t[0x08] = b'e'; t[0x09] = b'f'; t[0x0A] = b'g'; t[0x0B] = b'h';
-    t[0x0C] = b'i'; t[0x0D] = b'j'; t[0x0E] = b'k'; t[0x0F] = b'l';
-    t[0x10] = b'm'; t[0x11] = b'n'; t[0x12] = b'o'; t[0x13] = b'p';
-    t[0x14] = b'q'; t[0x15] = b'r'; t[0x16] = b's'; t[0x17] = b't';
-    t[0x18] = b'u'; t[0x19] = b'v'; t[0x1A] = b'w'; t[0x1B] = b'x';
-    t[0x1C] = b'y'; t[0x1D] = b'z';
+    t[0x04] = b'a';
+    t[0x05] = b'b';
+    t[0x06] = b'c';
+    t[0x07] = b'd';
+    t[0x08] = b'e';
+    t[0x09] = b'f';
+    t[0x0A] = b'g';
+    t[0x0B] = b'h';
+    t[0x0C] = b'i';
+    t[0x0D] = b'j';
+    t[0x0E] = b'k';
+    t[0x0F] = b'l';
+    t[0x10] = b'm';
+    t[0x11] = b'n';
+    t[0x12] = b'o';
+    t[0x13] = b'p';
+    t[0x14] = b'q';
+    t[0x15] = b'r';
+    t[0x16] = b's';
+    t[0x17] = b't';
+    t[0x18] = b'u';
+    t[0x19] = b'v';
+    t[0x1A] = b'w';
+    t[0x1B] = b'x';
+    t[0x1C] = b'y';
+    t[0x1D] = b'z';
     // Digits 1-9, 0 (HID 0x1E–0x27)
-    t[0x1E] = b'1'; t[0x1F] = b'2'; t[0x20] = b'3'; t[0x21] = b'4';
-    t[0x22] = b'5'; t[0x23] = b'6'; t[0x24] = b'7'; t[0x25] = b'8';
-    t[0x26] = b'9'; t[0x27] = b'0';
+    t[0x1E] = b'1';
+    t[0x1F] = b'2';
+    t[0x20] = b'3';
+    t[0x21] = b'4';
+    t[0x22] = b'5';
+    t[0x23] = b'6';
+    t[0x24] = b'7';
+    t[0x25] = b'8';
+    t[0x26] = b'9';
+    t[0x27] = b'0';
     // Special keys
     t[0x28] = b'\r'; // Enter
-    t[0x29] = 0x1B;  // Escape
-    t[0x2A] = 0x08;  // Backspace
+    t[0x29] = 0x1B; // Escape
+    t[0x2A] = 0x08; // Backspace
     t[0x2B] = b'\t'; // Tab
-    t[0x2C] = b' ';  // Space
-    // Symbols (US layout, unshifted)
-    t[0x2D] = b'-';  t[0x2E] = b'=';  t[0x2F] = b'[';  t[0x30] = b']';
-    t[0x31] = b'\\'; t[0x33] = b';';  t[0x34] = b'\''; t[0x35] = b'`';
-    t[0x36] = b',';  t[0x37] = b'.';  t[0x38] = b'/';
+    t[0x2C] = b' '; // Space
+                    // Symbols (US layout, unshifted)
+    t[0x2D] = b'-';
+    t[0x2E] = b'=';
+    t[0x2F] = b'[';
+    t[0x30] = b']';
+    t[0x31] = b'\\';
+    t[0x33] = b';';
+    t[0x34] = b'\'';
+    t[0x35] = b'`';
+    t[0x36] = b',';
+    t[0x37] = b'.';
+    t[0x38] = b'/';
     // Delete
     t[0x4C] = 0x7F;
     t
@@ -65,23 +99,57 @@ static HID_TO_ASCII: [u8; 128] = {
 static HID_TO_ASCII_SHIFT: [u8; 128] = {
     let mut t = [0u8; 128];
     // Shift + letters → uppercase
-    t[0x04] = b'A'; t[0x05] = b'B'; t[0x06] = b'C'; t[0x07] = b'D';
-    t[0x08] = b'E'; t[0x09] = b'F'; t[0x0A] = b'G'; t[0x0B] = b'H';
-    t[0x0C] = b'I'; t[0x0D] = b'J'; t[0x0E] = b'K'; t[0x0F] = b'L';
-    t[0x10] = b'M'; t[0x11] = b'N'; t[0x12] = b'O'; t[0x13] = b'P';
-    t[0x14] = b'Q'; t[0x15] = b'R'; t[0x16] = b'S'; t[0x17] = b'T';
-    t[0x18] = b'U'; t[0x19] = b'V'; t[0x1A] = b'W'; t[0x1B] = b'X';
-    t[0x1C] = b'Y'; t[0x1D] = b'Z';
+    t[0x04] = b'A';
+    t[0x05] = b'B';
+    t[0x06] = b'C';
+    t[0x07] = b'D';
+    t[0x08] = b'E';
+    t[0x09] = b'F';
+    t[0x0A] = b'G';
+    t[0x0B] = b'H';
+    t[0x0C] = b'I';
+    t[0x0D] = b'J';
+    t[0x0E] = b'K';
+    t[0x0F] = b'L';
+    t[0x10] = b'M';
+    t[0x11] = b'N';
+    t[0x12] = b'O';
+    t[0x13] = b'P';
+    t[0x14] = b'Q';
+    t[0x15] = b'R';
+    t[0x16] = b'S';
+    t[0x17] = b'T';
+    t[0x18] = b'U';
+    t[0x19] = b'V';
+    t[0x1A] = b'W';
+    t[0x1B] = b'X';
+    t[0x1C] = b'Y';
+    t[0x1D] = b'Z';
     // Shift + digits → symbols
-    t[0x1E] = b'!'; t[0x1F] = b'@'; t[0x20] = b'#'; t[0x21] = b'$';
-    t[0x22] = b'%'; t[0x23] = b'^'; t[0x24] = b'&'; t[0x25] = b'*';
-    t[0x26] = b'('; t[0x27] = b')';
+    t[0x1E] = b'!';
+    t[0x1F] = b'@';
+    t[0x20] = b'#';
+    t[0x21] = b'$';
+    t[0x22] = b'%';
+    t[0x23] = b'^';
+    t[0x24] = b'&';
+    t[0x25] = b'*';
+    t[0x26] = b'(';
+    t[0x27] = b')';
     // Shift + symbols
     t[0x28] = b'\r'; // Enter (unchanged)
-    t[0x2C] = b' ';  // Space (unchanged)
-    t[0x2D] = b'_';  t[0x2E] = b'+';  t[0x2F] = b'{';  t[0x30] = b'}';
-    t[0x31] = b'|';  t[0x33] = b':';  t[0x34] = b'"';  t[0x35] = b'~';
-    t[0x36] = b'<';  t[0x37] = b'>';  t[0x38] = b'?';
+    t[0x2C] = b' '; // Space (unchanged)
+    t[0x2D] = b'_';
+    t[0x2E] = b'+';
+    t[0x2F] = b'{';
+    t[0x30] = b'}';
+    t[0x31] = b'|';
+    t[0x33] = b':';
+    t[0x34] = b'"';
+    t[0x35] = b'~';
+    t[0x36] = b'<';
+    t[0x37] = b'>';
+    t[0x38] = b'?';
     t
 };
 
@@ -89,14 +157,14 @@ static HID_TO_ASCII_SHIFT: [u8; 128] = {
 // HID modifier bitmask (byte 0 of boot keyboard report)
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub const MOD_LEFT_CTRL:   u8 = 1 << 0;
-pub const MOD_LEFT_SHIFT:  u8 = 1 << 1;
-pub const MOD_LEFT_ALT:    u8 = 1 << 2;
-pub const MOD_LEFT_GUI:    u8 = 1 << 3;
-pub const MOD_RIGHT_CTRL:  u8 = 1 << 4;
+pub const MOD_LEFT_CTRL: u8 = 1 << 0;
+pub const MOD_LEFT_SHIFT: u8 = 1 << 1;
+pub const MOD_LEFT_ALT: u8 = 1 << 2;
+pub const MOD_LEFT_GUI: u8 = 1 << 3;
+pub const MOD_RIGHT_CTRL: u8 = 1 << 4;
 pub const MOD_RIGHT_SHIFT: u8 = 1 << 5;
-pub const MOD_RIGHT_ALT:   u8 = 1 << 6;
-pub const MOD_RIGHT_GUI:   u8 = 1 << 7;
+pub const MOD_RIGHT_ALT: u8 = 1 << 6;
+pub const MOD_RIGHT_GUI: u8 = 1 << 7;
 
 /// Returns `true` if any Shift key is held.
 #[inline]
@@ -122,7 +190,11 @@ pub fn hid_key_to_event(usage: u8, modifiers: u8) -> InputEvent {
     }
     let ascii = if is_shift(modifiers) {
         let s = HID_TO_ASCII_SHIFT[usage as usize];
-        if s != 0 { s } else { HID_TO_ASCII[usage as usize] }
+        if s != 0 {
+            s
+        } else {
+            HID_TO_ASCII[usage as usize]
+        }
     } else {
         HID_TO_ASCII[usage as usize]
     };
@@ -245,7 +317,9 @@ impl KeyboardState {
 
         // Detect released keys (were in prev_keys but not in keys).
         for &pk in self.prev_keys.iter() {
-            if pk == 0 { continue; }
+            if pk == 0 {
+                continue;
+            }
             let still_held = keys.iter().any(|&k| k == pk);
             if !still_held {
                 let ev = hid_key_to_event(pk, self.prev_mods);
@@ -257,7 +331,9 @@ impl KeyboardState {
 
         // Detect newly pressed keys (in keys but not in prev_keys).
         for &k in keys.iter() {
-            if k == 0 { continue; }
+            if k == 0 {
+                continue;
+            }
             let was_held = self.prev_keys.iter().any(|&pk| pk == k);
             if !was_held {
                 let ev = hid_key_to_event(k, mods);
@@ -305,7 +381,10 @@ impl MouseState {
         for bit in 0..3u8 {
             if changed & (1 << bit) != 0 {
                 let pressed = buttons & (1 << bit) != 0;
-                queue.push(InputEvent::MouseButton { button: bit, pressed });
+                queue.push(InputEvent::MouseButton {
+                    button: bit,
+                    pressed,
+                });
             }
         }
 

@@ -36,23 +36,23 @@
 
 #![no_std]
 
-pub mod sys;
-pub mod ipc;
-pub mod task;
-pub mod io;
-pub mod time;
-pub mod sync;
-pub mod channel;
-pub mod poll;
+pub mod agent;
 pub mod async_rt;
-pub mod socket;
-pub mod user;
-pub mod fs;
 pub mod cap;
+pub mod channel;
+pub mod config;
+pub mod fabric_net;
+pub mod fs;
 pub mod gpio;
 pub mod hw;
-pub mod config;
-pub mod agent;
 pub mod intent;
+pub mod io;
+pub mod ipc;
 pub mod memory;
-pub mod fabric_net;
+pub mod poll;
+pub mod socket;
+pub mod sync;
+pub mod sys;
+pub mod task;
+pub mod time;
+pub mod user;

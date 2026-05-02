@@ -46,7 +46,11 @@ pub fn peer_register(node_id: &[u8; 32], entropy: &[u8; 32]) -> Option<usize> {
             entropy.as_ptr() as usize,
         )
     };
-    if ret == usize::MAX { None } else { Some(ret) }
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(ret)
+    }
 }
 
 /// Verify a challenge response from a peer, promoting it to Verified.
@@ -56,13 +60,7 @@ pub fn peer_register(node_id: &[u8; 32], entropy: &[u8; 32]) -> Option<usize> {
 ///
 /// Returns `true` if the response is valid and the peer is now Verified.
 pub fn peer_verify(peer_idx: usize, response: &[u8; 32]) -> bool {
-    let (ret, _) = unsafe {
-        sys::syscall2(
-            SYS_PEER_VERIFY,
-            peer_idx,
-            response.as_ptr() as usize,
-        )
-    };
+    let (ret, _) = unsafe { sys::syscall2(SYS_PEER_VERIFY, peer_idx, response.as_ptr() as usize) };
     ret == 0
 }
 
@@ -71,10 +69,12 @@ pub fn peer_verify(peer_idx: usize, response: &[u8; 32]) -> bool {
 /// Returns `(trust_level, capabilities)` or `None` if `peer_idx` is invalid.
 /// Trust levels: 0=Untrusted, 1=Challenged, 2=Verified, 3=Attested, 4=Revoked.
 pub fn peer_status(peer_idx: usize) -> Option<(usize, usize)> {
-    let (a, b) = unsafe {
-        sys::syscall2(SYS_PEER_STATUS, peer_idx, 0)
-    };
-    if a == usize::MAX { None } else { Some((a, b)) }
+    let (a, b) = unsafe { sys::syscall2(SYS_PEER_STATUS, peer_idx, 0) };
+    if a == usize::MAX {
+        None
+    } else {
+        Some((a, b))
+    }
 }
 
 // ─── ZKP Capability Proofs ──────────────────────────────────────────────
@@ -94,7 +94,11 @@ pub fn zkp_prove(capability_mask: u32, out: &mut [u8]) -> Option<usize> {
             out.len(),
         )
     };
-    if ret == usize::MAX { None } else { Some(ret) }
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(ret)
+    }
 }
 
 /// Verify a ZKP capability proof from a remote peer.

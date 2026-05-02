@@ -74,11 +74,21 @@ impl Fe {
         // 2*p limbs: each limb of p is 0x7ffffffffffff except limb 0 which is p-19+2*19=...
         // Easier: add a large enough multiple of p.
         let mut r = Fe([
-            self.0[0].wrapping_add(0xfffffffffffda).wrapping_sub(rhs.0[0]), // 2*(2^51 - 19)
-            self.0[1].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[1]), // 2*(2^51)
-            self.0[2].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[2]),
-            self.0[3].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[3]),
-            self.0[4].wrapping_add(0xffffffffffffe).wrapping_sub(rhs.0[4]),
+            self.0[0]
+                .wrapping_add(0xfffffffffffda)
+                .wrapping_sub(rhs.0[0]), // 2*(2^51 - 19)
+            self.0[1]
+                .wrapping_add(0xffffffffffffe)
+                .wrapping_sub(rhs.0[1]), // 2*(2^51)
+            self.0[2]
+                .wrapping_add(0xffffffffffffe)
+                .wrapping_sub(rhs.0[2]),
+            self.0[3]
+                .wrapping_add(0xffffffffffffe)
+                .wrapping_sub(rhs.0[3]),
+            self.0[4]
+                .wrapping_add(0xffffffffffffe)
+                .wrapping_sub(rhs.0[4]),
         ]);
         r.reduce();
         r
@@ -124,11 +134,21 @@ impl Fe {
             + (a[4] as u128) * (b[0] as u128);
 
         // Carry propagation
-        let c = r0 >> 51; r0 &= 0x7ffffffffffff; r1 += c;
-        let c = r1 >> 51; r1 &= 0x7ffffffffffff; r2 += c;
-        let c = r2 >> 51; r2 &= 0x7ffffffffffff; r3 += c;
-        let c = r3 >> 51; r3 &= 0x7ffffffffffff; r4 += c;
-        let c = r4 >> 51; r4 &= 0x7ffffffffffff; r0 += c * 19;
+        let c = r0 >> 51;
+        r0 &= 0x7ffffffffffff;
+        r1 += c;
+        let c = r1 >> 51;
+        r1 &= 0x7ffffffffffff;
+        r2 += c;
+        let c = r2 >> 51;
+        r2 &= 0x7ffffffffffff;
+        r3 += c;
+        let c = r3 >> 51;
+        r3 &= 0x7ffffffffffff;
+        r4 += c;
+        let c = r4 >> 51;
+        r4 &= 0x7ffffffffffff;
+        r0 += c * 19;
 
         Fe([r0 as u64, r1 as u64, r2 as u64, r3 as u64, r4 as u64])
     }
@@ -146,11 +166,21 @@ impl Fe {
         let mut r3 = (self.0[3] as u128) * (k as u128);
         let mut r4 = (self.0[4] as u128) * (k as u128);
 
-        let c = r0 >> 51; r0 &= 0x7ffffffffffff; r1 += c;
-        let c = r1 >> 51; r1 &= 0x7ffffffffffff; r2 += c;
-        let c = r2 >> 51; r2 &= 0x7ffffffffffff; r3 += c;
-        let c = r3 >> 51; r3 &= 0x7ffffffffffff; r4 += c;
-        let c = r4 >> 51; r4 &= 0x7ffffffffffff; r0 += c * 19;
+        let c = r0 >> 51;
+        r0 &= 0x7ffffffffffff;
+        r1 += c;
+        let c = r1 >> 51;
+        r1 &= 0x7ffffffffffff;
+        r2 += c;
+        let c = r2 >> 51;
+        r2 &= 0x7ffffffffffff;
+        r3 += c;
+        let c = r3 >> 51;
+        r3 &= 0x7ffffffffffff;
+        r4 += c;
+        let c = r4 >> 51;
+        r4 &= 0x7ffffffffffff;
+        r0 += c * 19;
 
         Fe([r0 as u64, r1 as u64, r2 as u64, r3 as u64, r4 as u64])
     }
@@ -177,42 +207,58 @@ impl Fe {
         };
         let z_10_0 = {
             let mut t = z_5_0.square();
-            for _ in 1..5 { t = t.square(); }
+            for _ in 1..5 {
+                t = t.square();
+            }
             t.mul(&z_5_0)
         };
         let z_20_0 = {
             let mut t = z_10_0.square();
-            for _ in 1..10 { t = t.square(); }
+            for _ in 1..10 {
+                t = t.square();
+            }
             t.mul(&z_10_0)
         };
         let z_40_0 = {
             let mut t = z_20_0.square();
-            for _ in 1..20 { t = t.square(); }
+            for _ in 1..20 {
+                t = t.square();
+            }
             t.mul(&z_20_0)
         };
         let z_50_0 = {
             let mut t = z_40_0.square();
-            for _ in 1..10 { t = t.square(); }
+            for _ in 1..10 {
+                t = t.square();
+            }
             t.mul(&z_10_0)
         };
         let z_100_0 = {
             let mut t = z_50_0.square();
-            for _ in 1..50 { t = t.square(); }
+            for _ in 1..50 {
+                t = t.square();
+            }
             t.mul(&z_50_0)
         };
         let z_200_0 = {
             let mut t = z_100_0.square();
-            for _ in 1..100 { t = t.square(); }
+            for _ in 1..100 {
+                t = t.square();
+            }
             t.mul(&z_100_0)
         };
         let z_250_0 = {
             let mut t = z_200_0.square();
-            for _ in 1..50 { t = t.square(); }
+            for _ in 1..50 {
+                t = t.square();
+            }
             t.mul(&z_50_0)
         };
         // 2^255 - 21 = (z_250_0)^(2^5) * z11
         let mut t = z_250_0.square();
-        for _ in 1..5 { t = t.square(); }
+        for _ in 1..5 {
+            t = t.square();
+        }
         t.mul(&z11)
     }
 
@@ -233,37 +279,51 @@ impl Fe {
         };
         let z_10_0 = {
             let mut t = z_5_0.square();
-            for _ in 1..5 { t = t.square(); }
+            for _ in 1..5 {
+                t = t.square();
+            }
             t.mul(&z_5_0)
         };
         let z_20_0 = {
             let mut t = z_10_0.square();
-            for _ in 1..10 { t = t.square(); }
+            for _ in 1..10 {
+                t = t.square();
+            }
             t.mul(&z_10_0)
         };
         let z_40_0 = {
             let mut t = z_20_0.square();
-            for _ in 1..20 { t = t.square(); }
+            for _ in 1..20 {
+                t = t.square();
+            }
             t.mul(&z_20_0)
         };
         let z_50_0 = {
             let mut t = z_40_0.square();
-            for _ in 1..10 { t = t.square(); }
+            for _ in 1..10 {
+                t = t.square();
+            }
             t.mul(&z_10_0)
         };
         let z_100_0 = {
             let mut t = z_50_0.square();
-            for _ in 1..50 { t = t.square(); }
+            for _ in 1..50 {
+                t = t.square();
+            }
             t.mul(&z_50_0)
         };
         let z_200_0 = {
             let mut t = z_100_0.square();
-            for _ in 1..100 { t = t.square(); }
+            for _ in 1..100 {
+                t = t.square();
+            }
             t.mul(&z_100_0)
         };
         let z_250_0 = {
             let mut t = z_200_0.square();
-            for _ in 1..50 { t = t.square(); }
+            for _ in 1..50 {
+                t = t.square();
+            }
             t.mul(&z_50_0)
         };
         // 2^252 - 3 = (z_250_0)^(2^2) * self
@@ -367,7 +427,7 @@ impl Fe {
     /// Uses the identity sqrt(a) = a^((p+3)/8) with adjustment.
     pub fn sqrt(&self) -> (Fe, bool) {
         // candidate = a^((p+3)/8)
-        // (p+3)/8  = (2^255 - 16)/8 = 2^252 - 2 
+        // (p+3)/8  = (2^255 - 16)/8 = 2^252 - 2
         // Actually we use: beta = a * a^((p-5)/8)
         let beta = self.mul(&self.pow_p58());
         let beta_sq = beta.square();

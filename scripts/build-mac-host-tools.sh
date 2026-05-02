@@ -13,11 +13,11 @@ set -euo pipefail
 #   ./scripts/build-mac-host-tools.sh release
 #
 # Environment overrides:
-#   VEER_VM_MAC_TARGET=x86_64-apple-darwin
+#   VEER_VM_MAC_TARGET=native|all|x86_64-apple-darwin|aarch64-apple-darwin
 #   VEER_VM_MAC_PROFILE=debug|release
 #
 # Optional auto-sync from Linux host before building (macOS only):
-#   VEEROS_PULL_FROM_LINUX=1        # default on macOS
+#   VEEROS_PULL_FROM_LINUX=1        # default: disabled
 #   LINUX_HOST=192.168.29.10        # required when pull is enabled
 #   LINUX_USER=vijay                # default: $USER
 #   LINUX_PORT=22                   # default: 22
@@ -45,7 +45,7 @@ HOST_OS="$(uname -s)"
 VEEROS_PULL_FROM_LINUX="${VEEROS_PULL_FROM_LINUX:-}"
 
 if [[ -z "${VEEROS_PULL_FROM_LINUX}" && "${HOST_OS}" == "Darwin" ]]; then
-    VEEROS_PULL_FROM_LINUX=1
+    VEEROS_PULL_FROM_LINUX=0
 fi
 
 if [[ "${VEEROS_PULL_FROM_LINUX:-0}" == "1" ]]; then

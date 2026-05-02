@@ -58,16 +58,16 @@ pub const MAX_PMP_ENTRIES: usize = 16;
 pub unsafe fn write_pmpaddr(index: usize, addr: usize) {
     let val = addr >> 2;
     match index {
-        0  => core::arch::asm!("csrw pmpaddr0,  {0}", in(reg) val, options(nomem, nostack)),
-        1  => core::arch::asm!("csrw pmpaddr1,  {0}", in(reg) val, options(nomem, nostack)),
-        2  => core::arch::asm!("csrw pmpaddr2,  {0}", in(reg) val, options(nomem, nostack)),
-        3  => core::arch::asm!("csrw pmpaddr3,  {0}", in(reg) val, options(nomem, nostack)),
-        4  => core::arch::asm!("csrw pmpaddr4,  {0}", in(reg) val, options(nomem, nostack)),
-        5  => core::arch::asm!("csrw pmpaddr5,  {0}", in(reg) val, options(nomem, nostack)),
-        6  => core::arch::asm!("csrw pmpaddr6,  {0}", in(reg) val, options(nomem, nostack)),
-        7  => core::arch::asm!("csrw pmpaddr7,  {0}", in(reg) val, options(nomem, nostack)),
-        8  => core::arch::asm!("csrw pmpaddr8,  {0}", in(reg) val, options(nomem, nostack)),
-        9  => core::arch::asm!("csrw pmpaddr9,  {0}", in(reg) val, options(nomem, nostack)),
+        0 => core::arch::asm!("csrw pmpaddr0,  {0}", in(reg) val, options(nomem, nostack)),
+        1 => core::arch::asm!("csrw pmpaddr1,  {0}", in(reg) val, options(nomem, nostack)),
+        2 => core::arch::asm!("csrw pmpaddr2,  {0}", in(reg) val, options(nomem, nostack)),
+        3 => core::arch::asm!("csrw pmpaddr3,  {0}", in(reg) val, options(nomem, nostack)),
+        4 => core::arch::asm!("csrw pmpaddr4,  {0}", in(reg) val, options(nomem, nostack)),
+        5 => core::arch::asm!("csrw pmpaddr5,  {0}", in(reg) val, options(nomem, nostack)),
+        6 => core::arch::asm!("csrw pmpaddr6,  {0}", in(reg) val, options(nomem, nostack)),
+        7 => core::arch::asm!("csrw pmpaddr7,  {0}", in(reg) val, options(nomem, nostack)),
+        8 => core::arch::asm!("csrw pmpaddr8,  {0}", in(reg) val, options(nomem, nostack)),
+        9 => core::arch::asm!("csrw pmpaddr9,  {0}", in(reg) val, options(nomem, nostack)),
         10 => core::arch::asm!("csrw pmpaddr10, {0}", in(reg) val, options(nomem, nostack)),
         11 => core::arch::asm!("csrw pmpaddr11, {0}", in(reg) val, options(nomem, nostack)),
         12 => core::arch::asm!("csrw pmpaddr12, {0}", in(reg) val, options(nomem, nostack)),
@@ -105,7 +105,9 @@ pub unsafe fn read_pmpcfg(reg: usize) -> u32 {
         1 => core::arch::asm!("csrr {0}, pmpcfg1", out(reg) val, options(nomem, nostack)),
         2 => core::arch::asm!("csrr {0}, pmpcfg2", out(reg) val, options(nomem, nostack)),
         3 => core::arch::asm!("csrr {0}, pmpcfg3", out(reg) val, options(nomem, nostack)),
-        _ => { val = 0; }
+        _ => {
+            val = 0;
+        }
     }
     val
 }
@@ -155,16 +157,52 @@ fn perms_to_pmp(perms: MemPerms) -> u8 {
 pub unsafe fn apply_task_regions(regions: &TaskRegions, region_count: usize) {
     // Build TOR entry list from task regions.
     let mut entries: [TorEntry; MAX_TASK_REGIONS] = [
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
-        TorEntry { base: 0, top: 0, cfg: PMP_A_OFF },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
+        TorEntry {
+            base: 0,
+            top: 0,
+            cfg: PMP_A_OFF,
+        },
     ];
-    let n = if region_count > MAX_TASK_REGIONS { MAX_TASK_REGIONS } else { region_count };
+    let n = if region_count > MAX_TASK_REGIONS {
+        MAX_TASK_REGIONS
+    } else {
+        region_count
+    };
 
     for i in 0..n {
         let r = &regions[i];
@@ -260,7 +298,11 @@ pub unsafe fn apply_combined_regions(
     let mut pair = 0usize;
 
     // Process regions first.
-    let pc = if proc_count > max_tor { max_tor } else { proc_count };
+    let pc = if proc_count > max_tor {
+        max_tor
+    } else {
+        proc_count
+    };
     for i in 0..pc {
         let r = &proc_regions[i];
         if r.size > 0 && pair < max_tor {
@@ -275,7 +317,11 @@ pub unsafe fn apply_combined_regions(
     }
 
     // Thread regions (stack + guard).
-    let tc = if thread_count > (max_tor - pair) { max_tor - pair } else { thread_count };
+    let tc = if thread_count > (max_tor - pair) {
+        max_tor - pair
+    } else {
+        thread_count
+    };
     for i in 0..tc {
         let r = &thread_regions[i];
         if r.size > 0 && pair < max_tor {
@@ -314,7 +360,9 @@ pub unsafe fn write_pmpaddr(_index: usize, _addr: usize) {}
 pub unsafe fn write_pmpcfg(_reg: usize, _val: u32) {}
 
 #[cfg(not(target_arch = "riscv32"))]
-pub unsafe fn read_pmpcfg(_reg: usize) -> u32 { 0 }
+pub unsafe fn read_pmpcfg(_reg: usize) -> u32 {
+    0
+}
 
 #[cfg(not(target_arch = "riscv32"))]
 pub unsafe fn apply_task_regions(_regions: &TaskRegions, _region_count: usize) {}
@@ -325,7 +373,8 @@ pub unsafe fn apply_combined_regions(
     _proc_count: usize,
     _thread_regions: &TaskRegions,
     _thread_count: usize,
-) {}
+) {
+}
 
 #[cfg(not(target_arch = "riscv32"))]
 pub unsafe fn clear_all() {}

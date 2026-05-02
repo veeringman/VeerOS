@@ -224,8 +224,13 @@ mod tests {
     #[test]
     fn migration_plan_live_requires_checkpoint() {
         let rec = sample_record();
-        let plan = build_migration_plan(&rec, "zone-east", Some("dev{edge,home,active}"), MigrationStrategy::Live)
-            .unwrap();
+        let plan = build_migration_plan(
+            &rec,
+            "zone-east",
+            Some("dev{edge,home,active}"),
+            MigrationStrategy::Live,
+        )
+        .unwrap();
         assert!(plan.requires_checkpoint);
         assert_eq!(plan.target_zone, "zone-east");
         assert!(plan.steps.iter().any(|s| s.contains("checkpoint")));

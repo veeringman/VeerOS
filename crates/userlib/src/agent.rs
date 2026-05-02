@@ -98,7 +98,11 @@ pub fn spawn(goal: &str, priority: Priority, entry: usize, stack_top: usize) -> 
         entry,
         stack_top,
     );
-    if ret == usize::MAX { None } else { Some(ret) }
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(ret)
+    }
 }
 
 /// Query agent status.
@@ -107,7 +111,11 @@ pub fn spawn(goal: &str, priority: Priority, entry: usize, stack_top: usize) -> 
 #[inline]
 pub fn status(agent_id: usize) -> Option<(State, usize)> {
     let (s, t) = sys::syscall2(SYS_AGENT_STATUS, agent_id, 0);
-    if s == usize::MAX { None } else { Some((State::from_usize(s), t)) }
+    if s == usize::MAX {
+        None
+    } else {
+        Some((State::from_usize(s), t))
+    }
 }
 
 /// Mark the calling agent as completed.
@@ -160,7 +168,11 @@ pub fn ctx_get(key: &[u8], buf: &mut [u8]) -> Option<usize> {
         buf.as_mut_ptr() as usize,
         buf.len(),
     );
-    if ret == usize::MAX { None } else { Some(ret) }
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(ret)
+    }
 }
 
 /// Get the number of active (non-free) agents.

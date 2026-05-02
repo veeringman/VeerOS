@@ -34,13 +34,7 @@ pub struct Message {
 /// destination slot is invalid or free.
 #[inline]
 pub fn send(dest: u8, opcode: u8, arg0: usize, arg1: usize) -> bool {
-    let ret = sys::syscall4(
-        SYS_IPC_SEND,
-        dest as usize,
-        opcode as usize,
-        arg0,
-        arg1,
-    );
+    let ret = sys::syscall4(SYS_IPC_SEND, dest as usize, opcode as usize, arg0, arg1);
     ret != 0
 }
 

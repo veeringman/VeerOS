@@ -49,19 +49,19 @@ const IEEE802154_BASE: usize = 0x600A_3000; // fallback (C3 does not have 802.15
 
 // Register offsets (from ESP32-C6 TRM)
 #[allow(dead_code)]
-const REG_CTRL: usize = 0x00;       // Main control register
+const REG_CTRL: usize = 0x00; // Main control register
 #[allow(dead_code)]
-const REG_TX_POWER: usize = 0x04;   // TX power level
+const REG_TX_POWER: usize = 0x04; // TX power level
 #[allow(dead_code)]
-const REG_ED_SCAN: usize = 0x08;    // Energy detection scan control
+const REG_ED_SCAN: usize = 0x08; // Energy detection scan control
 #[allow(dead_code)]
-const REG_CHANNEL: usize = 0x0C;    // Channel selection (11-26)
+const REG_CHANNEL: usize = 0x0C; // Channel selection (11-26)
 #[allow(dead_code)]
-const REG_TX_FIFO: usize = 0x10;    // TX FIFO write port
+const REG_TX_FIFO: usize = 0x10; // TX FIFO write port
 #[allow(dead_code)]
-const REG_RX_FIFO: usize = 0x14;    // RX FIFO read port
+const REG_RX_FIFO: usize = 0x14; // RX FIFO read port
 #[allow(dead_code)]
-const REG_PAN_ID: usize = 0x18;     // PAN ID register
+const REG_PAN_ID: usize = 0x18; // PAN ID register
 #[allow(dead_code)]
 const REG_SHORT_ADDR: usize = 0x1C; // Short (16-bit) address
 #[allow(dead_code)]
@@ -69,9 +69,9 @@ const REG_EXT_ADDR_LO: usize = 0x20; // Extended address (low 32 bits)
 #[allow(dead_code)]
 const REG_EXT_ADDR_HI: usize = 0x24; // Extended address (high 32 bits)
 #[allow(dead_code)]
-const REG_INT_ENA: usize = 0x28;    // Interrupt enable
+const REG_INT_ENA: usize = 0x28; // Interrupt enable
 #[allow(dead_code)]
-const REG_INT_CLR: usize = 0x2C;    // Interrupt clear
+const REG_INT_CLR: usize = 0x2C; // Interrupt clear
 
 /// IEEE 802.15.4 channels are numbered 11-26 in the 2.4 GHz band.
 pub const CHANNEL_MIN: u8 = 11;
@@ -354,14 +354,13 @@ impl Esp32Ieee802154 {
 
             // Step 7: Clear interrupts and enable relevant ones.
             unsafe {
-                modem::mmio_write(
-                    modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                    0xFFFF_FFFF,
-                );
+                modem::mmio_write(modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR, 0xFFFF_FFFF);
                 modem::mmio_write(
                     modem::IEEE802154_MAC_BASE + modem::ZB_INT_ENA,
-                    modem::ZB_INT_TX_DONE | modem::ZB_INT_RX_DONE
-                        | modem::ZB_INT_ED_DONE | modem::ZB_INT_ACK_RCVD,
+                    modem::ZB_INT_TX_DONE
+                        | modem::ZB_INT_RX_DONE
+                        | modem::ZB_INT_ED_DONE
+                        | modem::ZB_INT_ACK_RCVD,
                 );
             }
 
@@ -397,10 +396,7 @@ impl Esp32Ieee802154 {
         if self.initialised {
             use crate::modem;
             unsafe {
-                modem::mmio_write(
-                    modem::IEEE802154_MAC_BASE + modem::ZB_CHANNEL,
-                    ch as u32,
-                );
+                modem::mmio_write(modem::IEEE802154_MAC_BASE + modem::ZB_CHANNEL, ch as u32);
             }
         }
         Ok(())
@@ -417,10 +413,7 @@ impl Esp32Ieee802154 {
         if self.initialised {
             use crate::modem;
             unsafe {
-                modem::mmio_write(
-                    modem::IEEE802154_MAC_BASE + modem::ZB_PAN_ID,
-                    pan_id as u32,
-                );
+                modem::mmio_write(modem::IEEE802154_MAC_BASE + modem::ZB_PAN_ID, pan_id as u32);
             }
         }
     }
@@ -457,10 +450,7 @@ impl Esp32Ieee802154 {
 
             // Switch channel.
             unsafe {
-                modem::mmio_write(
-                    modem::IEEE802154_MAC_BASE + modem::ZB_CHANNEL,
-                    ch as u32,
-                );
+                modem::mmio_write(modem::IEEE802154_MAC_BASE + modem::ZB_CHANNEL, ch as u32);
             }
 
             // Start energy-detection scan on this channel.
@@ -479,9 +469,8 @@ impl Esp32Ieee802154 {
             // Poll for ED completion.
             let mut ed_done = false;
             for _ in 0..200 {
-                let status = unsafe {
-                    modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS)
-                };
+                let status =
+                    unsafe { modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS) };
                 if status & modem::ZB_INT_ED_DONE != 0 {
                     unsafe {
                         modem::mmio_write(
@@ -492,7 +481,9 @@ impl Esp32Ieee802154 {
                     ed_done = true;
                     break;
                 }
-                for _ in 0..100 { core::hint::spin_loop(); }
+                for _ in 0..100 {
+                    core::hint::spin_loop();
+                }
             }
 
             if !ed_done {
@@ -500,9 +491,8 @@ impl Esp32Ieee802154 {
             }
 
             // Read energy level.
-            let ed_raw = unsafe {
-                modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_ED_RESULT)
-            };
+            let ed_raw =
+                unsafe { modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_ED_RESULT) };
             let ed_level = -((ed_raw & 0xFF) as i8);
 
             // Only probe channels with meaningful energy.
@@ -518,12 +508,12 @@ impl Esp32Ieee802154 {
                 // Build a minimal beacon request (MAC command, broadcast).
                 // Frame control: type=3 (MAC cmd), dst addr mode=short, src addr=none.
                 let beacon_req: [u8; 10] = [
-                    0x03, 0x08,  // Frame control: MAC command, dst=short, no src
-                    0x00,        // Sequence number
-                    0xFF, 0xFF,  // Dst PAN ID = broadcast
-                    0xFF, 0xFF,  // Dst addr = broadcast
-                    0x07,        // Command: beacon request
-                    0x00, 0x00,  // (CRC added by hardware)
+                    0x03, 0x08, // Frame control: MAC command, dst=short, no src
+                    0x00, // Sequence number
+                    0xFF, 0xFF, // Dst PAN ID = broadcast
+                    0xFF, 0xFF, // Dst addr = broadcast
+                    0x07, // Command: beacon request
+                    0x00, 0x00, // (CRC added by hardware)
                 ];
                 // Write to TX FIFO.
                 for i in 0..8 {
@@ -600,7 +590,9 @@ impl Esp32Ieee802154 {
                         }
                         break;
                     }
-                    for _ in 0..100 { core::hint::spin_loop(); }
+                    for _ in 0..100 {
+                        core::hint::spin_loop();
+                    }
                 }
             }
         }
@@ -680,13 +672,17 @@ impl Esp32Ieee802154 {
             let word = match remaining {
                 1 => data[offset] as u32,
                 2 => (data[offset] as u32) | ((data[offset + 1] as u32) << 8),
-                3 => (data[offset] as u32)
-                    | ((data[offset + 1] as u32) << 8)
-                    | ((data[offset + 2] as u32) << 16),
-                _ => (data[offset] as u32)
-                    | ((data[offset + 1] as u32) << 8)
-                    | ((data[offset + 2] as u32) << 16)
-                    | ((data[offset + 3] as u32) << 24),
+                3 => {
+                    (data[offset] as u32)
+                        | ((data[offset + 1] as u32) << 8)
+                        | ((data[offset + 2] as u32) << 16)
+                }
+                _ => {
+                    (data[offset] as u32)
+                        | ((data[offset + 1] as u32) << 8)
+                        | ((data[offset + 2] as u32) << 16)
+                        | ((data[offset + 3] as u32) << 24)
+                }
             };
             unsafe {
                 modem::mmio_write(
@@ -712,9 +708,8 @@ impl Esp32Ieee802154 {
 
         // Poll for TX completion (with timeout).
         for _ in 0..5000 {
-            let status = unsafe {
-                modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS)
-            };
+            let status =
+                unsafe { modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS) };
             if status & modem::ZB_INT_TX_DONE != 0 {
                 unsafe {
                     modem::mmio_write(
@@ -756,9 +751,7 @@ impl Esp32Ieee802154 {
 
         use crate::modem;
 
-        let status = unsafe {
-            modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS)
-        };
+        let status = unsafe { modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS) };
 
         if status & modem::ZB_INT_RX_DONE != 0 {
             // Clear RX interrupt.
@@ -770,9 +763,8 @@ impl Esp32Ieee802154 {
             }
 
             // Read frame length from RX length register.
-            let rx_len_raw = unsafe {
-                modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_RX_LEN)
-            };
+            let rx_len_raw =
+                unsafe { modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_RX_LEN) };
             let frame_len = (rx_len_raw & 0x7F) as usize;
             if frame_len > 0 && frame_len <= MAX_FRAME_SIZE {
                 // Read frame data from RX FIFO (word-at-a-time).
@@ -861,10 +853,7 @@ impl arch::NetworkDevice for Esp32Ieee802154 {
                 offset += 4;
             }
             // Write TX length and trigger.
-            modem::mmio_write(
-                modem::IEEE802154_MAC_BASE + modem::ZB_TX_LEN,
-                len as u32,
-            );
+            modem::mmio_write(modem::IEEE802154_MAC_BASE + modem::ZB_TX_LEN, len as u32);
             // Set TX_START bit in MAC control to begin transmission.
             let ctrl = modem::mmio_read(modem::IEEE802154_MAC_BASE + modem::ZB_MAC_CTRL);
             modem::mmio_write(
@@ -877,8 +866,12 @@ impl arch::NetworkDevice for Esp32Ieee802154 {
     fn mac_address(&self) -> [u8; 6] {
         // Derive 6-byte address from the EUI-64 (first 3 + last 3).
         [
-            self.ext_addr[0], self.ext_addr[1], self.ext_addr[2],
-            self.ext_addr[5], self.ext_addr[6], self.ext_addr[7],
+            self.ext_addr[0],
+            self.ext_addr[1],
+            self.ext_addr[2],
+            self.ext_addr[5],
+            self.ext_addr[6],
+            self.ext_addr[7],
         ]
     }
 

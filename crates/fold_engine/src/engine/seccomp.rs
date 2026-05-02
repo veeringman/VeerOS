@@ -59,8 +59,17 @@ struct SockFprog {
     filter: *const SockFilter,
 }
 
-fn stmt(code: u16, k: u32) -> SockFilter { SockFilter { code, jt: 0, jf: 0, k } }
-fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter { SockFilter { code, jt, jf, k } }
+fn stmt(code: u16, k: u32) -> SockFilter {
+    SockFilter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
+    SockFilter { code, jt, jf, k }
+}
 
 /// Install a BPF filter that denies each syscall in `deny_nrs` with `EPERM`
 /// and allows everything else. Also enables `NO_NEW_PRIVS`.
@@ -91,7 +100,10 @@ pub fn install_denylist(deny_nrs: &[u32]) -> Result<()> {
         // if equal → jump over 1 insn → return EPERM
         // else     → skip the RET, continue
         prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1));
-        prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (libc::EPERM as u32 & 0xffff)));
+        prog.push(stmt(
+            BPF_RET | BPF_K,
+            SECCOMP_RET_ERRNO | (libc::EPERM as u32 & 0xffff),
+        ));
     }
 
     // 4. Default: allow.
@@ -115,7 +127,10 @@ pub fn install_denylist(deny_nrs: &[u32]) -> Result<()> {
         ) != 0
         {
             let e = std::io::Error::last_os_error();
-            bail!("prctl(PR_SET_SECCOMP, MODE_FILTER): {e} (filter insns={})", prog.len());
+            bail!(
+                "prctl(PR_SET_SECCOMP, MODE_FILTER): {e} (filter insns={})",
+                prog.len()
+            );
         }
     }
 
@@ -133,22 +148,35 @@ pub fn install_denylist(deny_nrs: &[u32]) -> Result<()> {
 pub fn default_deny_names() -> &'static [&'static str] {
     &[
         // Keyring — destructive cross-namespace side channel.
-        "add_key", "request_key", "keyctl",
+        "add_key",
+        "request_key",
+        "keyctl",
         // Kernel module loading.
-        "init_module", "finit_module", "delete_module",
+        "init_module",
+        "finit_module",
+        "delete_module",
         // Kernel tunables / debugging.
         "bpf",
-        "kexec_load", "kexec_file_load",
+        "kexec_load",
+        "kexec_file_load",
         "reboot",
         // Creating more namespaces from inside a fold would let workloads
         // build their own sandboxes and confuse host accounting.
-        "unshare", "setns",
+        "unshare",
+        "setns",
         // Filesystem surgery.
-        "mount", "umount", "umount2", "pivot_root",
+        "mount",
+        "umount",
+        "umount2",
+        "pivot_root",
         // Swap control.
-        "swapon", "swapoff",
+        "swapon",
+        "swapoff",
         // Clock fiddling.
-        "settimeofday", "clock_settime", "clock_adjtime", "adjtimex",
+        "settimeofday",
+        "clock_settime",
+        "clock_adjtime",
+        "adjtimex",
         // Kernel tracing / perf.
         "perf_event_open",
         // Quota.
@@ -212,7 +240,9 @@ pub fn syscall_nr(name: &str) -> Option<u32> {
         ("acct", 89),
     ];
     for &(n, nr) in table {
-        if n == name { return Some(nr); }
+        if n == name {
+            return Some(nr);
+        }
     }
     None
 }

@@ -7,21 +7,21 @@
 
 use arch::Platform;
 
-pub mod serial;
+pub mod acpi;
+pub mod hpet;
+pub mod ioapic;
+pub mod lapic;
+pub mod mm;
+pub mod pci;
 pub mod pic;
 pub mod pit;
 pub mod ps2kbd;
+pub mod serial;
+pub mod smp;
 pub mod vga;
-pub mod lapic;
-pub mod ioapic;
-pub mod hpet;
-pub mod pci;
-pub mod mm;
-pub mod acpi;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_net;
-pub mod smp;
 
 // ─── I/O port helpers ────────────────────────────────────────────────────
 
@@ -36,7 +36,9 @@ pub unsafe fn outb(port: u16, val: u8) {
         core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags));
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = (port, val); }
+    {
+        let _ = (port, val);
+    }
 }
 
 /// Read a byte from an x86 I/O port.
@@ -54,7 +56,10 @@ pub unsafe fn inb(port: u16) -> u8 {
         val
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; 0 }
+    {
+        let _ = port;
+        0
+    }
 }
 
 /// Write a 16-bit word to an x86 I/O port.
@@ -68,7 +73,9 @@ pub unsafe fn outw(port: u16, val: u16) {
         core::arch::asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags));
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = (port, val); }
+    {
+        let _ = (port, val);
+    }
 }
 
 /// Read a 16-bit word from an x86 I/O port.
@@ -86,7 +93,10 @@ pub unsafe fn inw(port: u16) -> u16 {
         val
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; 0 }
+    {
+        let _ = port;
+        0
+    }
 }
 
 /// Write a 32-bit dword to an x86 I/O port.
@@ -100,7 +110,9 @@ pub unsafe fn outl(port: u16, val: u32) {
         core::arch::asm!("out dx, eax", in("dx") port, in("eax") val, options(nomem, nostack, preserves_flags));
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = (port, val); }
+    {
+        let _ = (port, val);
+    }
 }
 
 /// Read a 32-bit dword from an x86 I/O port.
@@ -118,13 +130,18 @@ pub unsafe fn inl(port: u16) -> u32 {
         val
     }
     #[cfg(not(target_arch = "x86_64"))]
-    { let _ = port; 0 }
+    {
+        let _ = port;
+        0
+    }
 }
 
 /// Short I/O delay (read from port 0x80, which is unused POST diagnostic).
 #[inline(always)]
 pub unsafe fn io_wait() {
-    unsafe { outb(0x80, 0); }
+    unsafe {
+        outb(0x80, 0);
+    }
 }
 
 // ─── Platform trait ──────────────────────────────────────────────────────

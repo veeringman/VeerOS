@@ -67,19 +67,19 @@ pub const MAX_EPISODE_DESC_LEN: usize = 48;
 #[repr(u8)]
 pub enum MemoryTag {
     /// General system knowledge.
-    System      = 0,
+    System = 0,
     /// Agent-specific learned preference.
-    Preference  = 1,
+    Preference = 1,
     /// Cached computation result.
-    Cache       = 2,
+    Cache = 2,
     /// Configuration / parameter.
-    Config      = 3,
+    Config = 3,
     /// Relationship or association between entities.
-    Relation    = 4,
+    Relation = 4,
     /// Skill / capability learned by an agent.
-    Skill       = 5,
+    Skill = 5,
     /// User-provided knowledge.
-    UserKnow    = 6,
+    UserKnow = 6,
     /// Observation from sensors or environment.
     Observation = 7,
 }
@@ -89,13 +89,13 @@ pub enum MemoryTag {
 #[repr(u8)]
 pub enum MemoryScope {
     /// Visible to all agents.
-    Global      = 0,
+    Global = 0,
     /// Visible only to agents with a specific intent ID.
-    Intent      = 1,
+    Intent = 1,
     /// Visible only to a specific agent and its children.
-    Agent       = 2,
+    Agent = 2,
     /// Visible only to a specific process.
-    Process     = 3,
+    Process = 3,
 }
 
 /// A single persistent memory entry.
@@ -195,7 +195,9 @@ impl PersistentMemory {
         // Find free slot.
         for entry in self.entries.iter_mut() {
             if !entry.used {
-                Self::write_entry(entry, key, klen, value, vlen, tag, scope, scope_id, tick, confidence);
+                Self::write_entry(
+                    entry, key, klen, value, vlen, tag, scope, scope_id, tick, confidence,
+                );
                 self.total_writes += 1;
                 return true;
             }
@@ -211,17 +213,24 @@ impl PersistentMemory {
             }
         }
         let entry = &mut self.entries[min_idx];
-        Self::write_entry(entry, key, klen, value, vlen, tag, scope, scope_id, tick, confidence);
+        Self::write_entry(
+            entry, key, klen, value, vlen, tag, scope, scope_id, tick, confidence,
+        );
         self.total_writes += 1;
         true
     }
 
     fn write_entry(
         entry: &mut PersistentEntry,
-        key: &[u8], klen: usize,
-        value: &[u8], vlen: usize,
-        tag: MemoryTag, scope: MemoryScope, scope_id: u16,
-        tick: u64, confidence: u8,
+        key: &[u8],
+        klen: usize,
+        value: &[u8],
+        vlen: usize,
+        tag: MemoryTag,
+        scope: MemoryScope,
+        scope_id: u16,
+        tick: u64,
+        confidence: u8,
     ) {
         entry.used = true;
         entry.key = [0u8; MAX_KEY_LEN];
@@ -315,29 +324,29 @@ impl PersistentMemory {
 #[repr(u8)]
 pub enum EpisodeKind {
     /// An agent was spawned.
-    AgentSpawned    = 0,
+    AgentSpawned = 0,
     /// An agent completed its goal.
-    AgentCompleted  = 1,
+    AgentCompleted = 1,
     /// An agent failed.
-    AgentFailed     = 2,
+    AgentFailed = 2,
     /// An agent re-planned.
-    AgentReplanned  = 3,
+    AgentReplanned = 3,
     /// An intent was submitted.
     IntentSubmitted = 4,
     /// An intent was fulfilled.
     IntentFulfilled = 5,
     /// An intent failed.
-    IntentFailed    = 6,
+    IntentFailed = 6,
     /// A fabric node joined/left.
-    FabricChange    = 7,
+    FabricChange = 7,
     /// A memory entry was created/updated.
-    MemoryWrite     = 8,
+    MemoryWrite = 8,
     /// Inter-agent coordination event.
-    Coordination    = 9,
+    Coordination = 9,
     /// System-level event (boot, shutdown, error).
-    SystemEvent     = 10,
+    SystemEvent = 10,
     /// Resource budget exceeded.
-    BudgetExceeded  = 11,
+    BudgetExceeded = 11,
 }
 
 /// Outcome assessment for learning.
@@ -345,15 +354,15 @@ pub enum EpisodeKind {
 #[repr(u8)]
 pub enum EpisodeOutcome {
     /// No outcome yet (in-progress).
-    Pending     = 0,
+    Pending = 0,
     /// Succeeded.
-    Success     = 1,
+    Success = 1,
     /// Failed.
-    Failure     = 2,
+    Failure = 2,
     /// Partially succeeded.
-    Partial     = 3,
+    Partial = 3,
     /// Timed out.
-    Timeout     = 4,
+    Timeout = 4,
 }
 
 /// A single episodic memory entry — records what happened, when, and why.
@@ -442,7 +451,8 @@ impl EpisodicMemory {
     /// Query: count episodes matching a kind within the last `window` ticks.
     pub fn count_recent(&self, kind: EpisodeKind, current_tick: u64, window: u64) -> usize {
         let cutoff = current_tick.saturating_sub(window);
-        self.episodes.iter()
+        self.episodes
+            .iter()
             .filter(|e| e.tick >= cutoff && e.kind == kind)
             .count()
     }
@@ -481,7 +491,12 @@ impl EpisodicMemory {
 
     /// Get the success rate for a given episode kind over the last `window` ticks.
     /// Returns (successes, total) — caller divides.
-    pub fn success_rate(&self, kind: EpisodeKind, current_tick: u64, window: u64) -> (usize, usize) {
+    pub fn success_rate(
+        &self,
+        kind: EpisodeKind,
+        current_tick: u64,
+        window: u64,
+    ) -> (usize, usize) {
         let cutoff = current_tick.saturating_sub(window);
         let mut total = 0usize;
         let mut success = 0usize;

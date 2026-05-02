@@ -66,15 +66,15 @@ pub const MAX_CERT_LEN: usize = 128;
 #[repr(u8)]
 pub enum TrustLevel {
     /// Node has not completed any authentication.
-    Untrusted   = 0,
+    Untrusted = 0,
     /// Challenge has been sent, awaiting response.
-    Challenged  = 1,
+    Challenged = 1,
     /// Mutual authentication completed (challenge-response verified).
-    Verified    = 2,
+    Verified = 2,
     /// ZKP capability proof verified — highest trust.
-    Attested    = 3,
+    Attested = 3,
     /// Identity has been revoked — reject all messages.
-    Revoked     = 255,
+    Revoked = 255,
 }
 
 // ─── Peer identity record ───────────────────────────────────────────────
@@ -201,9 +201,7 @@ impl AttestationCert {
 
     /// Extract capabilities from certificate.
     pub fn capabilities(&self) -> u32 {
-        u32::from_le_bytes([
-            self.data[33], self.data[34], self.data[35], self.data[36],
-        ])
+        u32::from_le_bytes([self.data[33], self.data[34], self.data[35], self.data[36]])
     }
 }
 
@@ -379,12 +377,7 @@ impl NodeIdentityManager {
             ikm[32..64].copy_from_slice(&self.peers[peer_idx].node_id);
             ikm[64..96].copy_from_slice(&self.local_id);
             let info = b"veeros-fabric-session-v1";
-            crypto::hkdf_sha256(
-                &ikm,
-                psk,
-                info,
-                &mut self.peers[peer_idx].session_key,
-            );
+            crypto::hkdf_sha256(&ikm, psk, info, &mut self.peers[peer_idx].session_key);
             self.peers[peer_idx].session_active = true;
             true
         } else {
@@ -419,7 +412,9 @@ impl NodeIdentityManager {
             self.peers[peer_idx].session_active = false;
             // Zeroize session key
             for b in self.peers[peer_idx].session_key.iter_mut() {
-                unsafe { core::ptr::write_volatile(b, 0); }
+                unsafe {
+                    core::ptr::write_volatile(b, 0);
+                }
             }
         }
     }
@@ -430,9 +425,7 @@ impl NodeIdentityManager {
             return false;
         }
         let peer = &self.peers[peer_idx];
-        peer.active
-            && peer.trust != TrustLevel::Revoked
-            && peer.trust >= min_trust
+        peer.active && peer.trust != TrustLevel::Revoked && peer.trust >= min_trust
     }
 
     /// Get the next outbound sequence number for a peer (anti-replay).
@@ -467,7 +460,8 @@ impl NodeIdentityManager {
 
     /// Count peers at a given trust level or higher.
     pub fn count_at_trust(&self, min_trust: TrustLevel) -> usize {
-        self.peers.iter()
+        self.peers
+            .iter()
             .filter(|p| p.active && p.trust >= min_trust && p.trust != TrustLevel::Revoked)
             .count()
     }
@@ -483,7 +477,9 @@ impl NodeIdentityManager {
                 peer.session_active = false;
                 // Zeroize session key on expiry
                 for b in peer.session_key.iter_mut() {
-                    unsafe { core::ptr::write_volatile(b, 0); }
+                    unsafe {
+                        core::ptr::write_volatile(b, 0);
+                    }
                 }
             }
         }

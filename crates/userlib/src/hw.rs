@@ -36,7 +36,11 @@ pub fn i2c_write(bus: u8, addr: u8, data: &[u8]) -> Result<(), usize> {
         data.as_ptr() as usize,
         data.len(),
     );
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Perform an I2C read from `addr` on `bus`.
@@ -50,7 +54,11 @@ pub fn i2c_read(bus: u8, addr: u8, buf: &mut [u8]) -> Result<usize, usize> {
         buf.as_mut_ptr() as usize,
         buf.len(),
     );
-    if ret != usize::MAX { Ok(ret) } else { Err(ret) }
+    if ret != usize::MAX {
+        Ok(ret)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Perform a full-duplex SPI transfer on `bus`.
@@ -67,5 +75,9 @@ pub fn spi_transfer(bus: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), usize> {
         len,
         0,
     );
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }

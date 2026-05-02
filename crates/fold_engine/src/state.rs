@@ -48,8 +48,7 @@ impl StateDir {
     pub fn save(&self, rec: &FoldRecord) -> Result<()> {
         let path = self.record_path(&rec.name);
         let text = serde_json::to_string_pretty(rec)?;
-        fs::write(&path, text)
-            .with_context(|| format!("writing record {}", path.display()))?;
+        fs::write(&path, text).with_context(|| format!("writing record {}", path.display()))?;
         Ok(())
     }
 
@@ -80,8 +79,12 @@ impl StateDir {
     pub fn remove(&self, name: &str) -> Result<()> {
         let rec = self.record_path(name);
         let log = self.log_path(name);
-        if rec.exists() { fs::remove_file(&rec)?; }
-        if log.exists() { fs::remove_file(&log)?; }
+        if rec.exists() {
+            fs::remove_file(&rec)?;
+        }
+        if log.exists() {
+            fs::remove_file(&log)?;
+        }
         Ok(())
     }
 }

@@ -24,11 +24,7 @@ const INTC_BASE: usize = 0x6001_0000;
 #[cfg(feature = "h2")]
 const INTC_BASE: usize = 0x600C_2000;
 
-#[cfg(all(
-    not(feature = "c3"),
-    not(feature = "c6"),
-    not(feature = "h2"),
-))]
+#[cfg(all(not(feature = "c3"), not(feature = "c6"), not(feature = "h2"),))]
 const INTC_BASE: usize = 0x600C_2000;
 
 // ---------------------------------------------------------------------------
@@ -105,9 +101,13 @@ impl Esp32Intc {
     /// Interrupts with priority ≤ threshold are masked.
     pub fn set_threshold(&self, threshold: u8) {
         #[cfg(feature = "c6")]
-        unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_THRESH, threshold as u32) };
+        unsafe {
+            mmio_write(PLIC_BASE + PLIC_MXINT_THRESH, threshold as u32)
+        };
         #[cfg(not(feature = "c6"))]
-        unsafe { mmio_write(INTC_BASE + INT_THRESH_REG, threshold as u32) };
+        unsafe {
+            mmio_write(INTC_BASE + INT_THRESH_REG, threshold as u32)
+        };
     }
 }
 
@@ -125,7 +125,9 @@ impl InterruptController for Esp32Intc {
             unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_ENABLE, val | (1 << irq)) };
             // ESP32-C6 also requires the per-interrupt mie CSR bit to be set.
             let mask = 1u32 << irq;
-            unsafe { core::arch::asm!("csrs mie, {0}", in(reg) mask, options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("csrs mie, {0}", in(reg) mask, options(nomem, nostack));
+            }
         }
         #[cfg(not(feature = "c6"))]
         {
@@ -140,7 +142,9 @@ impl InterruptController for Esp32Intc {
             let val = unsafe { mmio_read(PLIC_BASE + PLIC_MXINT_ENABLE) };
             unsafe { mmio_write(PLIC_BASE + PLIC_MXINT_ENABLE, val & !(1 << irq)) };
             let mask = 1u32 << irq;
-            unsafe { core::arch::asm!("csrc mie, {0}", in(reg) mask, options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("csrc mie, {0}", in(reg) mask, options(nomem, nostack));
+            }
         }
         #[cfg(not(feature = "c6"))]
         {

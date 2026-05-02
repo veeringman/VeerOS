@@ -42,7 +42,9 @@ use crate::state::{FoldRecord, StateDir};
 pub struct LinuxEngine;
 
 impl LinuxEngine {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Engine for LinuxEngine {
@@ -56,7 +58,9 @@ impl Engine for LinuxEngine {
 
         let log_path = state.log_path(&manifest.name);
         let log_file = std::fs::OpenOptions::new()
-            .create(true).write(true).truncate(true)
+            .create(true)
+            .write(true)
+            .truncate(true)
             .mode(0o600)
             .open(&log_path)
             .with_context(|| format!("opening log {}", log_path.display()))?;
@@ -81,22 +85,20 @@ impl Engine for LinuxEngine {
                     let _ = waitpid(launcher, None);
                     bail!("fold spawn failed: {msg}");
                 }
-                let init_pid = init_pid_opt
-                    .context("launcher exited without reporting init pid")?;
+                let init_pid =
+                    init_pid_opt.context("launcher exited without reporting init pid")?;
 
                 // Attach to cgroup from the parent (we still have write perms
                 // on the parent cgroup dir). Done *after* init exists so the
                 // pid is writable into cgroup.procs. If anything fails we
                 // kill the orphaned init so we don't leak it.
                 if let Some(limits) = manifest.limits.clone() {
-                    match cgroup::create(&manifest.name, &limits)
-                        .and_then(|cg| {
-                            cgroup::attach_pid(&cg, init_pid)?;
-                            // Leak: cgroup persists until `fold rm`.
-                            std::mem::forget(cg);
-                            Ok(())
-                        })
-                    {
+                    match cgroup::create(&manifest.name, &limits).and_then(|cg| {
+                        cgroup::attach_pid(&cg, init_pid)?;
+                        // Leak: cgroup persists until `fold rm`.
+                        std::mem::forget(cg);
+                        Ok(())
+                    }) {
                         Ok(()) => {}
                         Err(e) => {
                             let _ = kill(Pid::from_raw(init_pid), Signal::SIGKILL);
@@ -209,17 +211,29 @@ fn launcher_body(
 
     // ── Remaining namespaces ──────────────────────────────────────────────
     let mut flags = CloneFlags::empty();
-    if ns.pid   { flags |= CloneFlags::CLONE_NEWPID; }
-    if ns.mount { flags |= CloneFlags::CLONE_NEWNS; }
-    if ns.uts   { flags |= CloneFlags::CLONE_NEWUTS; }
-    if ns.ipc   { flags |= CloneFlags::CLONE_NEWIPC; }
-    if ns.net   { flags |= CloneFlags::CLONE_NEWNET; }
+    if ns.pid {
+        flags |= CloneFlags::CLONE_NEWPID;
+    }
+    if ns.mount {
+        flags |= CloneFlags::CLONE_NEWNS;
+    }
+    if ns.uts {
+        flags |= CloneFlags::CLONE_NEWUTS;
+    }
+    if ns.ipc {
+        flags |= CloneFlags::CLONE_NEWIPC;
+    }
+    if ns.net {
+        flags |= CloneFlags::CLONE_NEWNET;
+    }
 
     if !flags.is_empty() {
-        unshare(flags).with_context(|| format!(
-            "unshare({flags:?}) — non-root? enable `user = true` in manifest \
+        unshare(flags).with_context(|| {
+            format!(
+                "unshare({flags:?}) — non-root? enable `user = true` in manifest \
              or run as root / with CAP_SYS_ADMIN"
-        ))?;
+            )
+        })?;
     }
 
     // Fork so the child becomes PID 1 inside the new PID namespace.
@@ -257,11 +271,8 @@ fn init_main(manifest: Manifest) -> Result<()> {
     }
 
     if manifest.namespaces.mount {
-        mount::<str, str, str, str>(
-            None, "/", None,
-            MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-            None,
-        ).context("mount / rec-private")?;
+        mount::<str, str, str, str>(None, "/", None, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None)
+            .context("mount / rec-private")?;
 
         if let Some(rootfs) = manifest.rootfs.as_deref() {
             pivot_into_rootfs(rootfs)?;
@@ -270,10 +281,13 @@ fn init_main(manifest: Manifest) -> Result<()> {
         if manifest.namespaces.pid {
             let _ = std::fs::create_dir_all("/proc");
             mount::<str, str, str, str>(
-                Some("proc"), "/proc", Some("proc"),
+                Some("proc"),
+                "/proc",
+                Some("proc"),
                 MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
                 None,
-            ).context("mount /proc")?;
+            )
+            .context("mount /proc")?;
         }
     }
 
@@ -283,8 +297,7 @@ fn init_main(manifest: Manifest) -> Result<()> {
     // Install seccomp *after* all privileged setup (mount, pivot_root, …)
     // has finished, otherwise the filter would reject our own setup syscalls.
     if let Some(sc) = &manifest.seccomp {
-        seccomp::install_profile(&sc.profile, &sc.deny)
-            .context("installing seccomp filter")?;
+        seccomp::install_profile(&sc.profile, &sc.deny).context("installing seccomp filter")?;
     }
 
     let cmd_c = CString::new(manifest.cmd.as_bytes()).context("cmd has NUL")?;
@@ -296,17 +309,23 @@ fn init_main(manifest: Manifest) -> Result<()> {
 
     let envp: Vec<CString> = if manifest.env.is_empty() {
         vec![
-            CString::new("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").unwrap(),
-            CString::new(format!("HOSTNAME={}", manifest.hostname.as_deref().unwrap_or("fold"))).unwrap(),
+            CString::new("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                .unwrap(),
+            CString::new(format!(
+                "HOSTNAME={}",
+                manifest.hostname.as_deref().unwrap_or("fold")
+            ))
+            .unwrap(),
         ]
     } else {
-        manifest.env.iter()
+        manifest
+            .env
+            .iter()
             .map(|(k, v)| CString::new(format!("{k}={v}")).expect("env NUL"))
             .collect()
     };
 
-    execve(&cmd_c, &argv, &envp)
-        .with_context(|| format!("execve {}", manifest.cmd))?;
+    execve(&cmd_c, &argv, &envp).with_context(|| format!("execve {}", manifest.cmd))?;
     unreachable!()
 }
 
@@ -315,12 +334,17 @@ fn init_main(manifest: Manifest) -> Result<()> {
 fn write_userns_maps(outer_uid: Uid, outer_gid: Gid) -> Result<()> {
     // setgroups must be "deny" before gid_map can be written for an
     // unprivileged single-mapping user namespace.
-    std::fs::write("/proc/self/setgroups", "deny\n")
-        .context("write /proc/self/setgroups=deny")?;
-    std::fs::write("/proc/self/uid_map", format!("0 {} 1\n", outer_uid.as_raw()))
-        .context("write /proc/self/uid_map")?;
-    std::fs::write("/proc/self/gid_map", format!("0 {} 1\n", outer_gid.as_raw()))
-        .context("write /proc/self/gid_map")?;
+    std::fs::write("/proc/self/setgroups", "deny\n").context("write /proc/self/setgroups=deny")?;
+    std::fs::write(
+        "/proc/self/uid_map",
+        format!("0 {} 1\n", outer_uid.as_raw()),
+    )
+    .context("write /proc/self/uid_map")?;
+    std::fs::write(
+        "/proc/self/gid_map",
+        format!("0 {} 1\n", outer_gid.as_raw()),
+    )
+    .context("write /proc/self/gid_map")?;
     Ok(())
 }
 
@@ -328,14 +352,16 @@ fn write_userns_maps(outer_uid: Uid, outer_gid: Gid) -> Result<()> {
 
 fn pivot_into_rootfs(rootfs: &Path) -> Result<()> {
     mount::<Path, Path, str, str>(
-        Some(rootfs), rootfs, None,
+        Some(rootfs),
+        rootfs,
+        None,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None,
-    ).with_context(|| format!("bind-mount rootfs {}", rootfs.display()))?;
+    )
+    .with_context(|| format!("bind-mount rootfs {}", rootfs.display()))?;
 
     let put_old = rootfs.join(".oldroot");
-    std::fs::create_dir_all(&put_old)
-        .with_context(|| format!("mkdir {}", put_old.display()))?;
+    std::fs::create_dir_all(&put_old).with_context(|| format!("mkdir {}", put_old.display()))?;
 
     pivot_root(rootfs, put_old.as_path())
         .with_context(|| format!("pivot_root {}", rootfs.display()))?;
@@ -358,7 +384,9 @@ struct ReportWriter {
 
 impl ReportWriter {
     fn new(fd: OwnedFd) -> Self {
-        Self { fd: std::cell::RefCell::new(Some(fd)) }
+        Self {
+            fd: std::cell::RefCell::new(Some(fd)),
+        }
     }
 
     fn ok(&self, init_pid: i32) {
@@ -431,14 +459,22 @@ fn read_report(rd: &OwnedFd) -> Result<(Option<i32>, Option<String>)> {
     Ok((init_pid, error))
 }
 
-enum ReadExact { Ok, Short, Eof }
+enum ReadExact {
+    Ok,
+    Short,
+    Eof,
+}
 
 fn read_exact(fd: &OwnedFd, buf: &mut [u8]) -> Result<ReadExact> {
     let mut got = 0;
     while got < buf.len() {
         let n = read(fd.as_raw_fd(), &mut buf[got..])?;
         if n == 0 {
-            return Ok(if got == 0 { ReadExact::Eof } else { ReadExact::Short });
+            return Ok(if got == 0 {
+                ReadExact::Eof
+            } else {
+                ReadExact::Short
+            });
         }
         got += n;
     }

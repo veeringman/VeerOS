@@ -53,15 +53,26 @@ impl PciDevice {
         // Format: "BB:DD.F"
         let mut i = 0;
         fn hex_nibble(v: u8) -> u8 {
-            if v < 10 { b'0' + v } else { b'a' + v - 10 }
+            if v < 10 {
+                b'0' + v
+            } else {
+                b'a' + v - 10
+            }
         }
-        buf[i] = hex_nibble(self.bus >> 4); i += 1;
-        buf[i] = hex_nibble(self.bus & 0xF); i += 1;
-        buf[i] = b':'; i += 1;
-        buf[i] = hex_nibble(self.device >> 4); i += 1;
-        buf[i] = hex_nibble(self.device & 0xF); i += 1;
-        buf[i] = b'.'; i += 1;
-        buf[i] = hex_nibble(self.function & 0x7); i += 1;
+        buf[i] = hex_nibble(self.bus >> 4);
+        i += 1;
+        buf[i] = hex_nibble(self.bus & 0xF);
+        i += 1;
+        buf[i] = b':';
+        i += 1;
+        buf[i] = hex_nibble(self.device >> 4);
+        i += 1;
+        buf[i] = hex_nibble(self.device & 0xF);
+        i += 1;
+        buf[i] = b'.';
+        i += 1;
+        buf[i] = hex_nibble(self.function & 0x7);
+        i += 1;
         i
     }
 }
@@ -158,7 +169,11 @@ pub fn bar_size(bus: u8, device: u8, function: u8, bar_index: u8) -> u32 {
     }
 
     let is_io = (raw & 1) != 0;
-    let mask = if is_io { raw & 0xFFFF_FFFC } else { raw & 0xFFFF_FFF0 };
+    let mask = if is_io {
+        raw & 0xFFFF_FFFC
+    } else {
+        raw & 0xFFFF_FFF0
+    };
     (!mask).wrapping_add(1)
 }
 

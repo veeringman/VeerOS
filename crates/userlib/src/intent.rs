@@ -109,14 +109,22 @@ pub fn submit(description: &str, class: Class, priority: Priority) -> Option<usi
         class as usize,
         priority as usize,
     );
-    if ret == usize::MAX { None } else { Some(ret) }
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(ret)
+    }
 }
 
 /// Query the lifecycle status of an intent.
 #[inline]
 pub fn status(intent_id: usize) -> Option<Status> {
     let ret = sys::syscall1(SYS_INTENT_STATUS, intent_id);
-    if ret == usize::MAX { None } else { Some(Status::from_usize(ret)) }
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(Status::from_usize(ret))
+    }
 }
 
 /// Cancel an in-flight intent. Returns `true` on success.

@@ -6,17 +6,20 @@
 //! uses the SysTimer mapped to CPU interrupt line 1.
 
 #[allow(unused_imports)]
-use arch::{TaskContext, TickTimer};
-#[allow(unused_imports)]
 use arch::riscv32::pmp;
 #[allow(unused_imports)]
-use microkernel::task::Scheduler;
+use arch::{TaskContext, TickTimer};
 #[allow(unused_imports)]
 use microkernel::dispatch::{self, SyscallAction};
+#[allow(unused_imports)]
+use microkernel::task::Scheduler;
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT,
-            AGENTS, INTENTS, MEMORY_ENGINE, FABRIC, INTENT_SCHED};
+use crate::{
+    AGENTS, AUDIT, CHANNELS, DRIVERS, FABRIC, FAT32, FUTEX, HEAP, INODES, INPUT, INTENTS,
+    INTENT_SCHED, IPC, MEMORY_ENGINE, MOUNTS, POLL, PROCESSES, RAMFS, SCHEDULER, SOCKETS, TIMER,
+    USERS,
+};
 // mcause constants
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -197,11 +200,17 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
             crate::console_write_byte(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
             // Emit mepc.
             let mepc: usize;
-            unsafe { core::arch::asm!("csrr {}, mepc", out(reg) mepc, options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("csrr {}, mepc", out(reg) mepc, options(nomem, nostack));
+            }
             crate::console_write_byte(b'@');
             for shift in (0..8).rev() {
                 let nib = ((mepc >> (shift * 4)) & 0xF) as u8;
-                crate::console_write_byte(if nib < 10 { b'0' + nib } else { b'a' + nib - 10 });
+                crate::console_write_byte(if nib < 10 {
+                    b'0' + nib
+                } else {
+                    b'a' + nib - 10
+                });
             }
             crate::console_write_byte(b'\n');
             // Flush USB Serial JTAG so bytes reach the host
@@ -213,6 +222,6 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
             loop {
                 core::hint::spin_loop();
             }
-        },
+        }
     }
 }

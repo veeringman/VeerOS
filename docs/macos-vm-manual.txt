@@ -1,0 +1,417 @@
+VeerOS VM Manual for macOS
+==========================
+
+Purpose
+-------
+This manual explains how to start, stop, inspect, connect to, and manage
+VeerOS virtual machines from macOS. It covers normal VM instances and
+Fold-managed VM instances.
+
+Installed Paths
+---------------
+The macOS VM toolkit is deployed under:
+
+    ~/VeerOS-VMs
+
+The default Apple Silicon AArch64 kit is:
+
+    ~/VeerOS-VMs/VeerOS-AArch64-HVF
+
+The VM manager is:
+
+    ~/VeerOS-VMs/veeros-vm
+
+The default kernel image is:
+
+    ~/VeerOS-VMs/VeerOS-AArch64-HVF/images/kernel-aarch64-debug.elf
+
+The default shared disk image is:
+
+    ~/VeerOS-VMs/VeerOS-AArch64-HVF/disks/veeros-root.raw
+
+Per-instance VM records are stored under:
+
+    ~/VeerOS-VMs/instances/NAME
+
+Guest Login
+-----------
+Default login credentials:
+
+    user: root
+    password: toor
+
+Guest services for the default AArch64 VM:
+
+    guest IP: 192.168.2.100
+    SSH port: 22
+    Veer secure console port: 2323
+
+Before Starting VMs
+-------------------
+The Apple Silicon AArch64 VM uses Hypervisor.framework and macOS vmnet.
+Starting a networked VM requires sudo.
+
+Refresh sudo before using the manager:
+
+    sudo -v
+
+Only run one VM that uses the default guest IP at a time. If two VMs both use
+192.168.2.100, SSH and Veer secure console connections can fail or connect to
+the wrong guest.
+
+Fast Path: Normal VM
+--------------------
+Create a normal AArch64 VM named dev1:
+
+    ~/VeerOS-VMs/veeros-vm create --name dev1 --target aarch64-hvf --mode normal
+
+Start it:
+
+    sudo -v
+    ~/VeerOS-VMs/veeros-vm start --name dev1
+
+Check status:
+
+    ~/VeerOS-VMs/veeros-vm status --name dev1
+
+Follow the boot log:
+
+    ~/VeerOS-VMs/veeros-vm logs --name dev1 --follow
+
+Connect with the Veer secure console:
+
+    ~/VeerOS-VMs/veeros-vm connect --name dev1
+
+Connect with SSH:
+
+    ~/VeerOS-VMs/veeros-vm ssh --name dev1
+
+Stop it:
+
+    ~/VeerOS-VMs/veeros-vm stop --name dev1
+
+Fast Path: Folded VM
+--------------------
+Create a Fold-managed AArch64 VM named fold1:
+
+    ~/VeerOS-VMs/veeros-vm create --name fold1 --target aarch64-hvf --mode folded
+
+Start it:
+
+    sudo -v
+    ~/VeerOS-VMs/veeros-vm start --name fold1
+
+Check status:
+
+    ~/VeerOS-VMs/veeros-vm status --name fold1
+
+Follow Fold logs:
+
+    ~/VeerOS-VMs/veeros-vm logs --name fold1 --follow
+
+Connect with the Veer secure console:
+
+    ~/VeerOS-VMs/veeros-vm connect --name fold1
+
+Connect with SSH:
+
+    ~/VeerOS-VMs/veeros-vm ssh --name fold1
+
+Stop it:
+
+    ~/VeerOS-VMs/veeros-vm stop --name fold1
+
+VM Manager Commands
+-------------------
+Show manager help:
+
+    ~/VeerOS-VMs/veeros-vm help
+
+Create or update an instance record:
+
+    ~/VeerOS-VMs/veeros-vm create --name NAME --target TARGET --mode MODE
+
+Start an instance:
+
+    ~/VeerOS-VMs/veeros-vm start --name NAME
+
+Stop an instance:
+
+    ~/VeerOS-VMs/veeros-vm stop --name NAME
+
+List all instance records:
+
+    ~/VeerOS-VMs/veeros-vm list
+
+Show one instance status:
+
+    ~/VeerOS-VMs/veeros-vm status --name NAME
+
+Show recent logs:
+
+    ~/VeerOS-VMs/veeros-vm logs --name NAME
+
+Follow logs live:
+
+    ~/VeerOS-VMs/veeros-vm logs --name NAME --follow
+
+Open the Veer secure console:
+
+    ~/VeerOS-VMs/veeros-vm connect --name NAME
+
+Open SSH as root:
+
+    ~/VeerOS-VMs/veeros-vm ssh --name NAME
+
+Pass commands directly to the bundled Fold CLI:
+
+    ~/VeerOS-VMs/veeros-vm fold --help
+
+Create Options
+--------------
+Set guest memory in MiB:
+
+    --memory 512
+
+Set macOS vmnet mode:
+
+    --vmnet shared
+    --vmnet host
+
+Set the guest service IP used by connect and SSH helpers:
+
+    --guest-ip 192.168.2.100
+
+Use a specific deployed kit:
+
+    --kit ~/VeerOS-VMs/VeerOS-AArch64-HVF
+
+Override the kernel image:
+
+    --kernel /path/to/kernel.elf
+
+Override the disk image:
+
+    --disk /path/to/root.raw
+
+Example with explicit options:
+
+    ~/VeerOS-VMs/veeros-vm create \
+        --name dev2 \
+        --target aarch64-hvf \
+        --mode normal \
+        --memory 512 \
+        --vmnet shared \
+        --guest-ip 192.168.2.100 \
+        --disk ~/VeerOS-VMs/VeerOS-AArch64-HVF/disks/dev2.raw
+
+Supported Targets and Modes
+---------------------------
+Supported manager targets:
+
+    aarch64-hvf
+    raspi5
+    esp32c6
+    qemu-esp32c6
+    qemu-pc
+
+Supported modes:
+
+    normal
+    folded
+
+Local start support is currently implemented for aarch64-hvf on Apple Silicon.
+The raspi5 and esp32c6 targets are hardware deployment records. The qemu-*
+targets are staged records until QEMU launch integration is completed.
+
+Direct Kit Launch
+-----------------
+The manager is recommended, but the deployed kit can also be launched directly.
+
+Start the default kit with network and disk:
+
+    cd ~/VeerOS-VMs/VeerOS-AArch64-HVF
+    sudo -v
+    sudo ./bin/veer-vm \
+        --arch aarch64 \
+        --kernel images/kernel-aarch64-debug.elf \
+        --memory 512 \
+        --disk disks/veeros-root.raw \
+        --vmnet shared
+
+The direct launcher wraps the same idea:
+
+    cd ~/VeerOS-VMs/VeerOS-AArch64-HVF
+    ./veer-vm-macos
+
+Connect with the kit-local Veer secure console helper:
+
+    cd ~/VeerOS-VMs/VeerOS-AArch64-HVF
+    ./veer-connect-shell
+
+Connect with SSH directly:
+
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.2.100
+
+Filesystem and Disk
+-------------------
+The deployed AArch64 VM uses a FAT32 raw disk image:
+
+    ~/VeerOS-VMs/VeerOS-AArch64-HVF/disks/veeros-root.raw
+
+The Apple Silicon HVF backend exposes the image as virtio-blk. VeerOS mounts it
+at /disk when present. Boot-critical files remain in RamFS under /etc, /dev,
+and /tmp. Files written under /disk persist across VM restarts.
+
+Inside VeerOS, inspect storage with:
+
+    mount
+    lsblk
+    df
+
+Example persistent file test:
+
+    write /disk/HELLO.TXT hello-from-veeros
+    cat /disk/HELLO.TXT
+
+FAT32 support currently expects regular 8.3-style filenames on /disk.
+
+Shell and vi/vim Notes
+----------------------
+Useful commands include:
+
+    help
+    ps
+    tasks
+    pwd
+    ls
+    tree
+    cd
+    mkdir
+    touch
+    write
+    cat
+    rm
+    mv
+    vi
+    vim
+    df
+    mount
+    lsblk
+    ifconfig
+    netstat
+    hwinfo
+    dmesg
+    exit
+
+Open the built-in editor with:
+
+    vi FILE
+    vim FILE
+
+Save in vi/vim with:
+
+    :w
+    :wq
+
+Exit without saving with:
+
+    :q!
+
+The AArch64 VM target uses the larger editor profile and a larger kernel stack,
+so it can handle substantially larger vi/vim buffers than constrained hardware
+targets.
+
+Networking Checks
+-----------------
+After starting a networked VM, the serial log should show:
+
+    [net] MAC=...
+    [net] 192.168.2.100/24 ... VSC port 2323
+    [ssh] SSH server ready on port 22
+
+Check whether the host can reach the guest ports:
+
+    nc -vz 192.168.2.100 22
+    nc -vz 192.168.2.100 2323
+
+If connect or SSH fails, check:
+
+    ~/VeerOS-VMs/veeros-vm list
+    ~/VeerOS-VMs/veeros-vm status --name NAME
+    ~/VeerOS-VMs/veeros-vm logs --name NAME
+
+Make sure no other VM is already using 192.168.2.100.
+
+Signing and macOS Notes
+-----------------------
+The deployed veer-vm binary is ad-hoc signed with the Hypervisor entitlement.
+For local ad-hoc runs, the expected entitlement is:
+
+    com.apple.security.hypervisor
+
+Do not add com.apple.vm.networking to the local ad-hoc signature. On this host,
+that entitlement can cause macOS to kill the process before boot.
+
+If a VM exits immediately with code 137 or the shell reports "killed", re-sign
+the VM binary with the HVF-only entitlement and try again:
+
+    codesign --remove-signature ~/VeerOS-VMs/VeerOS-AArch64-HVF/bin/veer-vm 2>/dev/null || true
+    codesign --force --sign - --timestamp=none \
+        --entitlements /tmp/veer-hvf-only.entitlements \
+        ~/VeerOS-VMs/VeerOS-AArch64-HVF/bin/veer-vm
+
+Rebuild and Redeploy
+--------------------
+From the VeerOS source checkout:
+
+    cd ~/VeerOS
+    ./scripts/deploy-macos-veer-vm.sh
+
+This rebuilds the AArch64 kernel, rebuilds macOS host tools, refreshes the
+deployed kit, signs the deployed VM runner, installs the VM manager, formats or
+keeps the FAT32 disk image, and regenerates this manual.
+
+Troubleshooting
+---------------
+VM says no virtio-net found:
+
+    Start with --vmnet shared, or use the manager start command after creating
+    an aarch64-hvf instance.
+
+SSH cannot connect:
+
+    Confirm the VM log says "SSH server ready on port 22".
+    Confirm only one VM uses 192.168.2.100.
+    Run: nc -vz 192.168.2.100 22
+
+Veer secure console cannot connect:
+
+    Confirm the VM log says "VSC port 2323".
+    Run: nc -vz 192.168.2.100 2323
+
+Start says sudo is required:
+
+    Run sudo -v, then retry the manager command.
+
+Disk does not mount at /disk:
+
+    Check that the VM was started with --disk.
+    Check the disk image with fsck_msdos -n from macOS.
+
+Need a clean VM instance:
+
+    Stop the VM, remove or rename its instance directory under
+    ~/VeerOS-VMs/instances, then create it again.
+
+Current Limitations
+-------------------
+1. Persistent FAT32 files are mounted at /disk. The root filesystem still uses
+   RamFS for boot-critical files.
+2. FAT32 long filenames and directory creation are not implemented yet; use
+   regular 8.3-style filenames on /disk.
+3. Local start support is implemented for the Apple Silicon aarch64-hvf target.
+4. Hardware targets are represented by manager records and staged images, but
+   flashing and board-specific deployment remain separate workflows.
+5. QEMU target records exist, but QEMU launch integration still needs to be
+   completed.

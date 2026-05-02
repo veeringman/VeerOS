@@ -26,7 +26,7 @@
 //! - Nonce: counter-based (u96 from u32 sequence number)
 //! - AAD: message header (type + version) for binding
 
-use crate::fabric_proto::{HEADER_LEN, TAG_LEN, MAX_PAYLOAD_LEN};
+use crate::fabric_proto::{HEADER_LEN, MAX_PAYLOAD_LEN, TAG_LEN};
 use crypto::Aead;
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -72,11 +72,11 @@ pub struct FabricSession {
 #[repr(u8)]
 pub enum CryptoSessionMode {
     /// Symmetric-only (Phase 1): PSK → HKDF → session keys.
-    Symmetric   = 0,
+    Symmetric = 0,
     /// Hybrid (Phase 2): X25519 + ML-KEM → combined → session keys.
-    Hybrid      = 1,
+    Hybrid = 1,
     /// PQC-only (Phase 3): ML-KEM → session keys.
-    PqcOnly     = 2,
+    PqcOnly = 2,
 }
 
 impl FabricSession {
@@ -100,12 +100,7 @@ impl FabricSession {
     /// `is_initiator`: true if we initiated the handshake.
     ///
     /// Derives two keys: one for each direction, to prevent nonce reuse.
-    pub fn derive(
-        ikm: &[u8],
-        our_id: &[u8; 32],
-        peer_id: &[u8; 32],
-        is_initiator: bool,
-    ) -> Self {
+    pub fn derive(ikm: &[u8], our_id: &[u8; 32], peer_id: &[u8; 32], is_initiator: bool) -> Self {
         let mut session = Self::empty();
 
         // tx_key = HKDF(ikm, our_id || peer_id, "veeros-tx-v1")
@@ -301,9 +296,7 @@ impl FabricSessionTable {
         if peer_idx >= self.sessions.len() {
             return false;
         }
-        self.sessions[peer_idx] = FabricSession::derive(
-            ikm, our_id, peer_id, is_initiator,
-        );
+        self.sessions[peer_idx] = FabricSession::derive(ikm, our_id, peer_id, is_initiator);
         true
     }
 

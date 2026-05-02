@@ -128,7 +128,11 @@ pub unsafe extern "C" fn strtol(s: *const c_char, endptr: *mut *mut c_char, base
     if !endptr.is_null() {
         unsafe { *endptr = s.add(i) as *mut c_char };
     }
-    if neg { -val } else { val }
+    if neg {
+        -val
+    } else {
+        val
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -223,10 +227,7 @@ pub unsafe extern "C" fn snprintf(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn sprintf(
-    buf: *mut c_char,
-    _fmt: *const c_char,
-) -> c_int {
+pub unsafe extern "C" fn sprintf(buf: *mut c_char, _fmt: *const c_char) -> c_int {
     if !buf.is_null() {
         unsafe { *buf = 0 };
     }
@@ -276,7 +277,11 @@ pub unsafe extern "C" fn abort() -> ! {
 #[allow(dead_code)]
 fn format_int(val: i32, buf: &mut [u8; 12]) -> &[u8] {
     let neg = val < 0;
-    let mut uval = if neg { (val as i64).unsigned_abs() as u32 } else { val as u32 };
+    let mut uval = if neg {
+        (val as i64).unsigned_abs() as u32
+    } else {
+        val as u32
+    };
     let mut i = buf.len();
     if uval == 0 {
         i -= 1;

@@ -16,11 +16,10 @@
 use anyhow::{bail, Context, Result};
 use std::os::unix::io::RawFd;
 
-use crate::memory::GuestMem;
 use super::{
-    pop_avail, push_used, walk_chain, VirtioDevice, VirtioTransport,
-    VirtioTransportSnapshot,
+    pop_avail, push_used, walk_chain, VirtioDevice, VirtioTransport, VirtioTransportSnapshot,
 };
+use crate::memory::GuestMem;
 
 /// Legacy virtio_net_hdr (10 bytes — no VIRTIO_NET_F_MRG_RXBUF).
 const NET_HDR_LEN: usize = 10;
@@ -49,7 +48,9 @@ pub struct VirtioNetSnapshot {
 impl Drop for VirtioNet {
     fn drop(&mut self) {
         if self.tap_fd >= 0 {
-            unsafe { libc::close(self.tap_fd); }
+            unsafe {
+                libc::close(self.tap_fd);
+            }
         }
     }
 }
@@ -67,22 +68,18 @@ impl VirtioNet {
             // like /dev/tap0, /dev/tap1, etc. Open the device directly and
             // set O_NONBLOCK for RX polling.
             if !ifname.starts_with("tap") {
-                bail!(
-                    "macOS TAP name '{ifname}' is unsupported (expected tapN, e.g. tap0)"
-                );
+                bail!("macOS TAP name '{ifname}' is unsupported (expected tapN, e.g. tap0)");
             }
             let dev_path = format!("/dev/{ifname}");
-            let c_path = std::ffi::CString::new(dev_path.clone())
-                .context("building TAP device path")?;
+            let c_path =
+                std::ffi::CString::new(dev_path.clone()).context("building TAP device path")?;
             let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
             if fd < 0 {
                 let e = std::io::Error::last_os_error();
-                bail!(
-                    "open {dev_path}: {e} (install/load tuntaposx and ensure {ifname} exists)"
-                );
+                bail!("open {dev_path}: {e} (install/load tuntaposx and ensure {ifname} exists)");
             }
 
-            let transport = VirtioTransport::new(/*num_queues=*/2, VIRTIO_NET_F_MAC);
+            let transport = VirtioTransport::new(/*num_queues=*/ 2, VIRTIO_NET_F_MAC);
             return Ok(Self {
                 transport,
                 mac,
@@ -93,55 +90,61 @@ impl VirtioNet {
 
         #[cfg(not(target_os = "macos"))]
         {
-        let fd = unsafe {
-            libc::open(
-                b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
-                libc::O_RDWR | libc::O_NONBLOCK,
-            )
-        };
-        if fd < 0 {
-            let e = std::io::Error::last_os_error();
-            bail!("open /dev/net/tun: {e} (is the tun module loaded? run `sudo modprobe tun`)");
-        }
+            let fd = unsafe {
+                libc::open(
+                    b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
+                    libc::O_RDWR | libc::O_NONBLOCK,
+                )
+            };
+            if fd < 0 {
+                let e = std::io::Error::last_os_error();
+                bail!("open /dev/net/tun: {e} (is the tun module loaded? run `sudo modprobe tun`)");
+            }
 
-        // struct ifreq: 16-byte name, then union; first u16 of union is ifr_flags.
-        #[repr(C)]
-        struct IfReqFlags {
-            ifr_name: [u8; 16],
-            ifr_flags: u16,
-            _pad: [u8; 22],
-        }
-        let mut req = IfReqFlags {
-            ifr_name: [0; 16],
-            ifr_flags: (libc::IFF_TAP | libc::IFF_NO_PI) as u16,
-            _pad: [0; 22],
-        };
-        req.ifr_name[..ifname.len()].copy_from_slice(ifname.as_bytes());
+            // struct ifreq: 16-byte name, then union; first u16 of union is ifr_flags.
+            #[repr(C)]
+            struct IfReqFlags {
+                ifr_name: [u8; 16],
+                ifr_flags: u16,
+                _pad: [u8; 22],
+            }
+            let mut req = IfReqFlags {
+                ifr_name: [0; 16],
+                ifr_flags: (libc::IFF_TAP | libc::IFF_NO_PI) as u16,
+                _pad: [0; 22],
+            };
+            req.ifr_name[..ifname.len()].copy_from_slice(ifname.as_bytes());
 
-        // TUNSETIFF = _IOW('T', 202, int) => 0x400454ca
-        const TUNSETIFF: libc::c_ulong = 0x400454ca;
-        let rc = unsafe { libc::ioctl(fd, TUNSETIFF, &mut req as *mut IfReqFlags) };
-        if rc < 0 {
-            let e = std::io::Error::last_os_error();
-            unsafe { libc::close(fd); }
-            bail!(
+            // TUNSETIFF = _IOW('T', 202, int) => 0x400454ca
+            const TUNSETIFF: libc::c_ulong = 0x400454ca;
+            let rc = unsafe { libc::ioctl(fd, TUNSETIFF, &mut req as *mut IfReqFlags) };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                unsafe {
+                    libc::close(fd);
+                }
+                bail!(
                 "TUNSETIFF on '{ifname}': {e} (create it first with `ip tuntap add dev {ifname} mode tap user $USER`)"
             );
-        }
+            }
 
-        // Advertise F_MAC only — guest ignores everything else.
-        let transport = VirtioTransport::new(/*num_queues=*/2, VIRTIO_NET_F_MAC);
-        Ok(Self {
-            transport,
-            mac,
-            tap_fd: fd,
-            tap_name: ifname.to_string(),
-        })
+            // Advertise F_MAC only — guest ignores everything else.
+            let transport = VirtioTransport::new(/*num_queues=*/ 2, VIRTIO_NET_F_MAC);
+            Ok(Self {
+                transport,
+                mac,
+                tap_fd: fd,
+                tap_name: ifname.to_string(),
+            })
         }
     }
 
-    pub fn mac(&self) -> [u8; 6] { self.mac }
-    pub fn tap_name(&self) -> &str { &self.tap_name }
+    pub fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+    pub fn tap_name(&self) -> &str {
+        &self.tap_name
+    }
 
     pub fn snapshot_state(&self) -> VirtioNetSnapshot {
         VirtioNetSnapshot {
@@ -156,8 +159,18 @@ impl VirtioNet {
             bail!(
                 "virtio-net MAC mismatch: snapshot={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} \
 device={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                snap.mac[0], snap.mac[1], snap.mac[2], snap.mac[3], snap.mac[4], snap.mac[5],
-                self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5],
+                snap.mac[0],
+                snap.mac[1],
+                snap.mac[2],
+                snap.mac[3],
+                snap.mac[4],
+                snap.mac[5],
+                self.mac[0],
+                self.mac[1],
+                self.mac[2],
+                self.mac[3],
+                self.mac[4],
+                self.mac[5],
             );
         }
         if self.tap_name != snap.tap_name {
@@ -193,8 +206,13 @@ device={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         loop {
             let head = {
                 let q = &mut self.transport.queues[1];
-                if !q.is_ready() { return Ok(false); }
-                match pop_avail(mem, q)? { Some(h) => h, None => break }
+                if !q.is_ready() {
+                    return Ok(false);
+                }
+                match pop_avail(mem, q)? {
+                    Some(h) => h,
+                    None => break,
+                }
             };
             let chain = {
                 let q = &self.transport.queues[1];
@@ -211,11 +229,13 @@ device={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             if buf.len() > NET_HDR_LEN {
                 let frame = &buf[NET_HDR_LEN..];
                 if std::env::var_os("VEER_VM_NET_TRACE").is_some() {
-                    eprintln!("[veer-vm/net] tx: {} bytes to {}", frame.len(), self.tap_name);
+                    eprintln!(
+                        "[veer-vm/net] tx: {} bytes to {}",
+                        frame.len(),
+                        self.tap_name
+                    );
                 }
-                let rc = unsafe {
-                    libc::write(self.tap_fd, frame.as_ptr() as _, frame.len())
-                };
+                let rc = unsafe { libc::write(self.tap_fd, frame.as_ptr() as _, frame.len()) };
                 if rc < 0 {
                     let e = std::io::Error::last_os_error();
                     // EAGAIN: TAP buffer full; EIO: link down; just log and
@@ -252,7 +272,10 @@ device={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 Some(h) => h,
                 None => {
                     if std::env::var_os("VEER_VM_NET_TRACE").is_some() {
-                        eprintln!("[veer-vm/net] rx drop: no avail desc ({} bytes)", frame.len());
+                        eprintln!(
+                            "[veer-vm/net] rx drop: no avail desc ({} bytes)",
+                            frame.len()
+                        );
                     }
                     return Ok(false);
                 }
@@ -272,7 +295,9 @@ device={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         let mut written: u32 = 0;
         let mut src_off = 0usize;
         for d in chain.iter().filter(|d| d.writable) {
-            if src_off >= remaining.len() { break; }
+            if src_off >= remaining.len() {
+                break;
+            }
             let dst = mem.slice_mut(d.addr, d.len as usize)?;
             let n = core::cmp::min(dst.len(), remaining.len() - src_off);
             dst[..n].copy_from_slice(&remaining[src_off..src_off + n]);
@@ -286,7 +311,10 @@ device={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         }
         self.transport.isr_status |= 0x1;
         if std::env::var_os("VEER_VM_NET_TRACE").is_some() {
-            eprintln!("[veer-vm/net] rx: delivered {} bytes (hdr+frame={})", written, total_in);
+            eprintln!(
+                "[veer-vm/net] rx: delivered {} bytes (hdr+frame={})",
+                written, total_in
+            );
         }
         Ok(true)
     }
@@ -306,8 +334,12 @@ impl VirtioDevice for VirtioNet {
         }
     }
 
-    fn transport(&self) -> &VirtioTransport { &self.transport }
-    fn transport_mut(&mut self) -> &mut VirtioTransport { &mut self.transport }
+    fn transport(&self) -> &VirtioTransport {
+        &self.transport
+    }
+    fn transport_mut(&mut self) -> &mut VirtioTransport {
+        &mut self.transport
+    }
 
     fn notify(&mut self, queue_idx: u16, mem: &GuestMem) -> Result<bool> {
         match queue_idx {

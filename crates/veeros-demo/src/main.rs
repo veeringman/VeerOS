@@ -17,9 +17,7 @@ use core::fmt::Write;
 use shell::{Shell, ShellEnv};
 
 use microkernel::agent::{AgentState, AgentTable, Goal, GoalPriority};
-use microkernel::fabric::{
-    ExecutionFabric, LocalityZone, NodeArch, NodeCapability, NodeResources,
-};
+use microkernel::fabric::{ExecutionFabric, LocalityZone, NodeArch, NodeCapability, NodeResources};
 use microkernel::intent::{IntentClass, IntentEngine, IntentStatus};
 use microkernel::intent_sched::IntentScheduler;
 use microkernel::memory_engine::{MemoryEngine, MemoryScope, MemoryTag};
@@ -46,7 +44,7 @@ fn enable_raw_mode() {
         // but we handle Ctrl-C in the shell itself.
         raw.c_lflag &= !(libc::ECHO | libc::ICANON | libc::IEXTEN);
         raw.c_iflag &= !(libc::IXON | libc::ICRNL);
-        raw.c_cc[libc::VMIN] = 1;  // read returns after 1 byte
+        raw.c_cc[libc::VMIN] = 1; // read returns after 1 byte
         raw.c_cc[libc::VTIME] = 0; // no timeout
         libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
     }
@@ -103,7 +101,11 @@ fn do_get_agent_list(w: &mut dyn Write) {
             };
             let desc = a.goal.desc_bytes();
             let goal_str = core::str::from_utf8(desc).unwrap_or("?");
-            let _ = writeln!(w, "  {:>3}  {:>10}  {:>8}  {}", i, state, a.ticks_used, goal_str);
+            let _ = writeln!(
+                w,
+                "  {:>3}  {:>10}  {:>8}  {}",
+                i, state, a.ticks_used, goal_str
+            );
         }
     }
 }
@@ -177,7 +179,10 @@ fn do_agent_cmd(sub: &str, rest: &str, w: &mut dyn Write) {
                 let _ = writeln!(w, "  active agents: {}", AGENTS.active_count());
             }
             _ => {
-                let _ = writeln!(w, "  usage: agents [list|spawn|status|execute|complete|kill|count] <args>");
+                let _ = writeln!(
+                    w,
+                    "  usage: agents [list|spawn|status|execute|complete|kill|count] <args>"
+                );
             }
         }
     }
@@ -189,7 +194,11 @@ fn do_get_intent_list(w: &mut dyn Write) {
     unsafe {
         let count = INTENTS.active_count();
         let _ = writeln!(w, "  Active intents: {count}/16");
-        let _ = writeln!(w, "  {:>3}  {:>10}  {:>10}  Description", "ID", "Class", "Status");
+        let _ = writeln!(
+            w,
+            "  {:>3}  {:>10}  {:>10}  Description",
+            "ID", "Class", "Status"
+        );
         let _ = writeln!(w, "  ---  ----------  ----------  -----------");
         for slot in INTENTS.intents.iter() {
             if slot.status == IntentStatus::Free {
@@ -215,7 +224,11 @@ fn do_get_intent_list(w: &mut dyn Write) {
                 IntentStatus::Cancelled => "cancelled",
             };
             let desc = core::str::from_utf8(&slot.description[..slot.desc_len]).unwrap_or("?");
-            let _ = writeln!(w, "  {:>3}  {:>10}  {:>10}  {}", slot.id, class, status, desc);
+            let _ = writeln!(
+                w,
+                "  {:>3}  {:>10}  {:>10}  {}",
+                slot.id, class, status, desc
+            );
         }
     }
 }
@@ -240,7 +253,10 @@ fn do_intent_cmd(sub: &str, rest: &str, w: &mut dyn Write) {
                     "custom" => IntentClass::Custom,
                     _ => {
                         let _ = writeln!(w, "  unknown class: {class_str}");
-                        let _ = writeln!(w, "  classes: compute deploy monitor comm data admin pipeline custom");
+                        let _ = writeln!(
+                            w,
+                            "  classes: compute deploy monitor comm data admin pipeline custom"
+                        );
                         return;
                     }
                 };
@@ -258,7 +274,8 @@ fn do_intent_cmd(sub: &str, rest: &str, w: &mut dyn Write) {
                         let idx = INTENTS.intents.iter().position(|s| s.id == id);
                         if let Some(idx) = idx {
                             let plan = &INTENTS.plans[idx];
-                            let _ = writeln!(w, "  plan decomposed into {} step(s):", plan.step_count);
+                            let _ =
+                                writeln!(w, "  plan decomposed into {} step(s):", plan.step_count);
                             for s in 0..plan.step_count {
                                 let step = &plan.steps[s];
                                 let g = core::str::from_utf8(step.goal.desc_bytes()).unwrap_or("?");
@@ -308,7 +325,10 @@ fn do_intent_cmd(sub: &str, rest: &str, w: &mut dyn Write) {
                 let _ = writeln!(w, "    last tick          : {}", s.last_tick);
             }
             _ => {
-                let _ = writeln!(w, "  usage: intent [list|submit|status|cancel|stats] <args>");
+                let _ = writeln!(
+                    w,
+                    "  usage: intent [list|submit|status|cancel|stats] <args>"
+                );
             }
         }
     }
@@ -353,10 +373,18 @@ fn do_memory_cmd(sub: &str, rest: &str, w: &mut dyn Write) {
                     let _ = writeln!(w, "  usage: memory get <key>");
                     return;
                 }
-                match MEMORY.persistent.query(rest.as_bytes(), MemoryScope::Global, 0) {
+                match MEMORY
+                    .persistent
+                    .query(rest.as_bytes(), MemoryScope::Global, 0)
+                {
                     Some(entry) => {
-                        let val = core::str::from_utf8(&entry.value[..entry.value_len]).unwrap_or("?");
-                        let _ = writeln!(w, "  {rest} = {val}  (reads={}, confidence={})", entry.read_count, entry.confidence);
+                        let val =
+                            core::str::from_utf8(&entry.value[..entry.value_len]).unwrap_or("?");
+                        let _ = writeln!(
+                            w,
+                            "  {rest} = {val}  (reads={}, confidence={})",
+                            entry.read_count, entry.confidence
+                        );
                     }
                     None => {
                         let _ = writeln!(w, "  key not found: {rest}");
@@ -368,7 +396,10 @@ fn do_memory_cmd(sub: &str, rest: &str, w: &mut dyn Write) {
                     let _ = writeln!(w, "  usage: memory delete <key>");
                     return;
                 }
-                if MEMORY.persistent.delete(rest.as_bytes(), MemoryScope::Global, 0) {
+                if MEMORY
+                    .persistent
+                    .delete(rest.as_bytes(), MemoryScope::Global, 0)
+                {
                     let _ = writeln!(w, "  deleted: {rest}");
                 } else {
                     let _ = writeln!(w, "  key not found: {rest}");
@@ -387,8 +418,11 @@ fn do_get_fabric_status(w: &mut dyn Write) {
     unsafe {
         let (total, healthy) = FABRIC.node_counts();
         let _ = writeln!(w, "  Execution Fabric: {healthy}/{total} nodes healthy");
-        let _ = writeln!(w, "  {:>3}  {:>8}  {:>8}  {:>6}  {:>5}  {:>5}  Name",
-            "IDX", "Arch", "Zone", "Cores", "RAM", "Load%");
+        let _ = writeln!(
+            w,
+            "  {:>3}  {:>8}  {:>8}  {:>6}  {:>5}  {:>5}  Name",
+            "IDX", "Arch", "Zone", "Cores", "RAM", "Load%"
+        );
         let _ = writeln!(w, "  ---  --------  --------  ------  -----  -----  ----");
         for (i, node) in FABRIC.nodes.iter().enumerate() {
             if node.health == microkernel::fabric::NodeHealth::Unused {
@@ -412,8 +446,11 @@ fn do_get_fabric_status(w: &mut dyn Write) {
             let name = core::str::from_utf8(&node.name[..node.name_len]).unwrap_or("?");
             let load_pct = (node.resources.cpu_load as u32 * 100) / 255;
             let ram_mb = node.resources.ram_kib / 1024;
-            let _ = writeln!(w, "  {:>3}  {:>8}  {:>8}  {:>6}  {:>4}M  {:>4}%  {}",
-                i, arch, zone, node.resources.cpu_cores, ram_mb, load_pct, name);
+            let _ = writeln!(
+                w,
+                "  {:>3}  {:>8}  {:>8}  {:>6}  {:>4}M  {:>4}%  {}",
+                i, arch, zone, node.resources.cpu_cores, ram_mb, load_pct, name
+            );
         }
     }
 }
@@ -563,9 +600,33 @@ fn main() {
         }
 
         // Seed some persistent memory entries
-        MEMORY.persistent.store(b"os.name", b"VeerOS", MemoryTag::System, MemoryScope::Global, 0, 1, 255);
-        MEMORY.persistent.store(b"os.arch", b"multi-arch", MemoryTag::System, MemoryScope::Global, 0, 1, 255);
-        MEMORY.persistent.store(b"demo.mode", b"interactive", MemoryTag::Config, MemoryScope::Global, 0, 1, 200);
+        MEMORY.persistent.store(
+            b"os.name",
+            b"VeerOS",
+            MemoryTag::System,
+            MemoryScope::Global,
+            0,
+            1,
+            255,
+        );
+        MEMORY.persistent.store(
+            b"os.arch",
+            b"multi-arch",
+            MemoryTag::System,
+            MemoryScope::Global,
+            0,
+            1,
+            255,
+        );
+        MEMORY.persistent.store(
+            b"demo.mode",
+            b"interactive",
+            MemoryTag::Config,
+            MemoryScope::Global,
+            0,
+            1,
+            200,
+        );
     }
 
     // Build the console over our host serial backend.
@@ -586,15 +647,24 @@ fn main() {
     let _ = writeln!(con, "[boot] idle task registered");
     let _ = writeln!(con, "[ai]   agent table            \u{2014} 32 slots");
     let _ = writeln!(con, "[ai]   intent engine          \u{2014} 16 slots");
-    let _ = writeln!(con, "[ai]   memory engine          \u{2014} persistent + episodic");
+    let _ = writeln!(
+        con,
+        "[ai]   memory engine          \u{2014} persistent + episodic"
+    );
     unsafe {
         let (total, healthy) = FABRIC.node_counts();
-        let _ = writeln!(con, "[ai]   execution fabric      \u{2014} {total} nodes ({healthy} healthy)");
+        let _ = writeln!(
+            con,
+            "[ai]   execution fabric      \u{2014} {total} nodes ({healthy} healthy)"
+        );
     }
     let _ = writeln!(con, "[ai]   intent scheduler       \u{2014} online");
     let _ = writeln!(con, "[boot] shell starting...");
     let _ = writeln!(con, "");
-    let _ = writeln!(con, "Type 'help' for commands.  Try: agents, intent, memory, fabric");
+    let _ = writeln!(
+        con,
+        "Type 'help' for commands.  Try: agents, intent, memory, fabric"
+    );
     let _ = writeln!(con, "");
 
     // ── Launch the shell ─────────────────────────────────────────────

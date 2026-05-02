@@ -2,8 +2,8 @@
 //!
 //! Base I/O port 0x3F8 — standard PC COM1.
 
-use arch::Serial;
 use crate::{inb, outb};
+use arch::Serial;
 
 /// COM1 base I/O port.
 const COM1_BASE: u16 = 0x3F8;

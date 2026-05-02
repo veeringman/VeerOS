@@ -247,14 +247,22 @@ impl Inode {
 
     /// Get the name as a `&str`.
     pub fn name_str(&self) -> &str {
-        let len = self.name.iter().position(|&b| b == 0).unwrap_or(MAX_NAME_LEN + 1);
+        let len = self
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(MAX_NAME_LEN + 1);
         core::str::from_utf8(&self.name[..len]).unwrap_or("")
     }
 
     /// Set the name from a string slice (truncates if too long).
     pub fn set_name(&mut self, s: &str) {
         let bytes = s.as_bytes();
-        let len = if bytes.len() > MAX_NAME_LEN { MAX_NAME_LEN } else { bytes.len() };
+        let len = if bytes.len() > MAX_NAME_LEN {
+            MAX_NAME_LEN
+        } else {
+            bytes.len()
+        };
         self.name[..len].copy_from_slice(&bytes[..len]);
         self.name[len] = 0;
     }

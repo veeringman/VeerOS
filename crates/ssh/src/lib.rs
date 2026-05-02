@@ -20,12 +20,12 @@
 
 #![no_std]
 
-pub mod transport;
-pub mod kex;
 pub mod auth;
 pub mod channel;
-pub mod server;
 pub mod client;
+pub mod kex;
+pub mod server;
+pub mod transport;
 
 /// SSH-2 protocol version string.
 pub const VERSION_STRING: &[u8] = b"SSH-2.0-VeerOS_1.0";
@@ -149,10 +149,7 @@ pub fn put_u32(buf: &mut [u8], val: u32) {
 
 /// Read a u32 in big-endian from a buffer.
 pub fn get_u32(buf: &[u8]) -> u32 {
-    ((buf[0] as u32) << 24)
-        | ((buf[1] as u32) << 16)
-        | ((buf[2] as u32) << 8)
-        | (buf[3] as u32)
+    ((buf[0] as u32) << 24) | ((buf[1] as u32) << 16) | ((buf[2] as u32) << 8) | (buf[3] as u32)
 }
 
 /// Write an SSH "string" (u32 length + data) into buffer, return bytes written.

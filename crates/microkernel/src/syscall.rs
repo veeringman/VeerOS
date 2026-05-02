@@ -282,11 +282,11 @@ pub const SYS_SOCK_CLOSE: usize = 0x77;
 
 /// Event interest flags (passed in `a0` of `SYS_POLL_SET`).
 /// These correspond to wakeup sources that the poll subsystem checks.
-pub const POLL_TIMER: usize = 1 << 0;   // Timer expired (param = ticks to wait)
-pub const POLL_IPC: usize = 1 << 1;     // IPC message pending
-pub const POLL_CHAN_READABLE: usize = 1 << 2;  // Channel has data (param = chan_id)
-pub const POLL_CHAN_WRITABLE: usize = 1 << 3;  // Channel has space (param = chan_id)
-pub const POLL_TASK_EXIT: usize = 1 << 4;      // Task has exited (param = task_id)
+pub const POLL_TIMER: usize = 1 << 0; // Timer expired (param = ticks to wait)
+pub const POLL_IPC: usize = 1 << 1; // IPC message pending
+pub const POLL_CHAN_READABLE: usize = 1 << 2; // Channel has data (param = chan_id)
+pub const POLL_CHAN_WRITABLE: usize = 1 << 3; // Channel has space (param = chan_id)
+pub const POLL_TASK_EXIT: usize = 1 << 4; // Task has exited (param = task_id)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Debug / diagnostics (0x80–0x8F)

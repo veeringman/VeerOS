@@ -12,9 +12,9 @@
 //! `ssh` / `scp` instead.  This tool handles the VSC protocol used by
 //! all other targets (ESP32-C6, Raspi5 IoT, etc.).
 
-mod vsc;
 mod terminal;
 mod transfer;
+mod vsc;
 
 use std::env;
 use std::process;

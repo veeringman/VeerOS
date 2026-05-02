@@ -4,25 +4,32 @@
 //! `no_std` on a serial console.  Supports Normal, Insert, and Command
 //! modes with the most commonly used vi key-bindings.
 
-use core::fmt::Write;
 use arch::{Console, Serial};
+use core::fmt::Write;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Maximum number of lines in the edit buffer.
-#[cfg(feature = "small-vi")]
+#[cfg(all(
+    feature = "small-vi",
+    not(any(feature = "large-vi", feature = "full-vi"))
+))]
 const MAX_LINES: usize = 48;
-#[cfg(feature = "large-vi")]
+#[cfg(all(feature = "large-vi", not(feature = "full-vi")))]
 const MAX_LINES: usize = 512;
-#[cfg(not(any(feature = "small-vi", feature = "large-vi")))]
+#[cfg(feature = "full-vi")]
+const MAX_LINES: usize = 8192;
+#[cfg(not(any(feature = "small-vi", feature = "large-vi", feature = "full-vi")))]
 const MAX_LINES: usize = 128;
 
 /// Maximum bytes per line (excluding terminator).
-#[cfg(feature = "large-vi")]
+#[cfg(all(feature = "large-vi", not(feature = "full-vi")))]
 const MAX_COLS: usize = 120;
-#[cfg(not(feature = "large-vi"))]
+#[cfg(feature = "full-vi")]
+const MAX_COLS: usize = 256;
+#[cfg(not(any(feature = "large-vi", feature = "full-vi")))]
 const MAX_COLS: usize = 80;
 
 /// Terminal height (rows) — conservative default for serial consoles.
@@ -93,17 +100,17 @@ struct LastEdit {
 #[derive(Clone, Copy, PartialEq)]
 enum EditKind {
     None,
-    DeleteChar,    // x
-    DeleteLine,    // dd
-    ChangeLine,    // cc (delete line + insert)
-    ReplaceChar,   // r<ch>
-    PutBelow,      // p
-    PutAbove,      // P
-    JoinLine,      // J
-    IndentRight,   // >>
-    IndentLeft,    // <<
-    ToggleCase,    // ~
-    DeleteToEnd,   // D
+    DeleteChar,  // x
+    DeleteLine,  // dd
+    ChangeLine,  // cc (delete line + insert)
+    ReplaceChar, // r<ch>
+    PutBelow,    // p
+    PutAbove,    // P
+    JoinLine,    // J
+    IndentRight, // >>
+    IndentLeft,  // <<
+    ToggleCase,  // ~
+    DeleteToEnd, // D
 }
 
 /// A single line in the buffer.
@@ -114,7 +121,10 @@ struct Line {
 
 impl Line {
     const fn new() -> Self {
-        Self { data: [0u8; MAX_COLS], len: 0 }
+        Self {
+            data: [0u8; MAX_COLS],
+            len: 0,
+        }
     }
 
     fn as_str(&self) -> &str {
@@ -128,7 +138,9 @@ impl Line {
 
     /// Insert a byte at position `col`, shifting right.
     fn insert(&mut self, col: usize, byte: u8) -> bool {
-        if self.len >= MAX_COLS - 1 { return false; }
+        if self.len >= MAX_COLS - 1 {
+            return false;
+        }
         let col = if col > self.len { self.len } else { col };
         // shift right
         let mut i = self.len;
@@ -143,7 +155,9 @@ impl Line {
 
     /// Delete the byte at `col`, shifting left.  Returns deleted byte.
     fn delete(&mut self, col: usize) -> Option<u8> {
-        if col >= self.len { return None; }
+        if col >= self.len {
+            return None;
+        }
         let ch = self.data[col];
         let mut i = col;
         while i + 1 < self.len {
@@ -248,7 +262,11 @@ impl Vi {
             search_fwd: true,
             count: 0,
             counting: false,
-            last_edit: LastEdit { kind: EditKind::None, ch: 0, count: 1 },
+            last_edit: LastEdit {
+                kind: EditKind::None,
+                ch: 0,
+                count: 1,
+            },
         }
     }
 
@@ -261,12 +279,22 @@ impl Vi {
         self.dirty = false;
 
         for line_str in text.split('\n') {
-            if self.num_lines >= MAX_LINES { break; }
+            if self.num_lines >= MAX_LINES {
+                break;
+            }
             self.lines[self.num_lines].clear();
             let bytes = line_str.as_bytes();
-            let take = if bytes.len() > MAX_COLS { MAX_COLS } else { bytes.len() };
+            let take = if bytes.len() > MAX_COLS {
+                MAX_COLS
+            } else {
+                bytes.len()
+            };
             // Strip trailing CR if present
-            let take = if take > 0 && bytes[take - 1] == CR { take - 1 } else { take };
+            let take = if take > 0 && bytes[take - 1] == CR {
+                take - 1
+            } else {
+                take
+            };
             self.lines[self.num_lines].push_bytes(&bytes[..take]);
             self.num_lines += 1;
         }
@@ -306,10 +334,40 @@ impl Vi {
         }
     }
 
+    /// Write the buffer contents to a byte slice. Returns None if it will not fit.
+    pub fn write_contents_to_slice(&self, out: &mut [u8]) -> Option<usize> {
+        let mut pos = 0usize;
+        for i in 0..self.num_lines {
+            let line = self.lines[i].as_str().as_bytes();
+            if pos + line.len() > out.len() {
+                return None;
+            }
+            out[pos..pos + line.len()].copy_from_slice(line);
+            pos += line.len();
+            if i + 1 < self.num_lines {
+                if pos >= out.len() {
+                    return None;
+                }
+                out[pos] = b'\n';
+                pos += 1;
+            }
+        }
+        Some(pos)
+    }
+
     // ── Main editor loop ─────────────────────────────────────────────
 
     /// Run the interactive editor.  Returns `true` if the user saved.
     pub fn run<S: Serial>(&mut self, con: &mut Console<S>) -> bool {
+        self.run_with_save(con, |_| true)
+    }
+
+    /// Run the editor with an external save hook. Returns true if saved.
+    pub fn run_with_save<S: Serial, F: FnMut(&Self) -> bool>(
+        &mut self,
+        con: &mut Console<S>,
+        mut save: F,
+    ) -> bool {
         // Hide cursor, clear screen, initial draw
         self.full_redraw(con);
         let mut saved = false;
@@ -318,21 +376,36 @@ impl Vi {
             let byte = con.read_byte();
 
             match self.mode {
-                Mode::Normal  => {
+                Mode::Normal => {
                     if self.handle_normal(con, byte) {
                         break;
                     }
                 }
-                Mode::Insert   => self.handle_insert(con, byte),
-                Mode::Replace  => self.handle_replace(con, byte),
-                Mode::Command  => {
-                    match self.handle_command(con, byte) {
-                        CmdResult::Continue => {}
-                        CmdResult::Quit => break,
-                        CmdResult::SaveQuit => { saved = true; break; }
+                Mode::Insert => self.handle_insert(con, byte),
+                Mode::Replace => self.handle_replace(con, byte),
+                Mode::Command => match self.handle_command(con, byte) {
+                    CmdResult::Continue => {}
+                    CmdResult::SaveContinue => {
+                        if save(self) {
+                            saved = true;
+                            self.dirty = false;
+                            let bytes = self.content_bytes();
+                            self.set_status_fmt(bytes, "bytes written");
+                        } else {
+                            self.set_status("write failed");
+                        }
                     }
-                }
-                Mode::Search   => self.handle_search_input(con, byte),
+                    CmdResult::Quit => break,
+                    CmdResult::SaveQuit => {
+                        if save(self) {
+                            saved = true;
+                            self.dirty = false;
+                            break;
+                        }
+                        self.set_status("write failed");
+                    }
+                },
+                Mode::Search => self.handle_search_input(con, byte),
             }
         }
 
@@ -356,7 +429,10 @@ impl Vi {
             return false;
         }
         if byte >= b'0' && byte <= b'9' && self.counting {
-            self.count = self.count.saturating_mul(10).saturating_add((byte - b'0') as usize);
+            self.count = self
+                .count
+                .saturating_mul(10)
+                .saturating_add((byte - b'0') as usize);
             return false;
         }
 
@@ -366,21 +442,61 @@ impl Vi {
 
         match byte {
             // ── Movement ─────────────────────────────────────────
-            b'h' => { for _ in 0..cnt { if self.col > 0 { self.col -= 1; } } }
-            b'j' => { for _ in 0..cnt { self.move_down(); } }
-            b'k' => { for _ in 0..cnt { self.move_up(); } }
-            b'l' => { for _ in 0..cnt { self.move_right(); } }
-            b'0' => { self.col = 0; }
-            b'^' => { self.col = self.first_nonblank(); }
-            b'$' => { self.col = self.end_of_line(); }
-            b'w' => { for _ in 0..cnt { self.word_forward(); } }
-            b'b' => { for _ in 0..cnt { self.word_backward(); } }
-            b'e' => { for _ in 0..cnt { self.word_end(); } }
+            b'h' => {
+                for _ in 0..cnt {
+                    if self.col > 0 {
+                        self.col -= 1;
+                    }
+                }
+            }
+            b'j' => {
+                for _ in 0..cnt {
+                    self.move_down();
+                }
+            }
+            b'k' => {
+                for _ in 0..cnt {
+                    self.move_up();
+                }
+            }
+            b'l' => {
+                for _ in 0..cnt {
+                    self.move_right();
+                }
+            }
+            b'0' => {
+                self.col = 0;
+            }
+            b'^' => {
+                self.col = self.first_nonblank();
+            }
+            b'$' => {
+                self.col = self.end_of_line();
+            }
+            b'w' => {
+                for _ in 0..cnt {
+                    self.word_forward();
+                }
+            }
+            b'b' => {
+                for _ in 0..cnt {
+                    self.word_backward();
+                }
+            }
+            b'e' => {
+                for _ in 0..cnt {
+                    self.word_end();
+                }
+            }
 
             b'G' => {
                 if cnt > 1 || self.counting {
                     // <N>G = go to line N
-                    let target = if cnt <= self.num_lines { cnt - 1 } else { self.num_lines - 1 };
+                    let target = if cnt <= self.num_lines {
+                        cnt - 1
+                    } else {
+                        self.num_lines - 1
+                    };
                     self.row = target;
                 } else {
                     self.row = self.num_lines - 1;
@@ -412,28 +528,36 @@ impl Vi {
             }
 
             // ── Scrolling ────────────────────────────────────────
-            0x06 => { // Ctrl-F
+            0x06 => {
+                // Ctrl-F
                 let step = TEXT_ROWS.saturating_sub(2);
                 for _ in 0..cnt {
                     self.row = core::cmp::min(self.row + step, self.num_lines - 1);
                 }
                 self.clamp_col();
             }
-            0x02 => { // Ctrl-B
+            0x02 => {
+                // Ctrl-B
                 let step = TEXT_ROWS.saturating_sub(2);
-                for _ in 0..cnt { self.row = self.row.saturating_sub(step); }
+                for _ in 0..cnt {
+                    self.row = self.row.saturating_sub(step);
+                }
                 self.clamp_col();
             }
-            0x04 => { // Ctrl-D (half page down)
+            0x04 => {
+                // Ctrl-D (half page down)
                 let step = TEXT_ROWS / 2;
                 for _ in 0..cnt {
                     self.row = core::cmp::min(self.row + step, self.num_lines - 1);
                 }
                 self.clamp_col();
             }
-            0x15 => { // Ctrl-U (half page up)
+            0x15 => {
+                // Ctrl-U (half page up)
                 let step = TEXT_ROWS / 2;
-                for _ in 0..cnt { self.row = self.row.saturating_sub(step); }
+                for _ in 0..cnt {
+                    self.row = self.row.saturating_sub(step);
+                }
                 self.clamp_col();
             }
 
@@ -441,27 +565,39 @@ impl Vi {
             b'f' => {
                 let ch = con.read_byte();
                 if ch >= 0x20 {
-                    for _ in 0..cnt { self.find_char_fwd(ch); }
+                    for _ in 0..cnt {
+                        self.find_char_fwd(ch);
+                    }
                 }
             }
             b'F' => {
                 let ch = con.read_byte();
                 if ch >= 0x20 {
-                    for _ in 0..cnt { self.find_char_back(ch); }
+                    for _ in 0..cnt {
+                        self.find_char_back(ch);
+                    }
                 }
             }
             b't' => {
                 let ch = con.read_byte();
                 if ch >= 0x20 {
-                    for _ in 0..cnt { self.find_char_fwd(ch); }
-                    if self.col > 0 { self.col -= 1; }
+                    for _ in 0..cnt {
+                        self.find_char_fwd(ch);
+                    }
+                    if self.col > 0 {
+                        self.col -= 1;
+                    }
                 }
             }
             b'T' => {
                 let ch = con.read_byte();
                 if ch >= 0x20 {
-                    for _ in 0..cnt { self.find_char_back(ch); }
-                    if self.col < self.lines[self.row].len.saturating_sub(1) { self.col += 1; }
+                    for _ in 0..cnt {
+                        self.find_char_back(ch);
+                    }
+                    if self.col < self.lines[self.row].len.saturating_sub(1) {
+                        self.col += 1;
+                    }
                 }
             }
 
@@ -476,8 +612,16 @@ impl Vi {
                 self.search_fwd = false;
                 self.cmd_len = 0;
             }
-            b'n' => { for _ in 0..cnt { self.search_next(); } }
-            b'N' => { for _ in 0..cnt { self.search_prev(); } }
+            b'n' => {
+                for _ in 0..cnt {
+                    self.search_next();
+                }
+            }
+            b'N' => {
+                for _ in 0..cnt {
+                    self.search_prev();
+                }
+            }
             b'*' => {
                 // Search for word under cursor
                 self.search_word_under_cursor();
@@ -522,7 +666,11 @@ impl Vi {
                 if self.insert_line_at(self.row) {
                     self.col = 0;
                     if self.settings.autoindent {
-                        let indent = self.get_indent(if self.row + 1 < self.num_lines { self.row + 1 } else { self.row });
+                        let indent = self.get_indent(if self.row + 1 < self.num_lines {
+                            self.row + 1
+                        } else {
+                            self.row
+                        });
                         self.apply_indent(self.row, indent);
                         self.col = indent;
                     }
@@ -546,7 +694,11 @@ impl Vi {
                         self.clamp_col();
                     }
                 }
-                self.last_edit = LastEdit { kind: EditKind::DeleteChar, ch: 0, count: cnt };
+                self.last_edit = LastEdit {
+                    kind: EditKind::DeleteChar,
+                    ch: 0,
+                    count: cnt,
+                };
             }
             b'r' => {
                 let ch = con.read_byte();
@@ -558,7 +710,11 @@ impl Vi {
                         }
                     }
                     self.dirty = true;
-                    self.last_edit = LastEdit { kind: EditKind::ReplaceChar, ch, count: cnt };
+                    self.last_edit = LastEdit {
+                        kind: EditKind::ReplaceChar,
+                        ch,
+                        count: cnt,
+                    };
                 }
             }
             b'~' => {
@@ -577,7 +733,11 @@ impl Vi {
                         self.move_right();
                     }
                 }
-                self.last_edit = LastEdit { kind: EditKind::ToggleCase, ch: 0, count: cnt };
+                self.last_edit = LastEdit {
+                    kind: EditKind::ToggleCase,
+                    ch: 0,
+                    count: cnt,
+                };
             }
 
             b'd' => {
@@ -592,7 +752,11 @@ impl Vi {
                             self.clamp_row();
                             self.clamp_col();
                         }
-                        self.last_edit = LastEdit { kind: EditKind::DeleteLine, ch: 0, count: cnt };
+                        self.last_edit = LastEdit {
+                            kind: EditKind::DeleteLine,
+                            ch: 0,
+                            count: cnt,
+                        };
                     }
                     b'w' => {
                         // dw — delete word(s)
@@ -614,7 +778,11 @@ impl Vi {
             b'D' => {
                 // Delete from cursor to end of line
                 self.delete_to_end();
-                self.last_edit = LastEdit { kind: EditKind::DeleteToEnd, ch: 0, count: 1 };
+                self.last_edit = LastEdit {
+                    kind: EditKind::DeleteToEnd,
+                    ch: 0,
+                    count: 1,
+                };
             }
             b'C' => {
                 // Change from cursor to end of line
@@ -632,7 +800,11 @@ impl Vi {
                         self.dirty = true;
                         self.mode = Mode::Insert;
                         self.set_status("-- INSERT --");
-                        self.last_edit = LastEdit { kind: EditKind::ChangeLine, ch: 0, count: 1 };
+                        self.last_edit = LastEdit {
+                            kind: EditKind::ChangeLine,
+                            ch: 0,
+                            count: 1,
+                        };
                     }
                     b'w' => {
                         // cw — change word
@@ -665,7 +837,11 @@ impl Vi {
                             self.dirty = true;
                         }
                     }
-                    self.last_edit = LastEdit { kind: EditKind::PutBelow, ch: 0, count: cnt };
+                    self.last_edit = LastEdit {
+                        kind: EditKind::PutBelow,
+                        ch: 0,
+                        count: cnt,
+                    };
                 }
             }
             b'P' => {
@@ -676,14 +852,22 @@ impl Vi {
                             self.dirty = true;
                         }
                     }
-                    self.last_edit = LastEdit { kind: EditKind::PutAbove, ch: 0, count: cnt };
+                    self.last_edit = LastEdit {
+                        kind: EditKind::PutAbove,
+                        ch: 0,
+                        count: cnt,
+                    };
                 }
             }
             b'J' => {
                 for _ in 0..cnt {
                     self.join_lines();
                 }
-                self.last_edit = LastEdit { kind: EditKind::JoinLine, ch: 0, count: cnt };
+                self.last_edit = LastEdit {
+                    kind: EditKind::JoinLine,
+                    ch: 0,
+                    count: cnt,
+                };
             }
 
             // ── Indent / Dedent ──────────────────────────────────
@@ -693,10 +877,16 @@ impl Vi {
                     let ts = self.settings.tabstop as usize;
                     for i in 0..cnt {
                         let r = self.row + i;
-                        if r < self.num_lines { self.indent_line(r, ts); }
+                        if r < self.num_lines {
+                            self.indent_line(r, ts);
+                        }
                     }
                     self.dirty = true;
-                    self.last_edit = LastEdit { kind: EditKind::IndentRight, ch: 0, count: cnt };
+                    self.last_edit = LastEdit {
+                        kind: EditKind::IndentRight,
+                        ch: 0,
+                        count: cnt,
+                    };
                 }
             }
             b'<' => {
@@ -705,10 +895,16 @@ impl Vi {
                     let ts = self.settings.tabstop as usize;
                     for i in 0..cnt {
                         let r = self.row + i;
-                        if r < self.num_lines { self.dedent_line(r, ts); }
+                        if r < self.num_lines {
+                            self.dedent_line(r, ts);
+                        }
                     }
                     self.dirty = true;
-                    self.last_edit = LastEdit { kind: EditKind::IndentLeft, ch: 0, count: cnt };
+                    self.last_edit = LastEdit {
+                        kind: EditKind::IndentLeft,
+                        ch: 0,
+                        count: cnt,
+                    };
                 }
             }
 
@@ -749,10 +945,28 @@ impl Vi {
                     if b2 == b'[' && con.has_data() {
                         let arrow = con.read_byte();
                         match arrow {
-                            b'A' => { for _ in 0..cnt { self.move_up(); } }
-                            b'B' => { for _ in 0..cnt { self.move_down(); } }
-                            b'C' => { for _ in 0..cnt { self.move_right(); } }
-                            b'D' => { for _ in 0..cnt { if self.col > 0 { self.col -= 1; } } }
+                            b'A' => {
+                                for _ in 0..cnt {
+                                    self.move_up();
+                                }
+                            }
+                            b'B' => {
+                                for _ in 0..cnt {
+                                    self.move_down();
+                                }
+                            }
+                            b'C' => {
+                                for _ in 0..cnt {
+                                    self.move_right();
+                                }
+                            }
+                            b'D' => {
+                                for _ in 0..cnt {
+                                    if self.col > 0 {
+                                        self.col -= 1;
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -774,7 +988,9 @@ impl Vi {
             ESC => {
                 // Return to normal mode
                 self.mode = Mode::Normal;
-                if self.col > 0 { self.col -= 1; }
+                if self.col > 0 {
+                    self.col -= 1;
+                }
                 self.set_status("");
             }
 
@@ -840,10 +1056,20 @@ impl Vi {
                     if b2 == b'[' && con.has_data() {
                         let arrow = con.read_byte();
                         match arrow {
-                            b'A' => { self.move_up(); }
-                            b'B' => { self.move_down(); }
-                            b'C' => { self.move_right(); }
-                            b'D' => { if self.col > 0 { self.col -= 1; } }
+                            b'A' => {
+                                self.move_up();
+                            }
+                            b'B' => {
+                                self.move_down();
+                            }
+                            b'C' => {
+                                self.move_right();
+                            }
+                            b'D' => {
+                                if self.col > 0 {
+                                    self.col -= 1;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -923,12 +1149,9 @@ impl Vi {
         if cmd == "q!" {
             return CmdResult::Quit;
         }
-        // :w  — write (just mark saved, no filesystem in VeerOS yet)
+        // :w  — write through the caller's save hook.
         if cmd == "w" {
-            self.dirty = false;
-            let bytes = self.content_bytes();
-            self.set_status_fmt(bytes, "bytes written");
-            return CmdResult::Continue;
+            return CmdResult::SaveContinue;
         }
         // :wq or :x  — write and quit
         if cmd == "wq" || cmd == "x" {
@@ -940,26 +1163,56 @@ impl Vi {
             // Show current settings
             let mut tmp = [0u8; 64];
             let mut pos = 0;
-            let s: &[u8] = if self.settings.number { b"number " } else { b"nonumber " };
+            let s: &[u8] = if self.settings.number {
+                b"number "
+            } else {
+                b"nonumber "
+            };
             for &b in s {
-                if pos < 64 { tmp[pos] = b; pos += 1; }
+                if pos < 64 {
+                    tmp[pos] = b;
+                    pos += 1;
+                }
             }
             for &b in b"ts=" {
-                if pos < 64 { tmp[pos] = b; pos += 1; }
+                if pos < 64 {
+                    tmp[pos] = b;
+                    pos += 1;
+                }
             }
             let mut nbuf = [0u8; 8];
             let n = fmt_usize(&mut nbuf, self.settings.tabstop as usize);
             for i in 0..n {
-                if pos < 64 { tmp[pos] = nbuf[i]; pos += 1; }
+                if pos < 64 {
+                    tmp[pos] = nbuf[i];
+                    pos += 1;
+                }
             }
-            if pos < 64 { tmp[pos] = b' '; pos += 1; }
-            let s: &[u8] = if self.settings.autoindent { b"ai " } else { b"noai " };
-            for &b in s {
-                if pos < 64 { tmp[pos] = b; pos += 1; }
+            if pos < 64 {
+                tmp[pos] = b' ';
+                pos += 1;
             }
-            let s: &[u8] = if self.settings.showmatch { b"sm" } else { b"nosm" };
+            let s: &[u8] = if self.settings.autoindent {
+                b"ai "
+            } else {
+                b"noai "
+            };
             for &b in s {
-                if pos < 64 { tmp[pos] = b; pos += 1; }
+                if pos < 64 {
+                    tmp[pos] = b;
+                    pos += 1;
+                }
+            }
+            let s: &[u8] = if self.settings.showmatch {
+                b"sm"
+            } else {
+                b"nosm"
+            };
+            for &b in s {
+                if pos < 64 {
+                    tmp[pos] = b;
+                    pos += 1;
+                }
             }
             self.status[..pos].copy_from_slice(&tmp[..pos]);
             self.status_len = pos;
@@ -1055,7 +1308,11 @@ impl Vi {
 
     fn end_of_line(&self) -> usize {
         let len = self.lines[self.row].len;
-        if len == 0 { 0 } else { len - 1 }
+        if len == 0 {
+            0
+        } else {
+            len - 1
+        }
     }
 
     fn first_nonblank(&self) -> usize {
@@ -1128,7 +1385,11 @@ impl Vi {
 
     fn clamp_row(&mut self) {
         if self.row >= self.num_lines {
-            self.row = if self.num_lines > 0 { self.num_lines - 1 } else { 0 };
+            self.row = if self.num_lines > 0 {
+                self.num_lines - 1
+            } else {
+                0
+            };
         }
     }
 
@@ -1147,13 +1408,16 @@ impl Vi {
     }
 
     fn insert_line_at(&mut self, at: usize) -> bool {
-        if self.num_lines >= MAX_LINES { return false; }
+        if self.num_lines >= MAX_LINES {
+            return false;
+        }
         // Shift lines down
         let mut i = self.num_lines;
         while i > at {
             // Use a temp buffer to avoid borrow overlaps
             let mut tmp = Line::new();
-            tmp.data[..self.lines[i - 1].len].copy_from_slice(&self.lines[i - 1].data[..self.lines[i - 1].len]);
+            tmp.data[..self.lines[i - 1].len]
+                .copy_from_slice(&self.lines[i - 1].data[..self.lines[i - 1].len]);
             tmp.len = self.lines[i - 1].len;
             self.lines[i].data[..tmp.len].copy_from_slice(&tmp.data[..tmp.len]);
             self.lines[i].len = tmp.len;
@@ -1173,7 +1437,8 @@ impl Vi {
         let mut i = at;
         while i + 1 < self.num_lines {
             let mut tmp = Line::new();
-            tmp.data[..self.lines[i + 1].len].copy_from_slice(&self.lines[i + 1].data[..self.lines[i + 1].len]);
+            tmp.data[..self.lines[i + 1].len]
+                .copy_from_slice(&self.lines[i + 1].data[..self.lines[i + 1].len]);
             tmp.len = self.lines[i + 1].len;
             self.lines[i].data[..tmp.len].copy_from_slice(&tmp.data[..tmp.len]);
             self.lines[i].len = tmp.len;
@@ -1217,11 +1482,15 @@ impl Vi {
                 }
 
                 let line = &self.lines[doc_row];
-                let show = if line.len > text_width { text_width } else { line.len };
+                let show = if line.len > text_width {
+                    text_width
+                } else {
+                    line.len
+                };
                 if show > 0 {
-                    con.write_str_raw(
-                        unsafe { core::str::from_utf8_unchecked(&line.data[..show]) }
-                    );
+                    con.write_str_raw(unsafe {
+                        core::str::from_utf8_unchecked(&line.data[..show])
+                    });
                 }
             } else {
                 // Empty line — show tilde like vi
@@ -1257,7 +1526,8 @@ impl Vi {
         } else {
             // Show filename or "[No Name]"
             if self.filename_len > 0 {
-                let name = unsafe { core::str::from_utf8_unchecked(&self.filename[..self.filename_len]) };
+                let name =
+                    unsafe { core::str::from_utf8_unchecked(&self.filename[..self.filename_len]) };
                 con.write_str_raw(name);
             } else {
                 con.write_str_raw("[No Name]");
@@ -1303,11 +1573,20 @@ impl Vi {
         let mut pos = 0;
         let bytes = &tmp[..n];
         for &b in bytes {
-            if pos < 64 { self.status[pos] = b; pos += 1; }
+            if pos < 64 {
+                self.status[pos] = b;
+                pos += 1;
+            }
         }
-        if pos < 64 { self.status[pos] = b' '; pos += 1; }
+        if pos < 64 {
+            self.status[pos] = b' ';
+            pos += 1;
+        }
         for &b in suffix.as_bytes() {
-            if pos < 64 { self.status[pos] = b; pos += 1; }
+            if pos < 64 {
+                self.status[pos] = b;
+                pos += 1;
+            }
         }
         self.status_len = pos;
     }
@@ -1348,7 +1627,9 @@ impl Vi {
         match byte {
             ESC => {
                 self.mode = Mode::Normal;
-                if self.col > 0 { self.col -= 1; }
+                if self.col > 0 {
+                    self.col -= 1;
+                }
                 self.set_status("");
             }
 
@@ -1392,7 +1673,11 @@ impl Vi {
                             b'A' => self.move_up(),
                             b'B' => self.move_down(),
                             b'C' => self.move_right(),
-                            b'D' => { if self.col > 0 { self.col -= 1; } }
+                            b'D' => {
+                                if self.col > 0 {
+                                    self.col -= 1;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -1510,14 +1795,18 @@ impl Vi {
     /// Find character backward in current line (`F` command).
     fn find_char_back(&mut self, ch: u8) {
         let line = &self.lines[self.row];
-        if self.col == 0 { return; }
+        if self.col == 0 {
+            return;
+        }
         let mut c = self.col - 1;
         loop {
             if line.data[c] == ch {
                 self.col = c;
                 return;
             }
-            if c == 0 { break; }
+            if c == 0 {
+                break;
+            }
             c -= 1;
         }
     }
@@ -1546,7 +1835,9 @@ impl Vi {
             }
             r += 1;
             c = 0;
-            if r >= self.num_lines { r = 0; }
+            if r >= self.num_lines {
+                r = 0;
+            }
             if r == start_row {
                 // Wrapped around to start — check the start line from col 0
                 if let Some(pos) = self.find_in_line(r, 0, pattern) {
@@ -1578,7 +1869,13 @@ impl Vi {
 
         loop {
             let line = &self.lines[r];
-            let end_col = if first && self.col > 0 { self.col - 1 } else if first { 0 } else { line.len };
+            let end_col = if first && self.col > 0 {
+                self.col - 1
+            } else if first {
+                0
+            } else {
+                line.len
+            };
             first = false;
 
             // Search backwards through the line
@@ -1586,7 +1883,9 @@ impl Vi {
                 let search_end = core::cmp::min(end_col, line.len - pattern.len() + 1);
                 let mut c = search_end;
                 loop {
-                    if c == 0 { break; }
+                    if c == 0 {
+                        break;
+                    }
                     c -= 1;
                     if self.line_matches_at(r, c, pattern) {
                         self.row = r;
@@ -1596,7 +1895,9 @@ impl Vi {
                 }
             }
 
-            if r == 0 { r = self.num_lines; }
+            if r == 0 {
+                r = self.num_lines;
+            }
             r -= 1;
             if r == start_row {
                 self.set_status("pattern not found");
@@ -1608,7 +1909,9 @@ impl Vi {
     /// Find a pattern in a line starting from `from_col`.  Returns column if found.
     fn find_in_line(&self, row: usize, from_col: usize, pattern: &[u8]) -> Option<usize> {
         let line = &self.lines[row];
-        if line.len < pattern.len() { return None; }
+        if line.len < pattern.len() {
+            return None;
+        }
         let mut c = from_col;
         let end = line.len - pattern.len() + 1;
         while c < end {
@@ -1623,9 +1926,13 @@ impl Vi {
     /// Check if `pattern` matches at (row, col).
     fn line_matches_at(&self, row: usize, col: usize, pattern: &[u8]) -> bool {
         let line = &self.lines[row];
-        if col + pattern.len() > line.len { return false; }
+        if col + pattern.len() > line.len {
+            return false;
+        }
         for i in 0..pattern.len() {
-            if line.data[col + i] != pattern[i] { return false; }
+            if line.data[col + i] != pattern[i] {
+                return false;
+            }
         }
         true
     }
@@ -1633,7 +1940,9 @@ impl Vi {
     /// Search for the word under the cursor (`*` command).
     fn search_word_under_cursor(&mut self) {
         let line = &self.lines[self.row];
-        if self.col >= line.len { return; }
+        if self.col >= line.len {
+            return;
+        }
 
         // Find word boundaries
         let mut start = self.col;
@@ -1646,7 +1955,9 @@ impl Vi {
         }
 
         let word_len = end - start;
-        if word_len == 0 || word_len > 48 { return; }
+        if word_len == 0 || word_len > 48 {
+            return;
+        }
 
         self.search_buf[..word_len].copy_from_slice(&line.data[start..end]);
         self.search_len = word_len;
@@ -1658,7 +1969,9 @@ impl Vi {
 
     /// Get the amount of leading whitespace on a line.
     fn get_indent(&self, row: usize) -> usize {
-        if row >= self.num_lines { return 0; }
+        if row >= self.num_lines {
+            return 0;
+        }
         let line = &self.lines[row];
         let mut n = 0;
         while n < line.len && (line.data[n] == b' ' || line.data[n] == TAB) {
@@ -1669,7 +1982,9 @@ impl Vi {
 
     /// Set the leading indent on a line to exactly `n` spaces.
     fn apply_indent(&mut self, row: usize, n: usize) {
-        if row >= self.num_lines { return; }
+        if row >= self.num_lines {
+            return;
+        }
         let current_indent = self.get_indent(row);
         if n > current_indent {
             // Insert spaces at beginning
@@ -1688,7 +2003,9 @@ impl Vi {
 
     /// Indent a line by `tabstop` spaces (`>>` command).
     fn indent_line(&mut self, row: usize, tabstop: usize) {
-        if row >= self.num_lines { return; }
+        if row >= self.num_lines {
+            return;
+        }
         for _ in 0..tabstop {
             self.lines[row].insert(0, b' ');
         }
@@ -1696,7 +2013,9 @@ impl Vi {
 
     /// Dedent a line by up to `tabstop` spaces (`<<` command).
     fn dedent_line(&mut self, row: usize, tabstop: usize) {
-        if row >= self.num_lines { return; }
+        if row >= self.num_lines {
+            return;
+        }
         let mut removed = 0;
         while removed < tabstop && self.lines[row].len > 0 && self.lines[row].data[0] == b' ' {
             self.lines[row].delete(0);
@@ -1718,7 +2037,9 @@ impl Vi {
 
     /// Delete from start of line to cursor (`d0` command).
     fn delete_to_start(&mut self) {
-        if self.col == 0 { return; }
+        if self.col == 0 {
+            return;
+        }
         let line = &mut self.lines[self.row];
         // Shift remaining data left
         let remaining = line.len - self.col;
@@ -1733,7 +2054,9 @@ impl Vi {
     /// Delete word from cursor (`dw` command).
     fn delete_word(&mut self) {
         let line = &mut self.lines[self.row];
-        if self.col >= line.len { return; }
+        if self.col >= line.len {
+            return;
+        }
 
         let mut end = self.col;
         // Skip non-space chars (word)
@@ -1765,7 +2088,10 @@ impl Vi {
         let mut si = 0;
         for i in 1..bytes.len() {
             if bytes[i] == b'/' {
-                if si < 3 { slashes[si] = i; si += 1; }
+                if si < 3 {
+                    slashes[si] = i;
+                    si += 1;
+                }
             }
         }
         if si < 2 {
@@ -1777,7 +2103,9 @@ impl Vi {
         let pat_end = slashes[1];
         let rep_start = slashes[1] + 1;
         let rep_end = if si >= 3 { slashes[2] } else { bytes.len() };
-        let global = si >= 3 && rep_end + 1 <= bytes.len() && bytes.get(rep_end + 1 - 1).copied() == Some(b'g');
+        let global = si >= 3
+            && rep_end + 1 <= bytes.len()
+            && bytes.get(rep_end + 1 - 1).copied() == Some(b'g');
 
         let pat_len = pat_end - pat_start;
         let rep_len = rep_end - rep_start;
@@ -1791,7 +2119,9 @@ impl Vi {
         let mut c = 0usize;
 
         loop {
-            if c + pat_len > line.len { break; }
+            if c + pat_len > line.len {
+                break;
+            }
             let mut matched = true;
             for i in 0..pat_len {
                 if line.data[c + i] != bytes[pat_start + i] {
@@ -1823,7 +2153,9 @@ impl Vi {
                 }
                 count += 1;
                 c += rep_len;
-                if !global { break; }
+                if !global {
+                    break;
+                }
             } else {
                 c += 1;
             }
@@ -1835,10 +2167,16 @@ impl Vi {
             let n = fmt_usize(&mut tmp, count);
             let mut pos = 0;
             for i in 0..n {
-                if pos < 64 { self.status[pos] = tmp[i]; pos += 1; }
+                if pos < 64 {
+                    self.status[pos] = tmp[i];
+                    pos += 1;
+                }
             }
             for &b in b" substitution(s)" {
-                if pos < 64 { self.status[pos] = b; pos += 1; }
+                if pos < 64 {
+                    self.status[pos] = b;
+                    pos += 1;
+                }
             }
             self.status_len = pos;
         } else {
@@ -1848,7 +2186,9 @@ impl Vi {
 
     /// Join current line with the next line (`J` command).
     fn join_lines(&mut self) {
-        if self.row + 1 >= self.num_lines { return; }
+        if self.row + 1 >= self.num_lines {
+            return;
+        }
         let cur_len = self.lines[self.row].len;
         let next_len = self.lines[self.row + 1].len;
 
@@ -1890,7 +2230,9 @@ impl Vi {
     /// Match bracket under cursor (`%` command).
     fn match_bracket(&mut self) {
         let line = &self.lines[self.row];
-        if self.col >= line.len { return; }
+        if self.col >= line.len {
+            return;
+        }
         let ch = line.data[self.col];
 
         let (target, forward) = match ch {
@@ -1912,12 +2254,18 @@ impl Vi {
                 c += 1;
                 while c >= self.lines[r].len {
                     r += 1;
-                    if r >= self.num_lines { return; }
+                    if r >= self.num_lines {
+                        return;
+                    }
                     c = 0;
                 }
                 let b = self.lines[r].data[c];
-                if b == ch { depth += 1; }
-                if b == target { depth -= 1; }
+                if b == ch {
+                    depth += 1;
+                }
+                if b == target {
+                    depth -= 1;
+                }
                 if depth == 0 {
                     self.row = r;
                     self.col = c;
@@ -1927,15 +2275,23 @@ impl Vi {
         } else {
             loop {
                 if c == 0 {
-                    if r == 0 { return; }
+                    if r == 0 {
+                        return;
+                    }
                     r -= 1;
                     c = self.lines[r].len;
-                    if c == 0 { continue; }
+                    if c == 0 {
+                        continue;
+                    }
                 }
                 c -= 1;
                 let b = self.lines[r].data[c];
-                if b == ch { depth += 1; }
-                if b == target { depth -= 1; }
+                if b == ch {
+                    depth += 1;
+                }
+                if b == target {
+                    depth -= 1;
+                }
                 if depth == 0 {
                     self.row = r;
                     self.col = c;
@@ -2016,7 +2372,9 @@ impl Vi {
                 let ts = self.settings.tabstop as usize;
                 for i in 0..edit.count {
                     let r = self.row + i;
-                    if r < self.num_lines { self.indent_line(r, ts); }
+                    if r < self.num_lines {
+                        self.indent_line(r, ts);
+                    }
                 }
                 self.dirty = true;
             }
@@ -2024,7 +2382,9 @@ impl Vi {
                 let ts = self.settings.tabstop as usize;
                 for i in 0..edit.count {
                     let r = self.row + i;
-                    if r < self.num_lines { self.dedent_line(r, ts); }
+                    if r < self.num_lines {
+                        self.dedent_line(r, ts);
+                    }
                 }
                 self.dirty = true;
             }
@@ -2057,6 +2417,7 @@ impl Vi {
 
 enum CmdResult {
     Continue,
+    SaveContinue,
     Quit,
     SaveQuit,
 }
@@ -2088,10 +2449,14 @@ fn fmt_usize(buf: &mut [u8], mut val: usize) -> usize {
 /// Parse a `usize` from a string.  Very simple — digits only.
 fn parse_usize(s: &str) -> Result<usize, ()> {
     let bytes = s.as_bytes();
-    if bytes.is_empty() { return Err(()); }
+    if bytes.is_empty() {
+        return Err(());
+    }
     let mut val: usize = 0;
     for &b in bytes {
-        if b < b'0' || b > b'9' { return Err(()); }
+        if b < b'0' || b > b'9' {
+            return Err(());
+        }
         val = val.checked_mul(10).ok_or(())?;
         val = val.checked_add((b - b'0') as usize).ok_or(())?;
     }
@@ -2104,34 +2469,52 @@ fn fmt_line_info(buf: &mut [u8], row: usize, total: usize, col: usize) -> usize 
 
     // "Line "
     for &b in b"Line " {
-        if pos < buf.len() { buf[pos] = b; pos += 1; }
+        if pos < buf.len() {
+            buf[pos] = b;
+            pos += 1;
+        }
     }
 
     // row number
     let mut tmp = [0u8; 8];
     let n = fmt_usize(&mut tmp, row);
     for i in 0..n {
-        if pos < buf.len() { buf[pos] = tmp[i]; pos += 1; }
+        if pos < buf.len() {
+            buf[pos] = tmp[i];
+            pos += 1;
+        }
     }
 
     // "/"
-    if pos < buf.len() { buf[pos] = b'/'; pos += 1; }
+    if pos < buf.len() {
+        buf[pos] = b'/';
+        pos += 1;
+    }
 
     // total
     let n = fmt_usize(&mut tmp, total);
     for i in 0..n {
-        if pos < buf.len() { buf[pos] = tmp[i]; pos += 1; }
+        if pos < buf.len() {
+            buf[pos] = tmp[i];
+            pos += 1;
+        }
     }
 
     // "  Col "
     for &b in b"  Col " {
-        if pos < buf.len() { buf[pos] = b; pos += 1; }
+        if pos < buf.len() {
+            buf[pos] = b;
+            pos += 1;
+        }
     }
 
     // col number
     let n = fmt_usize(&mut tmp, col);
     for i in 0..n {
-        if pos < buf.len() { buf[pos] = tmp[i]; pos += 1; }
+        if pos < buf.len() {
+            buf[pos] = tmp[i];
+            pos += 1;
+        }
     }
 
     pos

@@ -19,7 +19,8 @@
 //!
 //! Backend selection is automatic via conditional compilation:
 //! - `target_os = "linux"` → KVM backend
-//! - `target_os = "macos"` → Hypervisor.framework backend
+//! - `target_os = "macos", target_arch = "x86_64"` → Hypervisor.framework backend
+//! - `target_os = "macos", target_arch = "aarch64"` → Apple Silicon Hypervisor.framework backend
 //!
 //! # macOS Critical Requirement
 //!
@@ -51,5 +52,11 @@ pub trait Backend {
 #[cfg(target_os = "linux")]
 pub mod kvm;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub mod hvf;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod hvf_aarch64;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub use hvf_aarch64 as hvf;

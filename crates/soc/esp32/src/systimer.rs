@@ -23,11 +23,7 @@ const SYSTIMER_BASE: usize = 0x6000_A000;
 #[cfg(feature = "h2")]
 const SYSTIMER_BASE: usize = 0x6002_3000;
 
-#[cfg(all(
-    not(feature = "c3"),
-    not(feature = "c6"),
-    not(feature = "h2"),
-))]
+#[cfg(all(not(feature = "c3"), not(feature = "c6"), not(feature = "h2"),))]
 const SYSTIMER_BASE: usize = 0x6002_3000;
 
 // ---------------------------------------------------------------------------
@@ -127,7 +123,10 @@ impl TickTimer for SysTimer {
 
             // Set comparator 0 period mode with the computed tick count.
             // Bit 30 = period mode enable.
-            mmio_write(SYSTIMER_BASE + TARGET0_CONF, (1 << 30) | (ticks & 0x03FF_FFFF));
+            mmio_write(
+                SYSTIMER_BASE + TARGET0_CONF,
+                (1 << 30) | (ticks & 0x03FF_FFFF),
+            );
 
             // Apply comparator 0 config by writing to COMP0_LOAD.
             mmio_write(SYSTIMER_BASE + COMP0_LOAD, 1);

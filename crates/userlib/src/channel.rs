@@ -15,10 +15,10 @@
 use crate::sys;
 
 const SYS_CHAN_CREATE: usize = 0x58;
-const SYS_CHAN_SEND: usize   = 0x59;
-const SYS_CHAN_RECV: usize   = 0x5A;
-const SYS_CHAN_CLOSE: usize  = 0x5B;
-const SYS_CHAN_POLL: usize   = 0x5C;
+const SYS_CHAN_SEND: usize = 0x59;
+const SYS_CHAN_RECV: usize = 0x5A;
+const SYS_CHAN_CLOSE: usize = 0x5B;
+const SYS_CHAN_POLL: usize = 0x5C;
 
 /// Create a new bounded channel.
 ///
@@ -26,7 +26,11 @@ const SYS_CHAN_POLL: usize   = 0x5C;
 #[inline]
 pub fn create() -> Option<usize> {
     let id = sys::syscall0(SYS_CHAN_CREATE);
-    if id == usize::MAX { None } else { Some(id) }
+    if id == usize::MAX {
+        None
+    } else {
+        Some(id)
+    }
 }
 
 /// Send four words on a channel. Blocks if the channel is full.
@@ -90,7 +94,10 @@ impl<T: Copy> Channel<T> {
     pub fn new() -> Option<Self> {
         // Compile-time check: T must fit in four words.
         const { assert!(core::mem::size_of::<T>() <= 4 * core::mem::size_of::<usize>()) };
-        create().map(|id| Channel { id, _marker: core::marker::PhantomData })
+        create().map(|id| Channel {
+            id,
+            _marker: core::marker::PhantomData,
+        })
     }
 
     /// Send a value. Blocks if the channel is full.

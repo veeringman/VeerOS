@@ -24,8 +24,7 @@ pub struct LoadedKernel {
 }
 
 pub fn load(path: &Path, guest: &GuestMem) -> Result<LoadedKernel> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("reading kernel ELF {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("reading kernel ELF {}", path.display()))?;
     load_bytes(&bytes, &path.display().to_string(), guest)
 }
 

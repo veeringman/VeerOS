@@ -30,8 +30,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::elf;
 use crate::config::{BootSource, VmConfig};
+use crate::elf;
 use crate::memory::GuestMem;
 use crate::termios_guard::RawMode;
 use crate::vm::{self, SHUTDOWN};
@@ -39,22 +39,22 @@ use crate::vm::{self, SHUTDOWN};
 // ── MMIO map ────────────────────────────────────────────────────────────
 
 const UART_BASE: u32 = 0x1000_0000;
-const UART_END:  u32 = 0x1000_0100;
+const UART_END: u32 = 0x1000_0100;
 const UART_RBR_THR: u32 = 0x00;
-const UART_IER:     u32 = 0x01;
+const UART_IER: u32 = 0x01;
 const UART_IIR_FCR: u32 = 0x02;
-const UART_LCR:     u32 = 0x03;
-const UART_MCR:     u32 = 0x04;
-const UART_LSR:     u32 = 0x05;
-const UART_LSR_DR:   u8 = 1 << 0;
+const UART_LCR: u32 = 0x03;
+const UART_MCR: u32 = 0x04;
+const UART_LSR: u32 = 0x05;
+const UART_LSR_DR: u8 = 1 << 0;
 const UART_LSR_THRE: u8 = 1 << 5;
 const UART_LSR_TEMT: u8 = 1 << 6;
 
 const CLINT_BASE: u32 = 0x0200_0000;
-const CLINT_END:  u32 = 0x0201_0000;
-const CLINT_MSIP:     u32 = 0x0000;
+const CLINT_END: u32 = 0x0201_0000;
+const CLINT_MSIP: u32 = 0x0000;
 const CLINT_MTIMECMP: u32 = 0x4000;
-const CLINT_MTIME:    u32 = 0xBFF8;
+const CLINT_MTIME: u32 = 0xBFF8;
 // CLINT clock presented to the guest.
 // The real ESP32-C6 / qemu-virt CLINT runs at 10 MHz, which makes
 // the guest's 1 ms scheduler tick fire every 1 ms real time — accurate
@@ -73,34 +73,34 @@ const CLINT_FREQ_HZ: u64 = 500_000;
 
 // Slot 0 = virtio-net.  Slots 1-7 return magic=0 → guest probe skips them.
 const VMNET_BASE: u32 = 0x1000_1000;
-const VMNET_END:  u32 = 0x1000_2000;
+const VMNET_END: u32 = 0x1000_2000;
 // All 8 probed slots together:
 const VMSLOT_END: u32 = 0x1000_9000;
 
 // Virtio-MMIO v2 register offsets
-const VM_MAGIC:            u32 = 0x000;
-const VM_VERSION:          u32 = 0x004;
-const VM_DEVICE_ID:        u32 = 0x008;
-const VM_VENDOR_ID:        u32 = 0x00C;
-const VM_DEVICE_FEATURES:  u32 = 0x010;
-const VM_DEVICE_FEAT_SEL:  u32 = 0x014;
-const VM_DRIVER_FEATURES:  u32 = 0x020;
-const VM_DRIVER_FEAT_SEL:  u32 = 0x024;
-const VM_QUEUE_SEL:        u32 = 0x030;
-const VM_QUEUE_NUM_MAX:    u32 = 0x034;
-const VM_QUEUE_NUM:        u32 = 0x038;
-const VM_QUEUE_READY:      u32 = 0x044;
-const VM_QUEUE_NOTIFY:     u32 = 0x050;
-const VM_INTR_STATUS:      u32 = 0x060;
-const VM_INTR_ACK:         u32 = 0x064;
-const VM_STATUS:           u32 = 0x070;
-const VM_QUEUE_DESC_LO:    u32 = 0x080;
-const VM_QUEUE_DESC_HI:    u32 = 0x084;
-const VM_QUEUE_AVAIL_LO:   u32 = 0x090;
-const VM_QUEUE_AVAIL_HI:   u32 = 0x094;
-const VM_QUEUE_USED_LO:    u32 = 0x0A0;
-const VM_QUEUE_USED_HI:    u32 = 0x0A4;
-const VM_CONFIG_BASE:      u32 = 0x100; // net: MAC at +0..+6
+const VM_MAGIC: u32 = 0x000;
+const VM_VERSION: u32 = 0x004;
+const VM_DEVICE_ID: u32 = 0x008;
+const VM_VENDOR_ID: u32 = 0x00C;
+const VM_DEVICE_FEATURES: u32 = 0x010;
+const VM_DEVICE_FEAT_SEL: u32 = 0x014;
+const VM_DRIVER_FEATURES: u32 = 0x020;
+const VM_DRIVER_FEAT_SEL: u32 = 0x024;
+const VM_QUEUE_SEL: u32 = 0x030;
+const VM_QUEUE_NUM_MAX: u32 = 0x034;
+const VM_QUEUE_NUM: u32 = 0x038;
+const VM_QUEUE_READY: u32 = 0x044;
+const VM_QUEUE_NOTIFY: u32 = 0x050;
+const VM_INTR_STATUS: u32 = 0x060;
+const VM_INTR_ACK: u32 = 0x064;
+const VM_STATUS: u32 = 0x070;
+const VM_QUEUE_DESC_LO: u32 = 0x080;
+const VM_QUEUE_DESC_HI: u32 = 0x084;
+const VM_QUEUE_AVAIL_LO: u32 = 0x090;
+const VM_QUEUE_AVAIL_HI: u32 = 0x094;
+const VM_QUEUE_USED_LO: u32 = 0x0A0;
+const VM_QUEUE_USED_HI: u32 = 0x0A4;
+const VM_CONFIG_BASE: u32 = 0x100; // net: MAC at +0..+6
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
 const VIRTIO_NET_F_MAC: u32 = 1 << 5;
@@ -111,27 +111,27 @@ const VQ_SIZE: u32 = 16; // must match guest QUEUE_SIZE=16
 
 // ── CSRs ────────────────────────────────────────────────────────────────
 
-const CSR_MSTATUS:  u16 = 0x300;
-const CSR_MISA:     u16 = 0x301;
-const CSR_MIE:      u16 = 0x304;
-const CSR_MTVEC:    u16 = 0x305;
+const CSR_MSTATUS: u16 = 0x300;
+const CSR_MISA: u16 = 0x301;
+const CSR_MIE: u16 = 0x304;
+const CSR_MTVEC: u16 = 0x305;
 const CSR_MSCRATCH: u16 = 0x340;
-const CSR_MEPC:     u16 = 0x341;
-const CSR_MCAUSE:   u16 = 0x342;
-const CSR_MTVAL:    u16 = 0x343;
-const CSR_MIP:      u16 = 0x344;
-const CSR_MHARTID:  u16 = 0xF14;
+const CSR_MEPC: u16 = 0x341;
+const CSR_MCAUSE: u16 = 0x342;
+const CSR_MTVAL: u16 = 0x343;
+const CSR_MIP: u16 = 0x344;
+const CSR_MHARTID: u16 = 0xF14;
 const CSR_MVENDORID: u16 = 0xF11;
-const CSR_MARCHID:  u16 = 0xF12;
-const CSR_MIMPID:   u16 = 0xF13;
-const CSR_CYCLE:    u16 = 0xC00;
-const CSR_TIME:     u16 = 0xC01;
-const CSR_INSTRET:  u16 = 0xC02;
-const CSR_CYCLEH:   u16 = 0xC80;
-const CSR_TIMEH:    u16 = 0xC81;
+const CSR_MARCHID: u16 = 0xF12;
+const CSR_MIMPID: u16 = 0xF13;
+const CSR_CYCLE: u16 = 0xC00;
+const CSR_TIME: u16 = 0xC01;
+const CSR_INSTRET: u16 = 0xC02;
+const CSR_CYCLEH: u16 = 0xC80;
+const CSR_TIMEH: u16 = 0xC81;
 const CSR_INSTRETH: u16 = 0xC82;
 
-const MSTATUS_MIE:  u32 = 1 << 3;
+const MSTATUS_MIE: u32 = 1 << 3;
 const MSTATUS_MPIE: u32 = 1 << 7;
 const MSTATUS_MPP_MASK: u32 = 0b11 << 11;
 
@@ -145,14 +145,14 @@ const IRQ_MTI: u32 = 7;
 const IRQ_MEI: u32 = 11;
 
 const EXC_INST_ADDR_MISALIGNED: u32 = 0;
-const EXC_INST_ACCESS_FAULT:    u32 = 1;
-const EXC_ILLEGAL_INST:         u32 = 2;
-const EXC_BREAKPOINT:           u32 = 3;
+const EXC_INST_ACCESS_FAULT: u32 = 1;
+const EXC_ILLEGAL_INST: u32 = 2;
+const EXC_BREAKPOINT: u32 = 3;
 const EXC_LOAD_ADDR_MISALIGNED: u32 = 4;
-const EXC_LOAD_ACCESS_FAULT:    u32 = 5;
-const EXC_STORE_ADDR_MISALIGNED:u32 = 6;
-const EXC_STORE_ACCESS_FAULT:   u32 = 7;
-const EXC_ECALL_M:              u32 = 11;
+const EXC_LOAD_ACCESS_FAULT: u32 = 5;
+const EXC_STORE_ADDR_MISALIGNED: u32 = 6;
+const EXC_STORE_ACCESS_FAULT: u32 = 7;
+const EXC_ECALL_M: u32 = 11;
 
 // ── CPU state ──────────────────────────────────────────────────────────
 
@@ -238,9 +238,9 @@ impl Clint {
 struct VirtQueue {
     num: u32,
     ready: bool,
-    desc_addr: u32,   // guest physical
-    avail_addr: u32,  // guest physical
-    used_addr: u32,   // guest physical
+    desc_addr: u32,  // guest physical
+    avail_addr: u32, // guest physical
+    used_addr: u32,  // guest physical
     last_avail_idx: u16,
 }
 
@@ -287,7 +287,9 @@ impl VirtioNetDev {
 impl Drop for VirtioNetDev {
     fn drop(&mut self) {
         if self.tap_fd >= 0 {
-            unsafe { libc::close(self.tap_fd); }
+            unsafe {
+                libc::close(self.tap_fd);
+            }
         }
     }
 }
@@ -296,19 +298,19 @@ impl Drop for VirtioNetDev {
 
 fn vmnet_read_u32(dev: &VirtioNetDev, off: u32) -> u32 {
     match off {
-        VM_MAGIC           => VIRTIO_MAGIC,
-        VM_VERSION         => 2,
-        VM_DEVICE_ID       => 1, // net
-        VM_VENDOR_ID       => 0x0000_FFFF,
+        VM_MAGIC => VIRTIO_MAGIC,
+        VM_VERSION => 2,
+        VM_DEVICE_ID => 1, // net
+        VM_VENDOR_ID => 0x0000_FFFF,
         VM_DEVICE_FEATURES => match dev.device_features_sel {
             0 => VIRTIO_NET_F_MAC,
             1 => VIRTIO_F_VERSION_1,
             _ => 0,
         },
-        VM_QUEUE_NUM_MAX  => VQ_SIZE,
-        VM_QUEUE_READY    => dev.queues[dev.queue_sel as usize & 1].ready as u32,
-        VM_INTR_STATUS    => dev.interrupt_status,
-        VM_STATUS         => dev.status,
+        VM_QUEUE_NUM_MAX => VQ_SIZE,
+        VM_QUEUE_READY => dev.queues[dev.queue_sel as usize & 1].ready as u32,
+        VM_INTR_STATUS => dev.interrupt_status,
+        VM_STATUS => dev.status,
         _ => 0,
     }
 }
@@ -327,31 +329,52 @@ fn vmnet_read_u8(dev: &VirtioNetDev, off: u32) -> u8 {
 fn vmnet_write(dev: &mut VirtioNetDev, guest: &Arc<GuestMem>, off: u32, val: u32) {
     let sel = (dev.queue_sel & 1) as usize;
     match off {
-        VM_DEVICE_FEAT_SEL => { dev.device_features_sel = val; }
-        VM_DRIVER_FEATURES => { dev.driver_features[dev.driver_features[1] as usize & 1] = val; }
+        VM_DEVICE_FEAT_SEL => {
+            dev.device_features_sel = val;
+        }
+        VM_DRIVER_FEATURES => {
+            dev.driver_features[dev.driver_features[1] as usize & 1] = val;
+        }
         // Note: We detect which word by a secondary sel register in a real device, but
         // the kernel writes DriverFeaturesSel then DriverFeatures in sequence, so we
         // can track the sel here:
-        VM_DRIVER_FEAT_SEL => { dev.driver_features[1] = val; } // reuse [1] as sel
-        VM_QUEUE_SEL       => { dev.queue_sel = val; }
-        VM_QUEUE_NUM       => { dev.queues[sel].num = val.min(VQ_SIZE); }
-        VM_QUEUE_READY     => {
+        VM_DRIVER_FEAT_SEL => {
+            dev.driver_features[1] = val;
+        } // reuse [1] as sel
+        VM_QUEUE_SEL => {
+            dev.queue_sel = val;
+        }
+        VM_QUEUE_NUM => {
+            dev.queues[sel].num = val.min(VQ_SIZE);
+        }
+        VM_QUEUE_READY => {
             dev.queues[sel].ready = val != 0;
         }
-        VM_QUEUE_DESC_LO   => { dev.queues[sel].desc_addr  = val; }
-        VM_QUEUE_DESC_HI   => { /* ignore high 32 bits — guest RAM is <4 GiB */ }
-        VM_QUEUE_AVAIL_LO  => { dev.queues[sel].avail_addr = val; }
-        VM_QUEUE_AVAIL_HI  => {}
-        VM_QUEUE_USED_LO   => { dev.queues[sel].used_addr  = val; }
-        VM_QUEUE_USED_HI   => {}
-        VM_QUEUE_NOTIFY    => {
+        VM_QUEUE_DESC_LO => {
+            dev.queues[sel].desc_addr = val;
+        }
+        VM_QUEUE_DESC_HI => { /* ignore high 32 bits — guest RAM is <4 GiB */ }
+        VM_QUEUE_AVAIL_LO => {
+            dev.queues[sel].avail_addr = val;
+        }
+        VM_QUEUE_AVAIL_HI => {}
+        VM_QUEUE_USED_LO => {
+            dev.queues[sel].used_addr = val;
+        }
+        VM_QUEUE_USED_HI => {}
+        VM_QUEUE_NOTIFY => {
             match val {
-                0 => { /* RX notification — guest posted new RX buffers; TAP thread tracks independently */ }
-                1 => { process_tx(dev, guest); }
+                0 => { /* RX notification — guest posted new RX buffers; TAP thread tracks independently */
+                }
+                1 => {
+                    process_tx(dev, guest);
+                }
                 _ => {}
             }
         }
-        VM_INTR_ACK => { dev.interrupt_status &= !val; }
+        VM_INTR_ACK => {
+            dev.interrupt_status &= !val;
+        }
         VM_STATUS => {
             if val == 0 {
                 // Reset
@@ -375,18 +398,25 @@ fn vmnet_write(dev: &mut VirtioNetDev, guest: &Arc<GuestMem>, off: u32, val: u32
 fn process_tx(dev: &mut VirtioNetDev, guest: &Arc<GuestMem>) {
     let tap_fd = dev.tap_fd;
     let q = &mut dev.queues[1]; // TX
-    if !q.ready || q.avail_addr == 0 { return; }
+    if !q.ready || q.avail_addr == 0 {
+        return;
+    }
 
     loop {
         let avail_idx = g_r16(guest, q.avail_addr.wrapping_add(2));
-        if q.last_avail_idx == avail_idx { break; }
+        if q.last_avail_idx == avail_idx {
+            break;
+        }
 
         let ring_slot = (q.last_avail_idx as u32 % q.num) as u32;
-        let desc_id = g_r16(guest, q.avail_addr.wrapping_add(4).wrapping_add(ring_slot * 2)) as usize;
+        let desc_id = g_r16(
+            guest,
+            q.avail_addr.wrapping_add(4).wrapping_add(ring_slot * 2),
+        ) as usize;
 
         // Read 16-byte split descriptor: addr(u64) | len(u32) | flags(u16) | next(u16)
         let d = q.desc_addr.wrapping_add(desc_id as u32 * 16);
-        let buf_addr = g_r32(guest, d) as u64;     // low 32 bits of addr
+        let buf_addr = g_r32(guest, d) as u64; // low 32 bits of addr
         let buf_len = g_r32(guest, d.wrapping_add(8)) as usize;
 
         // Strip 10-byte virtio-net header, send raw Ethernet frame.
@@ -403,8 +433,16 @@ fn process_tx(dev: &mut VirtioNetDev, guest: &Arc<GuestMem>) {
         // Write used ring entry.
         let used_idx = g_r16(guest, q.used_addr.wrapping_add(2));
         let used_slot = (used_idx as u32 % q.num) as u32;
-        g_w32(guest, q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8), desc_id as u32);
-        g_w32(guest, q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8 + 4), buf_len as u32);
+        g_w32(
+            guest,
+            q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8),
+            desc_id as u32,
+        );
+        g_w32(
+            guest,
+            q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8 + 4),
+            buf_len as u32,
+        );
         g_w16(guest, q.used_addr.wrapping_add(2), used_idx.wrapping_add(1));
 
         q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
@@ -414,10 +452,22 @@ fn process_tx(dev: &mut VirtioNetDev, guest: &Arc<GuestMem>) {
 
 // ── Direct guest memory read/write helpers (no MMIO dispatch) ──────────
 
-#[inline] fn g_r16(mem: &Arc<GuestMem>, gpa: u32) -> u16 { mem.read_u16(gpa as u64).unwrap_or(0) }
-#[inline] fn g_r32(mem: &Arc<GuestMem>, gpa: u32) -> u32 { mem.read_u32(gpa as u64).unwrap_or(0) }
-#[inline] fn g_w16(mem: &Arc<GuestMem>, gpa: u32, v: u16) { let _ = mem.write_u16(gpa as u64, v); }
-#[inline] fn g_w32(mem: &Arc<GuestMem>, gpa: u32, v: u32) { let _ = mem.write_u32(gpa as u64, v); }
+#[inline]
+fn g_r16(mem: &Arc<GuestMem>, gpa: u32) -> u16 {
+    mem.read_u16(gpa as u64).unwrap_or(0)
+}
+#[inline]
+fn g_r32(mem: &Arc<GuestMem>, gpa: u32) -> u32 {
+    mem.read_u32(gpa as u64).unwrap_or(0)
+}
+#[inline]
+fn g_w16(mem: &Arc<GuestMem>, gpa: u32, v: u16) {
+    let _ = mem.write_u16(gpa as u64, v);
+}
+#[inline]
+fn g_w32(mem: &Arc<GuestMem>, gpa: u32, v: u32) {
+    let _ = mem.write_u32(gpa as u64, v);
+}
 
 // ── Open TAP fd ────────────────────────────────────────────────────────
 
@@ -437,14 +487,24 @@ fn open_tap(ifname: &str) -> anyhow::Result<std::os::unix::io::RawFd> {
         bail!("open /dev/net/tun: {e}");
     }
     #[repr(C)]
-    struct IfReq { name: [u8; 16], flags: u16, _pad: [u8; 22] }
-    let mut req = IfReq { name: [0; 16], flags: (libc::IFF_TAP | libc::IFF_NO_PI) as u16, _pad: [0; 22] };
+    struct IfReq {
+        name: [u8; 16],
+        flags: u16,
+        _pad: [u8; 22],
+    }
+    let mut req = IfReq {
+        name: [0; 16],
+        flags: (libc::IFF_TAP | libc::IFF_NO_PI) as u16,
+        _pad: [0; 22],
+    };
     req.name[..ifname.len()].copy_from_slice(ifname.as_bytes());
     const TUNSETIFF: libc::c_ulong = 0x400454ca;
     let rc = unsafe { libc::ioctl(fd, TUNSETIFF, &mut req as *mut IfReq) };
     if rc < 0 {
         let e = std::io::Error::last_os_error();
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
         bail!("TUNSETIFF on '{ifname}': {e} (create it first: `ip tuntap add dev {ifname} mode tap user $USER && ip link set {ifname} up`)");
     }
     Ok(fd)
@@ -459,22 +519,38 @@ fn tap_rx_thread(
 ) {
     let mut frame_buf = vec![0u8; 1600];
     loop {
-        if SHUTDOWN.load(Ordering::SeqCst) { break; }
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            break;
+        }
 
         // poll with 100 ms timeout so we check SHUTDOWN periodically.
-        let mut pfd = libc::pollfd { fd: tap_fd, events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: tap_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let r = unsafe { libc::poll(&mut pfd, 1, 100) };
-        if r <= 0 { continue; }
+        if r <= 0 {
+            continue;
+        }
 
         let n = unsafe {
-            libc::read(tap_fd, frame_buf.as_mut_ptr() as *mut libc::c_void, frame_buf.len())
+            libc::read(
+                tap_fd,
+                frame_buf.as_mut_ptr() as *mut libc::c_void,
+                frame_buf.len(),
+            )
         };
-        if n <= 0 { break; }
+        if n <= 0 {
+            break;
+        }
         let n = n as usize;
 
         let mut dev = vnet.lock().unwrap();
         let q = &mut dev.queues[0]; // RX
-        if !q.ready || q.avail_addr == 0 { continue; }
+        if !q.ready || q.avail_addr == 0 {
+            continue;
+        }
 
         let avail_idx = g_r16(&guest, q.avail_addr.wrapping_add(2));
         if q.last_avail_idx == avail_idx {
@@ -483,7 +559,10 @@ fn tap_rx_thread(
         }
 
         let ring_slot = (q.last_avail_idx as u32 % q.num) as u32;
-        let desc_id = g_r16(&guest, q.avail_addr.wrapping_add(4).wrapping_add(ring_slot * 2)) as usize;
+        let desc_id = g_r16(
+            &guest,
+            q.avail_addr.wrapping_add(4).wrapping_add(ring_slot * 2),
+        ) as usize;
 
         let d = q.desc_addr.wrapping_add(desc_id as u32 * 16);
         let buf_addr = g_r32(&guest, d) as u32;
@@ -500,9 +579,21 @@ fn tap_rx_thread(
         // Update used ring.
         let used_idx = g_r16(&guest, q.used_addr.wrapping_add(2));
         let used_slot = (used_idx as u32 % q.num) as u32;
-        g_w32(&guest, q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8), desc_id as u32);
-        g_w32(&guest, q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8 + 4), total as u32);
-        g_w16(&guest, q.used_addr.wrapping_add(2), used_idx.wrapping_add(1));
+        g_w32(
+            &guest,
+            q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8),
+            desc_id as u32,
+        );
+        g_w32(
+            &guest,
+            q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8 + 4),
+            total as u32,
+        );
+        g_w16(
+            &guest,
+            q.used_addr.wrapping_add(2),
+            used_idx.wrapping_add(1),
+        );
 
         q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
         dev.interrupt_status |= 1;
@@ -550,8 +641,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         let fd = open_tap(ifname)?;
         eprintln!(
             "[veer-vm] rv32-soft: virtio-net tap={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            ifname,
-            cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5],
+            ifname, cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5],
         );
         fd
     } else {
@@ -633,7 +723,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     // With the 2 MHz CLINT, WFI already sleeps ~5 ms per tick, so this
     // throttle rarely fires; it's here to protect against pathological
     // spin-loops in guest code.
-    const BUDGET_NS:  u128 = 5_000_000; // 5 ms run window
+    const BUDGET_NS: u128 = 5_000_000; // 5 ms run window
     let throttle_us: u64 = cfg.cpu_throttle_ms.saturating_mul(1_000);
     let mut last_wfi_exit = Instant::now();
 
@@ -651,7 +741,9 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         }
 
         if cpu.wfi {
-            if SHUTDOWN.load(Ordering::SeqCst) { return Ok(()); }
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             // Sleep until the next timer deadline rather than a fixed 200 µs.
             // mtimecmp is in CLINT_FREQ_HZ ticks; convert to microseconds.
             let mtime_now = clint.mtime();
@@ -679,7 +771,9 @@ pub fn run(cfg: VmConfig) -> Result<()> {
             last_wfi_exit = Instant::now();
         }
 
-        match step(&mut cpu, &guest, GPA_BASE, mem_end, &rx_queue, &mut clint, &vnet) {
+        match step(
+            &mut cpu, &guest, GPA_BASE, mem_end, &rx_queue, &mut clint, &vnet,
+        ) {
             Ok(()) => {
                 cpu.retired = cpu.retired.wrapping_add(1);
             }
@@ -705,7 +799,9 @@ enum StepError {
 }
 
 impl From<anyhow::Error> for StepError {
-    fn from(e: anyhow::Error) -> Self { StepError::Fatal(e) }
+    fn from(e: anyhow::Error) -> Self {
+        StepError::Fatal(e)
+    }
 }
 
 fn step(
@@ -806,7 +902,10 @@ fn execute_32(
         0b1100111 => {
             // JALR
             if funct3 != 0 {
-                return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst });
+                return Err(StepError::Trap {
+                    cause: EXC_ILLEGAL_INST,
+                    tval: inst,
+                });
             }
             let imm = sext_i(inst);
             let target = cpu.reg(rs1).wrapping_add(imm as u32) & !1u32;
@@ -820,13 +919,18 @@ fn execute_32(
             let a = cpu.reg(rs1);
             let b = cpu.reg(rs2);
             let take = match funct3 {
-                0b000 => a == b,                 // BEQ
-                0b001 => a != b,                 // BNE
-                0b100 => (a as i32) < (b as i32),// BLT
-                0b101 => (a as i32) >= (b as i32),// BGE
-                0b110 => a < b,                  // BLTU
-                0b111 => a >= b,                 // BGEU
-                _ => return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst }),
+                0b000 => a == b,                   // BEQ
+                0b001 => a != b,                   // BNE
+                0b100 => (a as i32) < (b as i32),  // BLT
+                0b101 => (a as i32) >= (b as i32), // BGE
+                0b110 => a < b,                    // BLTU
+                0b111 => a >= b,                   // BGEU
+                _ => {
+                    return Err(StepError::Trap {
+                        cause: EXC_ILLEGAL_INST,
+                        tval: inst,
+                    })
+                }
             };
             if take {
                 let target = pc.wrapping_add(imm as u32);
@@ -844,12 +948,18 @@ fn execute_32(
             let imm = sext_i(inst);
             let addr = cpu.reg(rs1).wrapping_add(imm as u32);
             let v = match funct3 {
-                0b000 => load_u8(mem, gpa_base, mem_end, rx_queue, clint, vnet, addr)? as i8 as i32 as u32,
+                0b000 => load_u8(mem, gpa_base, mem_end, rx_queue, clint, vnet, addr)? as i8 as i32
+                    as u32,
                 0b001 => load_u16(mem, gpa_base, mem_end, addr)? as i16 as i32 as u32,
                 0b010 => load_u32(mem, gpa_base, mem_end, rx_queue, clint, vnet, addr)?,
                 0b100 => load_u8(mem, gpa_base, mem_end, rx_queue, clint, vnet, addr)? as u32,
                 0b101 => load_u16(mem, gpa_base, mem_end, addr)? as u32,
-                _ => return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst }),
+                _ => {
+                    return Err(StepError::Trap {
+                        cause: EXC_ILLEGAL_INST,
+                        tval: inst,
+                    })
+                }
             };
             cpu.set_reg(rd, v);
         }
@@ -862,7 +972,12 @@ fn execute_32(
                 0b000 => store_u8(mem, gpa_base, mem_end, clint, vnet, addr, val as u8)?,
                 0b001 => store_u16(mem, gpa_base, mem_end, addr, val as u16)?,
                 0b010 => store_u32(mem, gpa_base, mem_end, clint, vnet, addr, val)?,
-                _ => return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst }),
+                _ => {
+                    return Err(StepError::Trap {
+                        cause: EXC_ILLEGAL_INST,
+                        tval: inst,
+                    })
+                }
             }
         }
         0b0010011 => {
@@ -871,22 +986,42 @@ fn execute_32(
             let a = cpu.reg(rs1);
             let shamt = (inst >> 20) & 0x1F;
             let v = match funct3 {
-                0b000 => a.wrapping_add(imm as u32),             // ADDI
-                0b010 => if (a as i32) < imm { 1 } else { 0 },   // SLTI
-                0b011 => if a < (imm as u32) { 1 } else { 0 },   // SLTIU
-                0b100 => a ^ (imm as u32),                        // XORI
-                0b110 => a | (imm as u32),                        // ORI
-                0b111 => a & (imm as u32),                        // ANDI
+                0b000 => a.wrapping_add(imm as u32), // ADDI
+                0b010 => {
+                    if (a as i32) < imm {
+                        1
+                    } else {
+                        0
+                    }
+                } // SLTI
+                0b011 => {
+                    if a < (imm as u32) {
+                        1
+                    } else {
+                        0
+                    }
+                } // SLTIU
+                0b100 => a ^ (imm as u32),           // XORI
+                0b110 => a | (imm as u32),           // ORI
+                0b111 => a & (imm as u32),           // ANDI
                 0b001 => {
                     if funct7 != 0 {
-                        return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst });
+                        return Err(StepError::Trap {
+                            cause: EXC_ILLEGAL_INST,
+                            tval: inst,
+                        });
                     }
                     a << shamt
                 }
                 0b101 => match funct7 {
-                    0b0000000 => a >> shamt,                      // SRLI
-                    0b0100000 => ((a as i32) >> shamt) as u32,    // SRAI
-                    _ => return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst }),
+                    0b0000000 => a >> shamt,                   // SRLI
+                    0b0100000 => ((a as i32) >> shamt) as u32, // SRAI
+                    _ => {
+                        return Err(StepError::Trap {
+                            cause: EXC_ILLEGAL_INST,
+                            tval: inst,
+                        })
+                    }
                 },
                 _ => unreachable!(),
             };
@@ -897,34 +1032,50 @@ fn execute_32(
             let a = cpu.reg(rs1);
             let b = cpu.reg(rs2);
             let v = match (funct7, funct3) {
-                (0b0000000, 0b000) => a.wrapping_add(b),                 // ADD
-                (0b0100000, 0b000) => a.wrapping_sub(b),                 // SUB
-                (0b0000000, 0b001) => a << (b & 0x1F),                   // SLL
-                (0b0000000, 0b010) => if (a as i32) < (b as i32) { 1 } else { 0 }, // SLT
-                (0b0000000, 0b011) => if a < b { 1 } else { 0 },         // SLTU
-                (0b0000000, 0b100) => a ^ b,                             // XOR
-                (0b0000000, 0b101) => a >> (b & 0x1F),                   // SRL
+                (0b0000000, 0b000) => a.wrapping_add(b), // ADD
+                (0b0100000, 0b000) => a.wrapping_sub(b), // SUB
+                (0b0000000, 0b001) => a << (b & 0x1F),   // SLL
+                (0b0000000, 0b010) => {
+                    if (a as i32) < (b as i32) {
+                        1
+                    } else {
+                        0
+                    }
+                } // SLT
+                (0b0000000, 0b011) => {
+                    if a < b {
+                        1
+                    } else {
+                        0
+                    }
+                } // SLTU
+                (0b0000000, 0b100) => a ^ b,             // XOR
+                (0b0000000, 0b101) => a >> (b & 0x1F),   // SRL
                 (0b0100000, 0b101) => ((a as i32) >> (b & 0x1F) as i32) as u32, // SRA
-                (0b0000000, 0b110) => a | b,                             // OR
-                (0b0000000, 0b111) => a & b,                             // AND
+                (0b0000000, 0b110) => a | b,             // OR
+                (0b0000000, 0b111) => a & b,             // AND
                 // RV32M
-                (0b0000001, 0b000) => a.wrapping_mul(b),                 // MUL
-                (0b0000001, 0b001) => {                                  // MULH
+                (0b0000001, 0b000) => a.wrapping_mul(b), // MUL
+                (0b0000001, 0b001) => {
+                    // MULH
                     let aw = (a as i32) as i64;
                     let bw = (b as i32) as i64;
                     ((aw * bw) >> 32) as u32
                 }
-                (0b0000001, 0b010) => {                                  // MULHSU
+                (0b0000001, 0b010) => {
+                    // MULHSU
                     let aw = (a as i32) as i64;
                     let bw = b as u64 as i64;
                     ((aw * bw) >> 32) as u32
                 }
-                (0b0000001, 0b011) => {                                  // MULHU
+                (0b0000001, 0b011) => {
+                    // MULHU
                     let aw = a as u64;
                     let bw = b as u64;
                     ((aw * bw) >> 32) as u32
                 }
-                (0b0000001, 0b100) => {                                  // DIV
+                (0b0000001, 0b100) => {
+                    // DIV
                     if b == 0 {
                         u32::MAX
                     } else if a == 0x8000_0000 && b == 0xFFFF_FFFF {
@@ -933,10 +1084,16 @@ fn execute_32(
                         ((a as i32).wrapping_div(b as i32)) as u32
                     }
                 }
-                (0b0000001, 0b101) => {                                  // DIVU
-                    if b == 0 { u32::MAX } else { a / b }
+                (0b0000001, 0b101) => {
+                    // DIVU
+                    if b == 0 {
+                        u32::MAX
+                    } else {
+                        a / b
+                    }
                 }
-                (0b0000001, 0b110) => {                                  // REM
+                (0b0000001, 0b110) => {
+                    // REM
                     if b == 0 {
                         a
                     } else if a == 0x8000_0000 && b == 0xFFFF_FFFF {
@@ -945,10 +1102,20 @@ fn execute_32(
                         ((a as i32).wrapping_rem(b as i32)) as u32
                     }
                 }
-                (0b0000001, 0b111) => {                                  // REMU
-                    if b == 0 { a } else { a % b }
+                (0b0000001, 0b111) => {
+                    // REMU
+                    if b == 0 {
+                        a
+                    } else {
+                        a % b
+                    }
                 }
-                _ => return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst }),
+                _ => {
+                    return Err(StepError::Trap {
+                        cause: EXC_ILLEGAL_INST,
+                        tval: inst,
+                    })
+                }
             };
             cpu.set_reg(rd, v);
         }
@@ -961,20 +1128,24 @@ fn execute_32(
                 match inst {
                     0x0000_0073 => {
                         // ECALL
-                        return Err(StepError::Trap { cause: EXC_ECALL_M, tval: 0 });
+                        return Err(StepError::Trap {
+                            cause: EXC_ECALL_M,
+                            tval: 0,
+                        });
                     }
                     0x0010_0073 => {
                         // EBREAK
-                        return Err(StepError::Trap { cause: EXC_BREAKPOINT, tval: pc });
+                        return Err(StepError::Trap {
+                            cause: EXC_BREAKPOINT,
+                            tval: pc,
+                        });
                     }
                     0x3020_0073 => {
                         // MRET
                         cpu.pc = cpu.mepc;
                         let mpie = (cpu.mstatus >> 7) & 1;
                         // Restore MIE from MPIE, set MPIE=1, clear MPP.
-                        cpu.mstatus = (cpu.mstatus & !MSTATUS_MIE)
-                            | (mpie << 3)
-                            | MSTATUS_MPIE;
+                        cpu.mstatus = (cpu.mstatus & !MSTATUS_MIE) | (mpie << 3) | MSTATUS_MPIE;
                         cpu.mstatus &= !MSTATUS_MPP_MASK;
                         return Ok(());
                     }
@@ -984,7 +1155,10 @@ fn execute_32(
                         return Ok(());
                     }
                     _ => {
-                        return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst });
+                        return Err(StepError::Trap {
+                            cause: EXC_ILLEGAL_INST,
+                            tval: inst,
+                        });
                     }
                 }
             } else {
@@ -998,15 +1172,26 @@ fn execute_32(
                     tval: inst,
                 })?;
                 let new = match funct3 & 0b011 {
-                    0b001 => src,                                   // CSRRW(I)
-                    0b010 => old | src,                             // CSRRS(I)
-                    0b011 => old & !src,                            // CSRRC(I)
-                    _ => return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst }),
+                    0b001 => src,        // CSRRW(I)
+                    0b010 => old | src,  // CSRRS(I)
+                    0b011 => old & !src, // CSRRC(I)
+                    _ => {
+                        return Err(StepError::Trap {
+                            cause: EXC_ILLEGAL_INST,
+                            tval: inst,
+                        })
+                    }
                 };
                 // Writes only happen for CSRRW, or CSRRS/C with rs1!=x0 (imm!=0).
                 let do_write = match funct3 & 0b011 {
                     0b001 => true,
-                    _ => if is_imm { uimm != 0 } else { rs1 != 0 },
+                    _ => {
+                        if is_imm {
+                            uimm != 0
+                        } else {
+                            rs1 != 0
+                        }
+                    }
                 };
                 if do_write {
                     csr_write(cpu, clint, csr, new).ok_or(StepError::Trap {
@@ -1018,7 +1203,10 @@ fn execute_32(
             }
         }
         _ => {
-            return Err(StepError::Trap { cause: EXC_ILLEGAL_INST, tval: inst });
+            return Err(StepError::Trap {
+                cause: EXC_ILLEGAL_INST,
+                tval: inst,
+            });
         }
     }
     Ok(())
@@ -1056,8 +1244,10 @@ fn execute_c(
             let nzuimm = (((inst >> 7) & 0x30)       // [5:4]
                 | ((inst >> 1) & 0x3C0)              // [9:6]
                 | ((inst >> 4) & 0x04)               // [2]
-                | ((inst >> 2) & 0x08)) as u32;      // [3]
-            if nzuimm == 0 { return Err(illegal(inst)); }
+                | ((inst >> 2) & 0x08)) as u32; // [3]
+            if nzuimm == 0 {
+                return Err(illegal(inst));
+            }
             cpu.set_reg(rd, cpu.reg(2).wrapping_add(nzuimm));
         }
         (0b00, 0b010) => {
@@ -1066,7 +1256,7 @@ fn execute_c(
             let rd = rs2p(inst);
             let uimm = (((inst >> 7) & 0x38)         // [5:3]
                 | ((inst << 1) & 0x40)               // [6]
-                | ((inst >> 4) & 0x04)) as u32;      // [2]
+                | ((inst >> 4) & 0x04)) as u32; // [2]
             let addr = cpu.reg(rs1).wrapping_add(uimm);
             let v = load_u32(mem, gpa_base, mem_end, rx_queue, clint, vnet, addr)?;
             cpu.set_reg(rd, v);
@@ -1075,9 +1265,7 @@ fn execute_c(
             // C.SW M[rs1' + uimm] = rs2'
             let rs1 = rs1p(inst);
             let rs2 = rs2p(inst);
-            let uimm = (((inst >> 7) & 0x38)
-                | ((inst << 1) & 0x40)
-                | ((inst >> 4) & 0x04)) as u32;
+            let uimm = (((inst >> 7) & 0x38) | ((inst << 1) & 0x40) | ((inst >> 4) & 0x04)) as u32;
             let addr = cpu.reg(rs1).wrapping_add(uimm);
             store_u32(mem, gpa_base, mem_end, clint, vnet, addr, cpu.reg(rs2))?;
         }
@@ -1114,12 +1302,14 @@ fn execute_c(
                     | ((inst << 3) & 0x20)            // [5]
                     | ((inst << 1) & 0x40)            // [6]
                     | ((inst << 4) & 0x180)           // [8:7]
-                    | ((inst >> 3) & 0x200)) as u32;  // [9]
+                    | ((inst >> 3) & 0x200)) as u32; // [9]
                 let mut imm = imm;
                 if inst & (1 << 12) != 0 {
                     imm |= 0xFFFF_FC00;
                 }
-                if imm == 0 { return Err(illegal(inst)); }
+                if imm == 0 {
+                    return Err(illegal(inst));
+                }
                 cpu.set_reg(2, cpu.reg(2).wrapping_add(imm));
             } else if rd != 0 {
                 // C.LUI
@@ -1127,7 +1317,9 @@ fn execute_c(
                 if inst & (1 << 12) != 0 {
                     imm |= 0xFFFC_0000;
                 }
-                if imm == 0 { return Err(illegal(inst)); }
+                if imm == 0 {
+                    return Err(illegal(inst));
+                }
                 cpu.set_reg(rd, imm);
             } else {
                 return Err(illegal(inst));
@@ -1202,10 +1394,12 @@ fn execute_c(
         (0b10, 0b010) => {
             // C.LWSP rd = M[sp + uimm]
             let rd = ((inst >> 7) & 0x1F) as usize;
-            if rd == 0 { return Err(illegal(inst)); }
+            if rd == 0 {
+                return Err(illegal(inst));
+            }
             let uimm = (((inst >> 7) & 0x20)          // [5]
                 | ((inst >> 2) & 0x1C)                // [4:2]
-                | ((inst << 4) & 0xC0)) as u32;       // [7:6]
+                | ((inst << 4) & 0xC0)) as u32; // [7:6]
             let addr = cpu.reg(2).wrapping_add(uimm);
             let v = load_u32(mem, gpa_base, mem_end, rx_queue, clint, vnet, addr)?;
             cpu.set_reg(rd, v);
@@ -1226,7 +1420,10 @@ fn execute_c(
                 }
                 (true, 0, 0) => {
                     // C.EBREAK
-                    return Err(StepError::Trap { cause: EXC_BREAKPOINT, tval: pc });
+                    return Err(StepError::Trap {
+                        cause: EXC_BREAKPOINT,
+                        tval: pc,
+                    });
                 }
                 (true, r, 0) if r != 0 => {
                     // C.JALR
@@ -1246,7 +1443,7 @@ fn execute_c(
             // C.SWSP: M[sp + uimm] = rs2
             let rs2 = ((inst >> 2) & 0x1F) as usize;
             let uimm = (((inst >> 7) & 0x3C)          // [5:2]
-                | ((inst >> 1) & 0xC0)) as u32;       // [7:6]
+                | ((inst >> 1) & 0xC0)) as u32; // [7:6]
             let addr = cpu.reg(2).wrapping_add(uimm);
             store_u32(mem, gpa_base, mem_end, clint, vnet, addr, cpu.reg(rs2))?;
         }
@@ -1312,8 +1509,8 @@ fn c_imm_cj(inst: u16) -> i32 {
         | ((i >> 1) & 0x40)               // [6]  = bit7
         | ((i << 1) & 0x80)               // [7]  = bit6
         | ((i >> 2) & 0xE)                // [3:1]= bits5:3
-        | ((i << 3) & 0x20);              // [5]  = bit2
-    // sign-extend from bit 11
+        | ((i << 3) & 0x20); // [5]  = bit2
+                             // sign-extend from bit 11
     ((imm as i32) << 20) >> 20
 }
 
@@ -1324,7 +1521,7 @@ fn c_imm_cb(inst: u16) -> i32 {
         | ((i >> 7) & 0x18)               // [4:3]= bits11:10
         | ((i << 1) & 0xC0)               // [7:6]= bits6:5
         | ((i >> 2) & 0x6)                // [2:1]= bits4:3
-        | ((i << 3) & 0x20);              // [5]  = bit2
+        | ((i << 3) & 0x20); // [5]  = bit2
     ((imm as i32) << 23) >> 23
 }
 
@@ -1366,12 +1563,7 @@ fn load_u8(
     })
 }
 
-fn load_u16(
-    mem: &Arc<GuestMem>,
-    gpa_base: u32,
-    mem_end: u32,
-    addr: u32,
-) -> Result<u16, StepError> {
+fn load_u16(mem: &Arc<GuestMem>, gpa_base: u32, mem_end: u32, addr: u32) -> Result<u16, StepError> {
     if (addr & 1) != 0 {
         return Err(StepError::Trap {
             cause: EXC_LOAD_ADDR_MISALIGNED,
@@ -1444,7 +1636,12 @@ fn store_u8(
         return Ok(());
     }
     if addr >= VMNET_BASE && addr < VMNET_END {
-        vmnet_write(&mut vnet.lock().unwrap(), mem, addr - VMNET_BASE, val as u32);
+        vmnet_write(
+            &mut vnet.lock().unwrap(),
+            mem,
+            addr - VMNET_BASE,
+            val as u32,
+        );
         return Ok(());
     }
     if addr >= VMNET_END && addr < VMSLOT_END {
@@ -1481,10 +1678,11 @@ fn store_u16(
             tval: addr,
         });
     }
-    mem.write_u16(addr as u64, val).map_err(|_| StepError::Trap {
-        cause: EXC_STORE_ACCESS_FAULT,
-        tval: addr,
-    })
+    mem.write_u16(addr as u64, val)
+        .map_err(|_| StepError::Trap {
+            cause: EXC_STORE_ACCESS_FAULT,
+            tval: addr,
+        })
 }
 
 fn store_u32(
@@ -1523,10 +1721,11 @@ fn store_u32(
             tval: addr,
         });
     }
-    mem.write_u32(addr as u64, val).map_err(|_| StepError::Trap {
-        cause: EXC_STORE_ACCESS_FAULT,
-        tval: addr,
-    })
+    mem.write_u32(addr as u64, val)
+        .map_err(|_| StepError::Trap {
+            cause: EXC_STORE_ACCESS_FAULT,
+            tval: addr,
+        })
 }
 
 // ── MMIO devices ───────────────────────────────────────────────────────
@@ -1537,7 +1736,9 @@ fn uart_read(rx_queue: &Arc<Mutex<VecDeque<u8>>>, off: u32) -> u8 {
         UART_LSR => {
             let has = !rx_queue.lock().unwrap().is_empty();
             let mut v = UART_LSR_THRE | UART_LSR_TEMT;
-            if has { v |= UART_LSR_DR; }
+            if has {
+                v |= UART_LSR_DR;
+            }
             v
         }
         UART_IIR_FCR => 0x01, // no interrupt pending
@@ -1568,7 +1769,9 @@ fn clint_read(clint: &Clint, off: u32) -> u32 {
 
 fn clint_write(clint: &mut Clint, off: u32, val: u32) {
     match off {
-        CLINT_MSIP => { clint.msip = val & 1; }
+        CLINT_MSIP => {
+            clint.msip = val & 1;
+        }
         CLINT_MTIMECMP => {
             clint.mtimecmp = (clint.mtimecmp & !0xFFFF_FFFFu64) | (val as u64);
         }
@@ -1583,30 +1786,38 @@ fn clint_write(clint: &mut Clint, off: u32, val: u32) {
 
 fn csr_read(cpu: &Cpu, clint: &Clint, csr: u16) -> Option<u32> {
     Some(match csr {
-        CSR_MSTATUS  => cpu.mstatus,
-        CSR_MISA     => 0x4000_0000 // MXL=1 (32-bit)
+        CSR_MSTATUS => cpu.mstatus,
+        CSR_MISA => {
+            0x4000_0000 // MXL=1 (32-bit)
                        | (1 << 0)   // A? no → skip
                        | (1 << 8)   // I
                        | (1 << 12)  // M
-                       | (1 << 2),  // C
-        CSR_MIE      => cpu.mie,
-        CSR_MTVEC    => cpu.mtvec,
+                       | (1 << 2)
+        } // C
+        CSR_MIE => cpu.mie,
+        CSR_MTVEC => cpu.mtvec,
         CSR_MSCRATCH => cpu.mscratch,
-        CSR_MEPC     => cpu.mepc,
-        CSR_MCAUSE   => cpu.mcause,
-        CSR_MTVAL    => cpu.mtval,
+        CSR_MEPC => cpu.mepc,
+        CSR_MCAUSE => cpu.mcause,
+        CSR_MTVAL => cpu.mtval,
         CSR_MIP => {
             let mut v = 0u32;
-            if clint.timer_pending()   { v |= 1 << 7; }
-            if clint.msip != 0 || cpu.mip_software { v |= 1 << 3; }
-            if cpu.mip_external         { v |= 1 << 11; }
+            if clint.timer_pending() {
+                v |= 1 << 7;
+            }
+            if clint.msip != 0 || cpu.mip_software {
+                v |= 1 << 3;
+            }
+            if cpu.mip_external {
+                v |= 1 << 11;
+            }
             v
         }
-        CSR_MHARTID  => 0,
-        CSR_MVENDORID| CSR_MARCHID | CSR_MIMPID => 0,
+        CSR_MHARTID => 0,
+        CSR_MVENDORID | CSR_MARCHID | CSR_MIMPID => 0,
         CSR_CYCLE | CSR_INSTRET => cpu.retired as u32,
         CSR_CYCLEH | CSR_INSTRETH => (cpu.retired >> 32) as u32,
-        CSR_TIME  => clint.mtime() as u32,
+        CSR_TIME => clint.mtime() as u32,
         CSR_TIMEH => (clint.mtime() >> 32) as u32,
         // PMP and other unimplemented — treat as 0 to keep kernel init happy.
         0x3A0..=0x3EF => 0,
@@ -1616,14 +1827,28 @@ fn csr_read(cpu: &Cpu, clint: &Clint, csr: u16) -> Option<u32> {
 
 fn csr_write(cpu: &mut Cpu, _clint: &mut Clint, csr: u16, val: u32) -> Option<()> {
     match csr {
-        CSR_MSTATUS  => { cpu.mstatus = val; }
-        CSR_MISA     => { /* ignored */ }
-        CSR_MIE      => { cpu.mie = val; }
-        CSR_MTVEC    => { cpu.mtvec = val; }
-        CSR_MSCRATCH => { cpu.mscratch = val; }
-        CSR_MEPC     => { cpu.mepc = val & !1; }
-        CSR_MCAUSE   => { cpu.mcause = val; }
-        CSR_MTVAL    => { cpu.mtval = val; }
+        CSR_MSTATUS => {
+            cpu.mstatus = val;
+        }
+        CSR_MISA => { /* ignored */ }
+        CSR_MIE => {
+            cpu.mie = val;
+        }
+        CSR_MTVEC => {
+            cpu.mtvec = val;
+        }
+        CSR_MSCRATCH => {
+            cpu.mscratch = val;
+        }
+        CSR_MEPC => {
+            cpu.mepc = val & !1;
+        }
+        CSR_MCAUSE => {
+            cpu.mcause = val;
+        }
+        CSR_MTVAL => {
+            cpu.mtval = val;
+        }
         CSR_MIP => {
             cpu.mip_software = (val & (1 << 3)) != 0;
             cpu.mip_external = (val & (1 << 11)) != 0;
@@ -1695,7 +1920,9 @@ fn maybe_take_interrupt(cpu: &mut Cpu, clint: &Clint) -> bool {
 fn sensor_feed_thread(path: std::path::PathBuf, rx_queue: Arc<Mutex<VecDeque<u8>>>) {
     use std::io::Read;
     loop {
-        if SHUTDOWN.load(Ordering::SeqCst) { return; }
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            return;
+        }
 
         // Blocking open: waits until a writer opens the FIFO.
         let f = match std::fs::OpenOptions::new().read(true).open(&path) {
@@ -1725,11 +1952,7 @@ fn sensor_feed_thread(path: std::path::PathBuf, rx_queue: Arc<Mutex<VecDeque<u8>
     }
 }
 
-fn reader_thread(
-    rx_queue: Arc<Mutex<VecDeque<u8>>>,
-    main_tid: libc::pthread_t,
-    interactive: bool,
-) {
+fn reader_thread(rx_queue: Arc<Mutex<VecDeque<u8>>>, main_tid: libc::pthread_t, interactive: bool) {
     let stdin = std::io::stdin();
     let mut stdin = stdin.lock();
     let mut buf = [0u8; 1];

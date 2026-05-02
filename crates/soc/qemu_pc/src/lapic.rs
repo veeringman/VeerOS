@@ -72,7 +72,9 @@ unsafe fn lapic_read(offset: usize) -> u32 {
 #[inline]
 unsafe fn lapic_write(offset: usize, val: u32) {
     let ptr = (LAPIC_BASE + offset) as *mut u32;
-    unsafe { ptr.write_volatile(val); }
+    unsafe {
+        ptr.write_volatile(val);
+    }
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────
@@ -169,7 +171,9 @@ pub fn timer_current() -> u32 {
 
 /// Send End-Of-Interrupt to the Local APIC.
 pub fn eoi() {
-    unsafe { lapic_write(REG_EOI, 0); }
+    unsafe {
+        lapic_write(REG_EOI, 0);
+    }
 }
 
 /// Send an IPI (Inter-Processor Interrupt) to another core.

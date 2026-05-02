@@ -218,21 +218,32 @@ impl Heap {
 
     /// Print a summary suitable for the shell `sysinfo` / `meminfo` command.
     pub fn write_stats(&self, w: &mut dyn core::fmt::Write) {
-        let _ = core::fmt::write(w, format_args!(
-            "  small pool : {}/{} blocks ({} B each)\n",
-            self.small.used(), self.small.total(), SMALL_BLOCK,
-        ));
-        let _ = core::fmt::write(w, format_args!(
-            "  large pool : {}/{} blocks ({} B each)\n",
-            self.large.used(), self.large.total(), LARGE_BLOCK,
-        ));
-        let total_bytes = self.small.total() * SMALL_BLOCK
-            + self.large.total() * LARGE_BLOCK;
-        let used_bytes = self.small.used() * SMALL_BLOCK
-            + self.large.used() * LARGE_BLOCK;
-        let _ = core::fmt::write(w, format_args!(
-            "  total      : {} / {} bytes used\n",
-            used_bytes, total_bytes,
-        ));
+        let _ = core::fmt::write(
+            w,
+            format_args!(
+                "  small pool : {}/{} blocks ({} B each)\n",
+                self.small.used(),
+                self.small.total(),
+                SMALL_BLOCK,
+            ),
+        );
+        let _ = core::fmt::write(
+            w,
+            format_args!(
+                "  large pool : {}/{} blocks ({} B each)\n",
+                self.large.used(),
+                self.large.total(),
+                LARGE_BLOCK,
+            ),
+        );
+        let total_bytes = self.small.total() * SMALL_BLOCK + self.large.total() * LARGE_BLOCK;
+        let used_bytes = self.small.used() * SMALL_BLOCK + self.large.used() * LARGE_BLOCK;
+        let _ = core::fmt::write(
+            w,
+            format_args!(
+                "  total      : {} / {} bytes used\n",
+                used_bytes, total_bytes,
+            ),
+        );
     }
 }

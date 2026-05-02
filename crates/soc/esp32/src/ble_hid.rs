@@ -290,9 +290,11 @@ impl HogpManager {
         data: &[u8],
     ) -> InputEvent {
         // Find the device by connection handle.
-        let dev = match self.devices.iter().find(|d| {
-            d.active && d.conn_handle == conn_handle && d.state == HogpState::Active
-        }) {
+        let dev = match self
+            .devices
+            .iter()
+            .find(|d| d.active && d.conn_handle == conn_handle && d.state == HogpState::Active)
+        {
             Some(d) => d,
             None => return InputEvent::None,
         };
@@ -319,7 +321,10 @@ impl HogpManager {
             } else {
                 let buttons = data[0];
                 if buttons != 0 {
-                    InputEvent::MouseButton { button: 0, pressed: buttons & 1 != 0 }
+                    InputEvent::MouseButton {
+                        button: 0,
+                        pressed: buttons & 1 != 0,
+                    }
                 } else {
                     InputEvent::None
                 }
@@ -361,12 +366,24 @@ impl HogpManager {
             return;
         }
         for (i, dev) in self.devices.iter().enumerate() {
-            if !dev.active { continue; }
+            if !dev.active {
+                continue;
+            }
             let name = core::str::from_utf8(&dev.name[..dev.name_len]).unwrap_or("?");
-            let _ = writeln!(w, "  [{}] {} {:?} ({:?}) {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                i, name, dev.hid_type, dev.state,
-                dev.addr[0], dev.addr[1], dev.addr[2],
-                dev.addr[3], dev.addr[4], dev.addr[5]);
+            let _ = writeln!(
+                w,
+                "  [{}] {} {:?} ({:?}) {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                i,
+                name,
+                dev.hid_type,
+                dev.state,
+                dev.addr[0],
+                dev.addr[1],
+                dev.addr[2],
+                dev.addr[3],
+                dev.addr[4],
+                dev.addr[5]
+            );
         }
     }
 }

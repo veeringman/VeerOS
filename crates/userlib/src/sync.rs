@@ -13,8 +13,8 @@
 //! - [`Condvar`] — condition variable for signaling between tasks
 //! - [`Semaphore`] — counting semaphore for bounded concurrency
 
-use core::cell::UnsafeCell;
 use crate::sys;
+use core::cell::UnsafeCell;
 
 const SYS_FUTEX_WAIT: usize = 0x50;
 const SYS_FUTEX_WAKE: usize = 0x51;

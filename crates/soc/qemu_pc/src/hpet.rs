@@ -25,9 +25,13 @@ const REG_COUNTER: usize = 0x0F0;
 
 /// Timer N Configuration and Capabilities (64-bit, R/W).
 /// Timer N starts at 0x100 + 0x20*N.
-const fn timer_config(n: usize) -> usize { 0x100 + 0x20 * n }
+const fn timer_config(n: usize) -> usize {
+    0x100 + 0x20 * n
+}
 /// Timer N Comparator Value (64-bit, R/W).
-const fn timer_comparator(n: usize) -> usize { 0x108 + 0x20 * n }
+const fn timer_comparator(n: usize) -> usize {
+    0x108 + 0x20 * n
+}
 
 // ─── Configuration bits ─────────────────────────────────────────────────
 
@@ -60,7 +64,9 @@ unsafe fn hpet_read64(offset: usize) -> u64 {
 #[inline]
 unsafe fn hpet_write64(offset: usize, val: u64) {
     let ptr = (HPET_BASE + offset) as *mut u64;
-    unsafe { ptr.write_volatile(val); }
+    unsafe {
+        ptr.write_volatile(val);
+    }
 }
 
 // ─── Tick counter (for TickTimer trait) ──────────────────────────────────

@@ -1,24 +1,18 @@
 #![no_std]
 
-pub mod agent;
-pub mod alloc;
 #[cfg(feature = "accel")]
 pub mod accelerator;
+pub mod agent;
+pub mod alloc;
 pub mod audit;
 pub mod channel;
 pub mod dispatch;
 pub mod driver;
 pub mod fabric;
 #[cfg(feature = "dist-cluster")]
-pub mod fabric_proto;
-#[cfg(feature = "dist-cluster")]
-pub mod node_identity;
-#[cfg(feature = "dist-cluster")]
-pub mod zkp;
-#[cfg(feature = "dist-cluster")]
 pub mod fabric_crypto;
 #[cfg(feature = "dist-cluster")]
-pub mod mesh;
+pub mod fabric_proto;
 pub mod fat32;
 pub mod futex;
 pub mod hid;
@@ -28,6 +22,10 @@ pub mod intent_sched;
 pub mod ipc;
 pub mod klog;
 pub mod memory_engine;
+#[cfg(feature = "dist-cluster")]
+pub mod mesh;
+#[cfg(feature = "dist-cluster")]
+pub mod node_identity;
 pub mod poll;
 pub mod process;
 pub mod ramfs;
@@ -36,6 +34,8 @@ pub mod syscall;
 pub mod task;
 pub mod user;
 pub mod vfs;
+#[cfg(feature = "dist-cluster")]
+pub mod zkp;
 
 use arch::Platform;
 use bitflags::bitflags;

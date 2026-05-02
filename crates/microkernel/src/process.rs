@@ -18,10 +18,10 @@
 //! - **Capabilities can be dropped** (voluntarily, before exec), never added.
 //! - The dispatcher checks `process.caps` before executing privileged syscalls.
 
-use arch::{TaskMemRegion, MemPerms};
-use bitflags::bitflags;
-use crate::user::{UserId, GroupId, ROOT_UID, ROOT_GID};
+use crate::user::{GroupId, UserId, ROOT_GID, ROOT_UID};
 use crate::vfs::{FileDescriptor, MAX_FDS, ROOT_INODE};
+use arch::{MemPerms, TaskMemRegion};
+use bitflags::bitflags;
 
 /// Maximum number of simultaneous processes.
 pub const MAX_PROCESSES: usize = 8;
@@ -314,13 +314,7 @@ impl ProcessTable {
     /// Returns `true` if the process has no regions configured (legacy
     /// mode) or if the range falls within a region with the required
     /// permissions.
-    pub fn validate_ptr(
-        &self,
-        pid: usize,
-        addr: usize,
-        len: usize,
-        required: MemPerms,
-    ) -> bool {
+    pub fn validate_ptr(&self, pid: usize, addr: usize, len: usize, required: MemPerms) -> bool {
         if pid >= MAX_PROCESSES {
             return false;
         }

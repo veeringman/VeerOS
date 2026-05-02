@@ -70,8 +70,14 @@ impl VarStore {
     pub fn set(&mut self, name: &str, val: &str) {
         let nb = name.as_bytes();
         let vb = val.as_bytes();
-        if nb.is_empty() || nb.len() > MAX_NAME { return; }
-        let vlen = if vb.len() > MAX_VAL { MAX_VAL } else { vb.len() };
+        if nb.is_empty() || nb.len() > MAX_NAME {
+            return;
+        }
+        let vlen = if vb.len() > MAX_VAL {
+            MAX_VAL
+        } else {
+            vb.len()
+        };
 
         // Update existing
         for i in 0..self.count {
@@ -140,7 +146,9 @@ impl VarStore {
 // Implement Copy for Var to allow array shifts
 impl Copy for Var {}
 impl Clone for Var {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -174,14 +182,20 @@ pub fn expand_vars(input: &str, vars: &VarStore, out: &mut [u8]) -> usize {
 
         if bytes[i] == b'$' {
             i += 1;
-            if i >= bytes.len() { break; }
+            if i >= bytes.len() {
+                break;
+            }
 
             // $? — last exit status
             if bytes[i] == b'?' {
                 i += 1;
                 let mut tmp = [0u8; 4];
                 let n = fmt_u8(&mut tmp, vars.last_status);
-                let take = if n > out.len() - pos { out.len() - pos } else { n };
+                let take = if n > out.len() - pos {
+                    out.len() - pos
+                } else {
+                    n
+                };
                 out[pos..pos + take].copy_from_slice(&tmp[..take]);
                 pos += take;
                 continue;
@@ -198,7 +212,11 @@ pub fn expand_vars(input: &str, vars: &VarStore, out: &mut [u8]) -> usize {
                     if let Ok(name) = core::str::from_utf8(&bytes[start..i]) {
                         let val = vars.get(name);
                         let vb = val.as_bytes();
-                        let take = if vb.len() > out.len() - pos { out.len() - pos } else { vb.len() };
+                        let take = if vb.len() > out.len() - pos {
+                            out.len() - pos
+                        } else {
+                            vb.len()
+                        };
                         out[pos..pos + take].copy_from_slice(&vb[..take]);
                         pos += take;
                     }
@@ -209,16 +227,18 @@ pub fn expand_vars(input: &str, vars: &VarStore, out: &mut [u8]) -> usize {
 
             // $name — bare variable (alphanumeric + _)
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             if i > start {
                 if let Ok(name) = core::str::from_utf8(&bytes[start..i]) {
                     let val = vars.get(name);
                     let vb = val.as_bytes();
-                    let take = if vb.len() > out.len() - pos { out.len() - pos } else { vb.len() };
+                    let take = if vb.len() > out.len() - pos {
+                        out.len() - pos
+                    } else {
+                        vb.len()
+                    };
                     out[pos..pos + take].copy_from_slice(&vb[..take]);
                     pos += take;
                 }
@@ -267,17 +287,17 @@ pub fn eval_test(args: &str, file_exists: Option<fn(&str) -> bool>) -> bool {
 
 fn eval_expr(expr: &str, file_exists: Option<fn(&str) -> bool>) -> bool {
     let expr = expr.trim();
-    if expr.is_empty() { return false; }
+    if expr.is_empty() {
+        return false;
+    }
 
     // Handle -o (OR) — lowest precedence
     if let Some(pos) = find_operator(expr, " -o ") {
-        return eval_expr(&expr[..pos], file_exists)
-            || eval_expr(&expr[pos + 4..], file_exists);
+        return eval_expr(&expr[..pos], file_exists) || eval_expr(&expr[pos + 4..], file_exists);
     }
     // Handle -a (AND)
     if let Some(pos) = find_operator(expr, " -a ") {
-        return eval_expr(&expr[..pos], file_exists)
-            && eval_expr(&expr[pos + 4..], file_exists);
+        return eval_expr(&expr[..pos], file_exists) && eval_expr(&expr[pos + 4..], file_exists);
     }
     // Handle ! (NOT)
     if expr.starts_with("! ") {
@@ -301,7 +321,11 @@ fn eval_expr(expr: &str, file_exists: Option<fn(&str) -> bool>) -> bool {
                 "-z" => arg.is_empty(),
                 "-n" => !arg.is_empty(),
                 "-e" | "-f" | "-d" => {
-                    if let Some(f) = file_exists { f(arg) } else { false }
+                    if let Some(f) = file_exists {
+                        f(arg)
+                    } else {
+                        false
+                    }
                 }
                 _ => !op.is_empty(), // fallback: non-empty is true
             }
@@ -339,12 +363,19 @@ pub struct ScriptLine {
 
 impl ScriptLine {
     pub const fn empty() -> Self {
-        Self { data: [0u8; MAX_LINE], len: 0 }
+        Self {
+            data: [0u8; MAX_LINE],
+            len: 0,
+        }
     }
 
     pub fn set(&mut self, s: &str) {
         let b = s.as_bytes();
-        let take = if b.len() > MAX_LINE { MAX_LINE } else { b.len() };
+        let take = if b.len() > MAX_LINE {
+            MAX_LINE
+        } else {
+            b.len()
+        };
         self.data[..take].copy_from_slice(&b[..take]);
         self.len = take;
     }
@@ -453,13 +484,17 @@ impl ScriptCtx {
 
     /// Check if execution is currently active (not in a skipped branch).
     pub fn is_active(&self) -> bool {
-        if self.depth == 0 { return true; }
+        if self.depth == 0 {
+            return true;
+        }
         self.blocks[self.depth - 1].active
     }
 
     /// Push a new block level.
     pub fn push_block(&mut self, kind: BlockKind) -> bool {
-        if self.depth >= MAX_NEST { return false; }
+        if self.depth >= MAX_NEST {
+            return false;
+        }
         self.blocks[self.depth] = BlockState::empty();
         self.blocks[self.depth].kind = kind;
         // Inherit parent active state
@@ -470,7 +505,9 @@ impl ScriptCtx {
 
     /// Pop a block level.
     pub fn pop_block(&mut self) -> Option<BlockKind> {
-        if self.depth == 0 { return None; }
+        if self.depth == 0 {
+            return None;
+        }
         self.depth -= 1;
         Some(self.blocks[self.depth].kind)
     }
@@ -558,8 +595,20 @@ pub fn eval_arith(expr: &str) -> i32 {
                     let r = eval_arith(right);
                     return match bytes[idx] {
                         b'*' => eval_arith(left).wrapping_mul(r),
-                        b'/' => if r != 0 { eval_arith(left) / r } else { 0 },
-                        b'%' => if r != 0 { eval_arith(left) % r } else { 0 },
+                        b'/' => {
+                            if r != 0 {
+                                eval_arith(left) / r
+                            } else {
+                                0
+                            }
+                        }
+                        b'%' => {
+                            if r != 0 {
+                                eval_arith(left) % r
+                            } else {
+                                0
+                            }
+                        }
                         _ => 0,
                     };
                 }
@@ -600,14 +649,17 @@ fn fmt_u8(buf: &mut [u8; 4], v: u8) -> usize {
 
 fn parse_i32(s: &str) -> i32 {
     let s = s.trim();
-    if s.is_empty() { return 0; }
+    if s.is_empty() {
+        return 0;
+    }
     let (neg, s) = if s.as_bytes()[0] == b'-' {
         (true, &s[1..])
     } else {
         (false, s)
     };
     // Handle 0x prefix for hex
-    let (radix, s) = if s.len() > 2 && s.as_bytes()[0] == b'0'
+    let (radix, s) = if s.len() > 2
+        && s.as_bytes()[0] == b'0'
         && (s.as_bytes()[1] == b'x' || s.as_bytes()[1] == b'X')
     {
         (16, &s[2..])
@@ -624,7 +676,11 @@ fn parse_i32(s: &str) -> i32 {
         };
         result = result.wrapping_mul(radix).wrapping_add(digit);
     }
-    if neg { -result } else { result }
+    if neg {
+        -result
+    } else {
+        result
+    }
 }
 
 /// Format i32 to buffer, return slice.
@@ -667,19 +723,29 @@ fn split_words<'a>(s: &'a str, out: &mut [(&'a str, usize)]) -> usize {
     let bytes = s.as_bytes();
     while i < bytes.len() && count < out.len() {
         // Skip whitespace
-        while i < bytes.len() && bytes[i] == b' ' { i += 1; }
-        if i >= bytes.len() { break; }
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
         let start = i;
         // Handle quoted strings
         if bytes[i] == b'"' || bytes[i] == b'\'' {
             let quote = bytes[i];
             i += 1;
             let content_start = i;
-            while i < bytes.len() && bytes[i] != quote { i += 1; }
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
             out[count] = (&s[content_start..i], i - content_start);
-            if i < bytes.len() { i += 1; } // skip closing quote
+            if i < bytes.len() {
+                i += 1;
+            } // skip closing quote
         } else {
-            while i < bytes.len() && bytes[i] != b' ' { i += 1; }
+            while i < bytes.len() && bytes[i] != b' ' {
+                i += 1;
+            }
             out[count] = (&s[start..i], i - start);
         }
         count += 1;
@@ -688,7 +754,11 @@ fn split_words<'a>(s: &'a str, out: &mut [(&'a str, usize)]) -> usize {
 }
 
 fn word_at<'a>(_s: &'a str, words: &[(&'a str, usize)], idx: usize) -> &'a str {
-    if idx < words.len() { words[idx].0 } else { "" }
+    if idx < words.len() {
+        words[idx].0
+    } else {
+        ""
+    }
 }
 
 /// Get the Nth word from a whitespace-separated string.
@@ -697,10 +767,16 @@ pub fn get_word(s: &str, n: usize) -> &str {
     let mut i = 0;
     let bytes = s.as_bytes();
     while i < bytes.len() {
-        while i < bytes.len() && bytes[i] == b' ' { i += 1; }
-        if i >= bytes.len() { break; }
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
         let start = i;
-        while i < bytes.len() && bytes[i] != b' ' { i += 1; }
+        while i < bytes.len() && bytes[i] != b' ' {
+            i += 1;
+        }
         if count == n {
             return &s[start..i];
         }
@@ -730,10 +806,18 @@ pub fn words_from(s: &str, n: usize) -> &str {
     let mut i = 0;
     let bytes = s.as_bytes();
     while i < bytes.len() {
-        while i < bytes.len() && bytes[i] == b' ' { i += 1; }
-        if i >= bytes.len() { break; }
-        if count == n { return &s[i..]; }
-        while i < bytes.len() && bytes[i] != b' ' { i += 1; }
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if count == n {
+            return &s[i..];
+        }
+        while i < bytes.len() && bytes[i] != b' ' {
+            i += 1;
+        }
         count += 1;
     }
     ""

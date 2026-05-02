@@ -25,7 +25,7 @@
 //! shell layer and translates free-form text into `IntentDescriptor`
 //! before calling `SYS_INTENT_SUBMIT`.
 
-use crate::agent::{AgentTable, AgentState, Goal, GoalPriority, MAX_AGENTS};
+use crate::agent::{AgentState, AgentTable, Goal, GoalPriority, MAX_AGENTS};
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
@@ -52,21 +52,21 @@ pub const MAX_INTENT_CONSTRAINTS: usize = 4;
 #[repr(u8)]
 pub enum IntentClass {
     /// Execute a computation (transform data, run inference, etc.).
-    Compute     = 0,
+    Compute = 0,
     /// Deploy or provision a service / workload.
-    Deploy      = 1,
+    Deploy = 1,
     /// Monitor a system, metric, or condition.
-    Monitor     = 2,
+    Monitor = 2,
     /// Communicate with an external system or user.
     Communicate = 3,
     /// Store, retrieve, or transform data.
-    Data        = 4,
+    Data = 4,
     /// Manage system configuration or resources.
-    Admin       = 5,
+    Admin = 5,
     /// Composite: a pipeline of multiple intent classes.
-    Pipeline    = 6,
+    Pipeline = 6,
     /// User-defined / extensible intent class.
-    Custom      = 255,
+    Custom = 255,
 }
 
 /// Constraint on intent execution.
@@ -74,17 +74,17 @@ pub enum IntentClass {
 #[repr(u8)]
 pub enum ConstraintKind {
     /// Maximum latency in milliseconds.
-    MaxLatencyMs    = 0,
+    MaxLatencyMs = 0,
     /// Must execute on a specific node class.
-    NodeAffinity    = 1,
+    NodeAffinity = 1,
     /// Minimum reliability (0–100 percent).
-    MinReliability  = 2,
+    MinReliability = 2,
     /// Maximum resource cost (abstract units).
-    MaxCost         = 3,
+    MaxCost = 3,
     /// Geographic locality requirement.
-    Locality        = 4,
+    Locality = 4,
     /// Security clearance level required.
-    SecurityLevel   = 5,
+    SecurityLevel = 5,
 }
 
 /// A single constraint attached to an intent.
@@ -96,7 +96,10 @@ pub struct IntentConstraint {
 
 impl IntentConstraint {
     pub const fn empty() -> Self {
-        Self { kind: ConstraintKind::MaxLatencyMs, value: 0 }
+        Self {
+            kind: ConstraintKind::MaxLatencyMs,
+            value: 0,
+        }
     }
 }
 
@@ -107,19 +110,19 @@ impl IntentConstraint {
 #[repr(u8)]
 pub enum IntentStatus {
     /// Slot is unused.
-    Free        = 0,
+    Free = 0,
     /// Intent received, awaiting planning.
-    Pending     = 1,
+    Pending = 1,
     /// Plan generated, agents being spawned.
-    Planning    = 2,
+    Planning = 2,
     /// Agents executing the plan.
-    Active      = 3,
+    Active = 3,
     /// All plan steps completed successfully.
-    Fulfilled   = 4,
+    Fulfilled = 4,
     /// Intent failed after exhausting retries.
-    Failed      = 5,
+    Failed = 5,
     /// Intent was cancelled by the submitter.
-    Cancelled   = 6,
+    Cancelled = 6,
 }
 
 /// Structured intent descriptor — the kernel-level representation of
@@ -178,9 +181,9 @@ pub enum StepRelation {
     /// No dependency (can execute immediately).
     Independent = 0,
     /// Must wait for the referenced step to complete.
-    DependsOn   = 1,
+    DependsOn = 1,
     /// Must execute concurrently with the referenced step.
-    Parallel    = 2,
+    Parallel = 2,
 }
 
 /// One step in an execution plan.
@@ -232,7 +235,12 @@ impl Plan {
     }
 
     /// Add a step to the plan.
-    pub fn add_step(&mut self, goal: Goal, relation: StepRelation, depends_on: usize) -> Option<usize> {
+    pub fn add_step(
+        &mut self,
+        goal: Goal,
+        relation: StepRelation,
+        depends_on: usize,
+    ) -> Option<usize> {
         if self.step_count >= MAX_PLAN_STEPS {
             return None;
         }
@@ -315,7 +323,9 @@ impl IntentEngine {
             if slot.status == IntentStatus::Free {
                 let id = self.next_id;
                 self.next_id = self.next_id.wrapping_add(1);
-                if self.next_id == 0 { self.next_id = 1; }
+                if self.next_id == 0 {
+                    self.next_id = 1;
+                }
 
                 let copy_len = desc.len().min(MAX_INTENT_DESC_LEN);
                 slot.id = id;
@@ -378,16 +388,20 @@ impl IntentEngine {
             }
             IntentClass::Deploy => {
                 // Three-phase: validate → provision → verify.
-                let s0 = plan.add_step(
-                    Goal::from_bytes(b"validate deployment config", GoalPriority::Elevated),
-                    StepRelation::Independent,
-                    0,
-                ).unwrap_or(0);
-                let s1 = plan.add_step(
-                    Goal::from_bytes(b"provision resources", intent.priority),
-                    StepRelation::DependsOn,
-                    s0,
-                ).unwrap_or(0);
+                let s0 = plan
+                    .add_step(
+                        Goal::from_bytes(b"validate deployment config", GoalPriority::Elevated),
+                        StepRelation::Independent,
+                        0,
+                    )
+                    .unwrap_or(0);
+                let s1 = plan
+                    .add_step(
+                        Goal::from_bytes(b"provision resources", intent.priority),
+                        StepRelation::DependsOn,
+                        s0,
+                    )
+                    .unwrap_or(0);
                 plan.add_step(
                     Goal::from_bytes(b"verify deployment health", GoalPriority::Critical),
                     StepRelation::DependsOn,
@@ -413,11 +427,13 @@ impl IntentEngine {
             }
             IntentClass::Data => {
                 // Two-phase: acquire → transform.
-                let s0 = plan.add_step(
-                    Goal::from_bytes(b"acquire data", intent.priority),
-                    StepRelation::Independent,
-                    0,
-                ).unwrap_or(0);
+                let s0 = plan
+                    .add_step(
+                        Goal::from_bytes(b"acquire data", intent.priority),
+                        StepRelation::Independent,
+                        0,
+                    )
+                    .unwrap_or(0);
                 plan.add_step(
                     Goal::from_bytes(b"transform data", intent.priority),
                     StepRelation::DependsOn,
@@ -492,21 +508,30 @@ impl IntentEngine {
 
     /// Count active (non-Free) intents.
     pub fn active_count(&self) -> usize {
-        self.intents.iter().filter(|d| d.status != IntentStatus::Free).count()
+        self.intents
+            .iter()
+            .filter(|d| d.status != IntentStatus::Free)
+            .count()
     }
 
     // ── Internal helpers ─────────────────────────────────────────────
 
     fn find(&self, intent_id: u16) -> Option<&IntentDescriptor> {
-        self.intents.iter().find(|d| d.id == intent_id && d.status != IntentStatus::Free)
+        self.intents
+            .iter()
+            .find(|d| d.id == intent_id && d.status != IntentStatus::Free)
     }
 
     fn find_mut(&mut self, intent_id: u16) -> Option<&mut IntentDescriptor> {
-        self.intents.iter_mut().find(|d| d.id == intent_id && d.status != IntentStatus::Free)
+        self.intents
+            .iter_mut()
+            .find(|d| d.id == intent_id && d.status != IntentStatus::Free)
     }
 
     fn find_index(&self, intent_id: u16) -> Option<usize> {
-        self.intents.iter().position(|d| d.id == intent_id && d.status != IntentStatus::Free)
+        self.intents
+            .iter()
+            .position(|d| d.id == intent_id && d.status != IntentStatus::Free)
     }
 
     /// Get the description bytes for an intent (helper for decompose).

@@ -14,18 +14,14 @@
 #![no_std]
 #![no_main]
 
-mod trap;
 #[cfg(feature = "samples")]
 mod samples;
+mod trap;
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 
-use arch::{Console, SavedContext, TickTimer, Platform};
-use soc_raspi5::{system_timer, Raspi5};
-use soc_raspi5::gic::Gic400;
-use soc_raspi5::fbcon::FbConsole;
-use microkernel::Kernel;
+use arch::{Console, Platform, SavedContext, TickTimer};
 use microkernel::alloc::Heap;
 use microkernel::channel::Channels;
 use microkernel::driver::{DriverCaps, DriverRegistry, MemRegion};
@@ -36,17 +32,21 @@ use microkernel::socket::SocketTable;
 use microkernel::task::Scheduler;
 #[cfg(feature = "shell")]
 use microkernel::task::TaskState;
+use microkernel::user::UserTable;
+use microkernel::Kernel;
 #[cfg(feature = "shell")]
 use shell::{Shell, ShellEnv};
-use microkernel::user::UserTable;
+use soc_raspi5::fbcon::FbConsole;
+use soc_raspi5::gic::Gic400;
+use soc_raspi5::{system_timer, Raspi5};
 
 use panic_halt as _;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const TICK_PERIOD_US: u32 = 1_000; // 1 ms
-// ═══════════════════════════════════════════════════════════════════════════
-// Static kernel state (single-core, interrupts disabled during access)
-// ═══════════════════════════════════════════════════════════════════════════
+                                   // ═══════════════════════════════════════════════════════════════════════════
+                                   // Static kernel state (single-core, interrupts disabled during access)
+                                   // ═══════════════════════════════════════════════════════════════════════════
 
 struct SchedulerCell(UnsafeCell<Scheduler>);
 unsafe impl Sync for SchedulerCell {}
@@ -116,9 +116,12 @@ pub(crate) static RAMFS: RamFsCell = RamFsCell(UnsafeCell::new(RamFs::new()));
 use microkernel::fat32::Fat32;
 pub(crate) struct Fat32Cell(pub UnsafeCell<[Fat32; microkernel::fat32::MAX_FAT32]>);
 unsafe impl Sync for Fat32Cell {}
-pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(
-    [Fat32::new(), Fat32::new(), Fat32::new(), Fat32::new()]
-));
+pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new([
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+]));
 
 // Mount table
 use microkernel::vfs::MountTable;
@@ -162,10 +165,10 @@ pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()))
 
 // AI-Native Execution subsystems
 use microkernel::agent::AgentTable;
-use microkernel::intent::IntentEngine;
-use microkernel::memory_engine::MemoryEngine;
 use microkernel::fabric::ExecutionFabric;
+use microkernel::intent::IntentEngine;
 use microkernel::intent_sched::IntentScheduler;
+use microkernel::memory_engine::MemoryEngine;
 
 pub(crate) struct AgentCell(pub UnsafeCell<AgentTable>);
 unsafe impl Sync for AgentCell {}
@@ -177,7 +180,8 @@ pub(crate) static INTENTS: IntentCell = IntentCell(UnsafeCell::new(IntentEngine:
 
 pub(crate) struct MemoryEngineCell(pub UnsafeCell<MemoryEngine>);
 unsafe impl Sync for MemoryEngineCell {}
-pub(crate) static MEMORY_ENGINE: MemoryEngineCell = MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
+pub(crate) static MEMORY_ENGINE: MemoryEngineCell =
+    MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
 
 pub(crate) struct FabricCell(pub UnsafeCell<ExecutionFabric>);
 unsafe impl Sync for FabricCell {}
@@ -185,12 +189,14 @@ pub(crate) static FABRIC: FabricCell = FabricCell(UnsafeCell::new(ExecutionFabri
 
 pub(crate) struct IntentSchedCell(pub UnsafeCell<IntentScheduler>);
 unsafe impl Sync for IntentSchedCell {}
-pub(crate) static INTENT_SCHED: IntentSchedCell = IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
+pub(crate) static INTENT_SCHED: IntentSchedCell =
+    IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
 
 // Timer (stored for trap handler access)
 struct TimerCell(UnsafeCell<soc_raspi5::timer::ArmGenericTimer>);
 unsafe impl Sync for TimerCell {}
-pub(crate) static TIMER: TimerCell = TimerCell(UnsafeCell::new(soc_raspi5::timer::ArmGenericTimer::new()));
+pub(crate) static TIMER: TimerCell =
+    TimerCell(UnsafeCell::new(soc_raspi5::timer::ArmGenericTimer::new()));
 
 // GIC (stored for trap handler access)
 struct GicCell(UnsafeCell<Gic400>);
@@ -471,7 +477,9 @@ pub extern "C" fn _rust_start() -> ! {
         if let Some(info) = fb::init_framebuffer(1920, 1080, 32) {
             let fbcon = FbConsole::new(info);
             fbcon.clear_screen();
-            unsafe { *FBCON.0.get() = fbcon; }
+            unsafe {
+                *FBCON.0.get() = fbcon;
+            }
         }
     }
 
@@ -506,19 +514,31 @@ pub extern "C" fn _rust_start() -> ! {
 
         // Logo is 48px tall = 3 rows at CHAR_H=16. Rows 0-2 are
         // within the logo zone; use set_cursor to skip past it.
-        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 0); }
+        unsafe {
+            soc_raspi5::fbcon::set_cursor(text_col, 0);
+        }
         let _ = writeln!(con, "========================================");
-        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 1); }
+        unsafe {
+            soc_raspi5::fbcon::set_cursor(text_col, 1);
+        }
         let _ = writeln!(con, "  VeerOS v{VERSION}");
-        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 2); }
+        unsafe {
+            soc_raspi5::fbcon::set_cursor(text_col, 2);
+        }
         let _ = writeln!(con, "  Platform : Raspberry Pi 5 (BCM2712)");
         // Row 3: bottom edge of logo, still safe beside it
-        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 3); }
+        unsafe {
+            soc_raspi5::fbcon::set_cursor(text_col, 3);
+        }
         let _ = writeln!(con, "  Arch     : AArch64 (Cortex-A76)");
-        unsafe { soc_raspi5::fbcon::set_cursor(text_col, 4); }
+        unsafe {
+            soc_raspi5::fbcon::set_cursor(text_col, 4);
+        }
         let _ = writeln!(con, "========================================");
         // Move cursor to full-width area below the header
-        unsafe { soc_raspi5::fbcon::set_cursor(0, 5); }
+        unsafe {
+            soc_raspi5::fbcon::set_cursor(0, 5);
+        }
         let _ = writeln!(con, "");
     }
 
@@ -529,7 +549,9 @@ pub extern "C" fn _rust_start() -> ! {
     #[cfg(target_arch = "aarch64")]
     {
         let el: u64;
-        unsafe { core::arch::asm!("mrs {}, CurrentEL", out(reg) el, options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("mrs {}, CurrentEL", out(reg) el, options(nomem, nostack));
+        }
         let _ = writeln!(con, "[boot] CurrentEL = {}", (el >> 2) & 3);
     }
 
@@ -565,12 +587,17 @@ pub extern "C" fn _rust_start() -> ! {
         let reg = &mut *DRIVERS.0.get();
 
         // PL011 UART (via RP1)
-        let _uart = reg.register("uart0", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
+        let _uart = reg
+            .register(
+                "uart0",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
         reg.grant_mmio(
             _uart,
             MemRegion::new(
@@ -581,32 +608,41 @@ pub extern "C" fn _rust_start() -> ! {
         .ok();
 
         // ARM Generic Timer (no MMIO — system registers)
-        let _timer = reg.register("arm-timer", DriverCaps {
-            mmio_regions: 0,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
+        let _timer = reg
+            .register(
+                "arm-timer",
+                DriverCaps {
+                    mmio_regions: 0,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
 
         // GIC-400
-        let _gic = reg.register("gic-400", DriverCaps {
-            mmio_regions: 2,
-            uses_interrupts: false,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
-        reg.grant_mmio(
-            _gic,
-            MemRegion::new(soc_raspi5::mem::GIC_DIST_BASE, 0x1000),
-        )
-        .ok();
+        let _gic = reg
+            .register(
+                "gic-400",
+                DriverCaps {
+                    mmio_regions: 2,
+                    uses_interrupts: false,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
+        reg.grant_mmio(_gic, MemRegion::new(soc_raspi5::mem::GIC_DIST_BASE, 0x1000))
+            .ok();
     }
     let _ = writeln!(con, "[boot] driver registry: 3 drivers registered");
 
     // ── GIC initialisation ───────────────────────────────────
     let gic = Gic400::new();
     gic.init();
-    unsafe { *GIC.0.get() = gic; }
+    unsafe {
+        *GIC.0.get() = gic;
+    }
     let _ = writeln!(con, "[boot] GIC-400 initialised (PPI #30 enabled)");
 
     // ── ARM generic timer ────────────────────────────────────
@@ -615,7 +651,9 @@ pub extern "C" fn _rust_start() -> ! {
     let freq = timer.frequency();
     let _ = writeln!(con, "[boot] timer freq = {} Hz", freq);
     timer.configure_tick(TICK_PERIOD_US);
-    unsafe { *TIMER.0.get() = timer; }
+    unsafe {
+        *TIMER.0.get() = timer;
+    }
     let _ = writeln!(con, "[boot] ARM timer tick @ {} us", TICK_PERIOD_US);
 
     // NOTE: IRQ is enabled later, just before eret into the first task.
@@ -641,12 +679,20 @@ pub extern "C" fn _rust_start() -> ! {
     // ── RP1 discovery via BRCM PCIe driver ───────────────────
     let rp1_ok = {
         let _ = writeln!(con, "[boot] PCIe → RP1...");
-        let rp1_info_inner = soc_raspi5::pcie::init_rp1(|args| {
-            let _ = writeln!(con, "[pcie] {}", args);
-        }, |addr| safe_read32(addr));
+        let rp1_info_inner = soc_raspi5::pcie::init_rp1(
+            |args| {
+                let _ = writeln!(con, "[pcie] {}", args);
+            },
+            |addr| safe_read32(addr),
+        );
         if let Some(ref info) = rp1_info_inner {
-            let _ = writeln!(con, "[boot] RP1 OK on {} — BAR {:#x} ({} KiB)",
-                info.controller, info.bar_base, info.bar_size / 1024);
+            let _ = writeln!(
+                con,
+                "[boot] RP1 OK on {} — BAR {:#x} ({} KiB)",
+                info.controller,
+                info.bar_base,
+                info.bar_size / 1024
+            );
         } else {
             let _ = writeln!(con, "[boot] RP1 NOT FOUND");
         }
@@ -659,8 +705,12 @@ pub extern "C" fn _rust_start() -> ! {
         let _ = writeln!(con, "[boot] starting xHCI0 init...");
         let xhci0 = unsafe { &mut *XHCI0.0.get() };
         if xhci0.init() {
-            let _ = writeln!(con, "[boot] xHCI0 (USB 3.0): {} ports, {} devices",
-                xhci0.port_count(), xhci0.num_devices);
+            let _ = writeln!(
+                con,
+                "[boot] xHCI0 (USB 3.0): {} ports, {} devices",
+                xhci0.port_count(),
+                xhci0.num_devices
+            );
             let kbd0 = xhci0.hid_keyboard_count();
             if kbd0 > 0 {
                 let _ = writeln!(con, "[boot]   {} HID keyboard(s) on xHCI0", kbd0);
@@ -671,8 +721,12 @@ pub extern "C" fn _rust_start() -> ! {
         let _ = writeln!(con, "[boot] starting xHCI1 init...");
         let xhci1 = unsafe { &mut *XHCI1.0.get() };
         if xhci1.init() {
-            let _ = writeln!(con, "[boot] xHCI1 (USB 2.0): {} ports, {} devices",
-                xhci1.port_count(), xhci1.num_devices);
+            let _ = writeln!(
+                con,
+                "[boot] xHCI1 (USB 2.0): {} ports, {} devices",
+                xhci1.port_count(),
+                xhci1.num_devices
+            );
             let kbd1 = xhci1.hid_keyboard_count();
             if kbd1 > 0 {
                 let _ = writeln!(con, "[boot]   {} HID keyboard(s) on xHCI1", kbd1);
@@ -686,7 +740,9 @@ pub extern "C" fn _rust_start() -> ! {
         let _ = writeln!(con, "[boot] UART0 enabled (RP1 accessible)");
 
         // Initialise input subsystem (USB HID keyboard/mouse)
-        unsafe { (*INPUT.0.get()).init(); }
+        unsafe {
+            (*INPUT.0.get()).init();
+        }
         // Register keyboard-poll callback so FbConsole can read USB keys.
         soc_raspi5::fbcon::set_kbd_poll(kbd_poll_fn, kbd_has_data_fn);
         let _ = writeln!(con, "[boot] input subsystem: active");
@@ -702,16 +758,22 @@ pub extern "C" fn _rust_start() -> ! {
             // Register framebuffer driver (FB was init'd early)
             unsafe {
                 let reg = &mut *DRIVERS.0.get();
-                let _ = reg.register("hdmi-fb", DriverCaps {
-                    mmio_regions: 1,
-                    uses_interrupts: false,
-                    uses_dma: false,
-                    uses_network: false,
-                });
+                let _ = reg.register(
+                    "hdmi-fb",
+                    DriverCaps {
+                        mmio_regions: 1,
+                        uses_interrupts: false,
+                        uses_dma: false,
+                        uses_network: false,
+                    },
+                );
             }
             let _ = writeln!(con, "[boot] HDMI framebuffer: active");
         } else {
-            let _ = writeln!(con, "[boot] HDMI framebuffer: not available (UART-only mode)");
+            let _ = writeln!(
+                con,
+                "[boot] HDMI framebuffer: not available (UART-only mode)"
+            );
         }
     }
 
@@ -720,7 +782,9 @@ pub extern "C" fn _rust_start() -> ! {
         let inodes = &mut *INODES.0.get();
         let ramfs = &mut *RAMFS.0.get();
         inodes.init_root();
-        let dev_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/dev").unwrap_or(microkernel::vfs::NO_INODE);
+        let dev_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/dev")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if dev_id != microkernel::vfs::NO_INODE {
             inodes.create_device_in(dev_id, "null", 0, 0);
             inodes.create_device_in(dev_id, "zero", 0, 1);
@@ -729,13 +793,19 @@ pub extern "C" fn _rust_start() -> ! {
             inodes.create_device_in(dev_id, "keyboard", 1, 0);
             inodes.create_device_in(dev_id, "mouse", 1, 1);
         }
-        let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc").unwrap_or(microkernel::vfs::NO_INODE);
+        let etc_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/etc")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if etc_id != microkernel::vfs::NO_INODE {
             ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS!\n");
             ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-raspi5\n");
         }
     }
-    let _ = writeln!(con, "[boot] VFS initialised (ramfs {} KiB)", microkernel::ramfs::RAMFS_POOL_SIZE / 1024);
+    let _ = writeln!(
+        con,
+        "[boot] VFS initialised (ramfs {} KiB)",
+        microkernel::ramfs::RAMFS_POOL_SIZE / 1024
+    );
 
     // ── scheduler + tasks ────────────────────────────────────
     unsafe {
@@ -752,7 +822,8 @@ pub extern "C" fn _rust_start() -> ! {
         // Idle task (priority 0).
         let sb = IDLE_STACK.0.as_ptr() as usize;
         let st = sb + IDLE_STACK.0.len();
-        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
+        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0)
+        {
             sched.tasks[idx].context.set_status(INITIAL_SPSR);
         }
 
@@ -761,7 +832,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = SHELL_STACK.0.as_ptr() as usize;
             let st = sb + SHELL_STACK.0.len();
-            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_SPSR);
             }
         }
@@ -773,25 +846,53 @@ pub extern "C" fn _rust_start() -> ! {
 
             let sb = HELLO_STACK.0.as_ptr() as usize;
             let st = sb + HELLO_STACK.0.len();
-            if let Some(idx) = sched.create_task("hello", samples::hello_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "hello",
+                samples::hello_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_SPSR);
             }
 
             let sb = TIMER_STACK.0.as_ptr() as usize;
             let st = sb + TIMER_STACK.0.len();
-            if let Some(idx) = sched.create_task("timer", samples::timer_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "timer",
+                samples::timer_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_SPSR);
             }
 
             let sb = IPC_TX_STACK.0.as_ptr() as usize;
             let st = sb + IPC_TX_STACK.0.len();
-            if let Some(idx) = sched.create_task("ipc-tx", samples::ipc_sender_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "ipc-tx",
+                samples::ipc_sender_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_SPSR);
             }
 
             let sb = IPC_RX_STACK.0.as_ptr() as usize;
             let st = sb + IPC_RX_STACK.0.len();
-            if let Some(idx) = sched.create_task("ipc-rx", samples::ipc_receiver_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "ipc-rx",
+                samples::ipc_receiver_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_SPSR);
             }
         }
@@ -801,7 +902,11 @@ pub extern "C" fn _rust_start() -> ! {
     unsafe {
         let sched = &*SCHEDULER.0.get();
         let procs = &mut *PROCESSES.0.get();
-        let count = sched.tasks.iter().filter(|t| t.state != TaskState::Free).count();
+        let count = sched
+            .tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Free)
+            .count();
         procs.processes[0].thread_count = count;
     }
 
@@ -809,14 +914,21 @@ pub extern "C" fn _rust_start() -> ! {
     #[cfg(feature = "shell")]
     let _ = writeln!(con, "[boot] shell task registered");
     #[cfg(feature = "samples")]
-    let _ = writeln!(con, "[boot] sample tasks registered (hello, timer, ipc-tx, ipc-rx)");
+    let _ = writeln!(
+        con,
+        "[boot] sample tasks registered (hello, timer, ipc-tx, ipc-rx)"
+    );
 
     // ── snapshot boot log into klog ──────────────────────────
     {
         let klog = unsafe { &mut *KLOG.0.get() };
         let _ = writeln!(klog, "[boot] VeerOS v{VERSION} -- Raspberry Pi 5 (AArch64)");
-        let _ = writeln!(klog, "[boot] heap {} KiB, VFS ready, {} drivers",
-            HEAP_SIZE / 1024, 3);
+        let _ = writeln!(
+            klog,
+            "[boot] heap {} KiB, VFS ready, {} drivers",
+            HEAP_SIZE / 1024,
+            3
+        );
         let sd = unsafe { &*SD.0.get() };
         if sd.is_ready() {
             use arch::BlockDevice;
@@ -892,8 +1004,12 @@ fn safe_read32(addr: usize) -> Option<u32> {
 #[allow(dead_code)]
 fn print_probe(con: &mut Console<FbConsole>, label: &str, val: Option<u32>) {
     match val {
-        Some(v) => { let _ = writeln!(con, "[boot]   {} = {:#010x}", label, v); }
-        None    => { let _ = writeln!(con, "[boot]   {} = FAULT", label); }
+        Some(v) => {
+            let _ = writeln!(con, "[boot]   {} = {:#010x}", label, v);
+        }
+        None => {
+            let _ = writeln!(con, "[boot]   {} = FAULT", label);
+        }
     }
 }
 
@@ -915,9 +1031,15 @@ pub(crate) fn console_write_byte(b: u8) {
 /// can pull from the USB HID keyboard queue fed by the timer tick.
 fn kbd_poll_fn() -> Option<u8> {
     let input = unsafe { &mut *INPUT.0.get() };
-    if !input.active { return None; }
+    if !input.active {
+        return None;
+    }
     let mut buf = [0u8; 1];
-    if input.kbd_read(&mut buf) > 0 { Some(buf[0]) } else { None }
+    if input.kbd_read(&mut buf) > 0 {
+        Some(buf[0])
+    } else {
+        None
+    }
 }
 
 /// Non-consuming check: does the keyboard queue have data?
@@ -1075,7 +1197,11 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
     unsafe {
         let inodes = &*INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        let dir_id = if path == "." { Some(cwd) } else { inodes.resolve(cwd, path) };
+        let dir_id = if path == "." {
+            Some(cwd)
+        } else {
+            inodes.resolve(cwd, path)
+        };
         match dir_id {
             Some(id) if id != NO_INODE => {
                 let inode = &inodes.inodes[id as usize];
@@ -1096,7 +1222,9 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
                     child = c.next_sibling;
                 }
             }
-            _ => { let _ = writeln!(w, "ls: '{}': no such directory", path); }
+            _ => {
+                let _ = writeln!(w, "ls: '{}': no such directory", path);
+            }
         }
     }
 }
@@ -1109,8 +1237,12 @@ fn vfs_read_file(path: &str, buf: &mut [u8]) -> usize {
         let ramfs = &*RAMFS.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return 0; }
-        if inodes.inodes[id as usize].kind != InodeKind::File { return 0; }
+        if id == NO_INODE {
+            return 0;
+        }
+        if inodes.inodes[id as usize].kind != InodeKind::File {
+            return 0;
+        }
         ramfs.read(inodes, id, 0, buf)
     }
 }
@@ -1128,15 +1260,31 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
                 let parent_path = if slash == 0 { "/" } else { &path[..slash] };
                 let name = &path[slash + 1..];
                 let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-                if parent == NO_INODE || name.is_empty() { return false; }
-                id = match inodes.create_file_in(parent, name) { Some(i) => i, None => return false };
+                if parent == NO_INODE || name.is_empty() {
+                    return false;
+                }
+                id = match inodes.create_file_in(parent, name) {
+                    Some(i) => i,
+                    None => return false,
+                };
             } else {
-                id = match inodes.create_file_in(cwd, path) { Some(i) => i, None => return false };
+                id = match inodes.create_file_in(cwd, path) {
+                    Some(i) => i,
+                    None => return false,
+                };
             }
         }
-        if inodes.inodes[id as usize].kind != InodeKind::File { return false; }
-        let offset = if append { inodes.inodes[id as usize].size } else { 0 };
-        if !append { ramfs.truncate(inodes, id, 0); }
+        if inodes.inodes[id as usize].kind != InodeKind::File {
+            return false;
+        }
+        let offset = if append {
+            inodes.inodes[id as usize].size
+        } else {
+            0
+        };
+        if !append {
+            ramfs.truncate(inodes, id, 0);
+        }
         ramfs.write(inodes, id, offset, data) > 0
     }
 }
@@ -1151,7 +1299,9 @@ fn vfs_mkdir(path: &str) -> bool {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.mkdir_in(parent, name).is_some()
         } else {
             inodes.mkdir_in(cwd, path).is_some()
@@ -1171,7 +1321,12 @@ fn vfs_stat(path: &str, w: &mut dyn core::fmt::Write) {
             return;
         }
         let inode = &inodes.inodes[id as usize];
-        let kind = match inode.kind { InodeKind::File => "file", InodeKind::Directory => "directory", InodeKind::Device => "device", _ => "unknown" };
+        let kind = match inode.kind {
+            InodeKind::File => "file",
+            InodeKind::Directory => "directory",
+            InodeKind::Device => "device",
+            _ => "unknown",
+        };
         let _ = writeln!(w, "  File: {}", inode.name_str());
         let _ = writeln!(w, "  Type: {}", kind);
         let _ = writeln!(w, "  Size: {}", inode.size);
@@ -1190,7 +1345,9 @@ fn vfs_unlink(path: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         inodes.unlink(id)
     }
 }
@@ -1202,12 +1359,16 @@ fn vfs_rename(old: &str, new: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, old).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         if let Some(slash) = new.rfind('/') {
             let parent_path = if slash == 0 { "/" } else { &new[..slash] };
             let name = &new[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.rename(id, parent, name)
         } else {
             inodes.rename(id, cwd, new)
@@ -1232,8 +1393,12 @@ fn vfs_chdir(path: &str) -> bool {
         let procs = &mut *PROCESSES.0.get();
         let cwd = procs.processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
-        if inodes.inodes[id as usize].kind != InodeKind::Directory { return false; }
+        if id == NO_INODE {
+            return false;
+        }
+        if inodes.inodes[id as usize].kind != InodeKind::Directory {
+            return false;
+        }
         procs.processes[0].cwd = id;
         true
     }
@@ -1241,37 +1406,81 @@ fn vfs_chdir(path: &str) -> bool {
 
 #[cfg(feature = "shell")]
 fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
-    use microkernel::vfs::{InodeKind, ROOT_INODE, NO_INODE};
+    use microkernel::vfs::{InodeKind, NO_INODE, ROOT_INODE};
     unsafe {
         let inodes = &*INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        let start = if path == "/" { ROOT_INODE } else { inodes.resolve(cwd, path).unwrap_or(NO_INODE) };
-        if start == NO_INODE { let _ = writeln!(w, "tree: '{}': no such directory", path); return; }
+        let start = if path == "/" {
+            ROOT_INODE
+        } else {
+            inodes.resolve(cwd, path).unwrap_or(NO_INODE)
+        };
+        if start == NO_INODE {
+            let _ = writeln!(w, "tree: '{}': no such directory", path);
+            return;
+        }
         let root = &inodes.inodes[start as usize];
-        if root.kind != InodeKind::Directory { let _ = writeln!(w, "tree: '{}': not a directory", path); return; }
-        let _ = writeln!(w, "{}", if path == "/" || path == "." { "/" } else { path });
+        if root.kind != InodeKind::Directory {
+            let _ = writeln!(w, "tree: '{}': not a directory", path);
+            return;
+        }
+        let _ = writeln!(
+            w,
+            "{}",
+            if path == "/" || path == "." {
+                "/"
+            } else {
+                path
+            }
+        );
         let mut stack: [(u16, u8); 64] = [(NO_INODE, 0); 64];
         let mut sp = 0usize;
         let mut kids: [u16; 64] = [NO_INODE; 64];
         let mut nk = 0usize;
         let mut ch = root.children_head;
-        while ch != NO_INODE && nk < 64 { kids[nk] = ch; nk += 1; ch = inodes.inodes[ch as usize].next_sibling; }
+        while ch != NO_INODE && nk < 64 {
+            kids[nk] = ch;
+            nk += 1;
+            ch = inodes.inodes[ch as usize].next_sibling;
+        }
         let mut i = nk;
-        while i > 0 { i -= 1; if sp < 64 { stack[sp] = (kids[i], 1); sp += 1; } }
+        while i > 0 {
+            i -= 1;
+            if sp < 64 {
+                stack[sp] = (kids[i], 1);
+                sp += 1;
+            }
+        }
         while sp > 0 {
             sp -= 1;
             let (id, depth) = stack[sp];
             let node = &inodes.inodes[id as usize];
-            for _ in 0..depth { w.write_str("  ").ok(); }
-            let kind_ch = match node.kind { InodeKind::Directory => '/', InodeKind::Device => '*', _ => ' ' };
+            for _ in 0..depth {
+                w.write_str("  ").ok();
+            }
+            let kind_ch = match node.kind {
+                InodeKind::Directory => '/',
+                InodeKind::Device => '*',
+                _ => ' ',
+            };
             let _ = writeln!(w, "{}{}", node.name_str(), kind_ch);
             if node.kind == InodeKind::Directory {
                 let mut ck: [u16; 64] = [NO_INODE; 64];
                 let mut cn = 0usize;
                 let mut c = node.children_head;
-                while c != NO_INODE && cn < 64 { ck[cn] = c; cn += 1; c = inodes.inodes[c as usize].next_sibling; }
+                while c != NO_INODE && cn < 64 {
+                    ck[cn] = c;
+                    cn += 1;
+                    c = inodes.inodes[c as usize].next_sibling;
+                }
                 let mut j = cn;
-                while j > 0 { j -= 1; if sp < 64 { stack[sp] = (ck[j], depth + 1); sp += 1; } }
+                while j > 0 {
+                    j -= 1;
+                    if sp < 64 {
+                        stack[sp] = (ck[j], depth + 1);
+                        sp += 1;
+                    }
+                }
             }
         }
     }
@@ -1283,12 +1492,16 @@ fn vfs_touch(path: &str) -> bool {
     unsafe {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        if inodes.resolve(cwd, path).unwrap_or(NO_INODE) != NO_INODE { return true; }
+        if inodes.resolve(cwd, path).unwrap_or(NO_INODE) != NO_INODE {
+            return true;
+        }
         if let Some(slash) = path.rfind('/') {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.create_file_in(parent, name).is_some()
         } else {
             inodes.create_file_in(cwd, path).is_some()
@@ -1311,7 +1524,14 @@ fn mount_list(w: &mut dyn core::fmt::Write) {
                     microkernel::vfs::FsType::RamFs => "ramfs",
                     _ => "none",
                 };
-                let _ = writeln!(w, "  {} on {} type {} (slot {})", m.label_str(), path, fstype, i + 1);
+                let _ = writeln!(
+                    w,
+                    "  {} on {} type {} (slot {})",
+                    m.label_str(),
+                    path,
+                    fstype,
+                    i + 1
+                );
                 found = true;
             }
         }
@@ -1447,7 +1667,10 @@ fn gpio_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             }
         }
         _ => {
-            let _ = writeln!(w, "  gpio subcommands: list, read, write, mode, pull, toggle");
+            let _ = writeln!(
+                w,
+                "  gpio subcommands: list, read, write, mode, pull, toggle"
+            );
         }
     }
 }
@@ -1457,7 +1680,9 @@ fn gpio_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
 fn i2c_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
     match sub {
         "scan" => {
-            let bus_n = if args.trim().is_empty() { 1u8 } else {
+            let bus_n = if args.trim().is_empty() {
+                1u8
+            } else {
                 parse_u8(args.trim()).unwrap_or(1)
             };
             if bus_n > 6 {
@@ -1486,8 +1711,12 @@ fn i2c_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     } else {
                         let mut buf = [0u8; 1];
                         match i2c.read_from(addr, &mut buf) {
-                            Ok(_) => { let _ = write!(w, " {:02x}", addr); }
-                            Err(_) => { let _ = write!(w, " --"); }
+                            Ok(_) => {
+                                let _ = write!(w, " {:02x}", addr);
+                            }
+                            Err(_) => {
+                                let _ = write!(w, " --");
+                            }
                         }
                     }
                 }
@@ -1498,15 +1727,28 @@ fn i2c_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             // i2c read <bus> <addr> <reg>
             let parts: [&str; 3] = parse_args_3(args);
             if let (Ok(bus), Ok(addr), Ok(reg)) = (
-                parse_u8(parts[0]), parse_hex_u8(parts[1]), parse_hex_u8(parts[2])
+                parse_u8(parts[0]),
+                parse_hex_u8(parts[1]),
+                parse_hex_u8(parts[2]),
             ) {
-                if bus > 6 { let _ = writeln!(w, "  error: bus 0–6"); return; }
+                if bus > 6 {
+                    let _ = writeln!(w, "  error: bus 0–6");
+                    return;
+                }
                 let i2c = make_i2c(bus);
                 i2c.init(soc_raspi5::i2c::I2cSpeed::Standard);
                 let mut buf = [0u8; 1];
                 match i2c.write_read(addr, &[reg], &mut buf) {
-                    Ok(_) => { let _ = writeln!(w, "  bus {} addr 0x{:02X} reg 0x{:02X} = 0x{:02X}", bus, addr, reg, buf[0]); }
-                    Err(e) => { let _ = writeln!(w, "  error: {:?}", e); }
+                    Ok(_) => {
+                        let _ = writeln!(
+                            w,
+                            "  bus {} addr 0x{:02X} reg 0x{:02X} = 0x{:02X}",
+                            bus, addr, reg, buf[0]
+                        );
+                    }
+                    Err(e) => {
+                        let _ = writeln!(w, "  error: {:?}", e);
+                    }
                 }
             } else {
                 let _ = writeln!(w, "  usage: i2c read <bus> <addr> <reg>");
@@ -1516,15 +1758,28 @@ fn i2c_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             // i2c write <bus> <addr> <reg> <val>
             let parts: [&str; 4] = parse_args_4(args);
             if let (Ok(bus), Ok(addr), Ok(reg), Ok(val)) = (
-                parse_u8(parts[0]), parse_hex_u8(parts[1]),
-                parse_hex_u8(parts[2]), parse_hex_u8(parts[3])
+                parse_u8(parts[0]),
+                parse_hex_u8(parts[1]),
+                parse_hex_u8(parts[2]),
+                parse_hex_u8(parts[3]),
             ) {
-                if bus > 6 { let _ = writeln!(w, "  error: bus 0–6"); return; }
+                if bus > 6 {
+                    let _ = writeln!(w, "  error: bus 0–6");
+                    return;
+                }
                 let i2c = make_i2c(bus);
                 i2c.init(soc_raspi5::i2c::I2cSpeed::Standard);
                 match i2c.write_to(addr, &[reg, val]) {
-                    Ok(_) => { let _ = writeln!(w, "  OK: wrote 0x{:02X} to reg 0x{:02X} on 0x{:02X}", val, reg, addr); }
-                    Err(e) => { let _ = writeln!(w, "  error: {:?}", e); }
+                    Ok(_) => {
+                        let _ = writeln!(
+                            w,
+                            "  OK: wrote 0x{:02X} to reg 0x{:02X} on 0x{:02X}",
+                            val, reg, addr
+                        );
+                    }
+                    Err(e) => {
+                        let _ = writeln!(w, "  error: {:?}", e);
+                    }
                 }
             } else {
                 let _ = writeln!(w, "  usage: i2c write <bus> <addr> <reg> <val>");
@@ -1556,11 +1811,17 @@ fn spi_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
         "cfg" => {
             // spi cfg <bus> <mode> <freq_div>
             let parts: [&str; 3] = parse_args_3(args);
-            if let (Ok(bus), Ok(mode), Ok(div)) = (
-                parse_u8(parts[0]), parse_u8(parts[1]), parse_u16(parts[2])
-            ) {
-                if bus > 5 { let _ = writeln!(w, "  error: bus 0–5"); return; }
-                if mode > 3 { let _ = writeln!(w, "  error: mode 0–3"); return; }
+            if let (Ok(bus), Ok(mode), Ok(div)) =
+                (parse_u8(parts[0]), parse_u8(parts[1]), parse_u16(parts[2]))
+            {
+                if bus > 5 {
+                    let _ = writeln!(w, "  error: bus 0–5");
+                    return;
+                }
+                if mode > 3 {
+                    let _ = writeln!(w, "  error: mode 0–3");
+                    return;
+                }
                 let spi_mode = match mode {
                     0 => soc_raspi5::spi::SpiMode::Mode0,
                     1 => soc_raspi5::spi::SpiMode::Mode1,
@@ -1578,12 +1839,17 @@ fn spi_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             // spi xfer <bus> <hex bytes...>
             let (bus_s, hex_s) = split_at_space(args);
             if let Ok(bus) = parse_u8(bus_s) {
-                if bus > 5 { let _ = writeln!(w, "  error: bus 0–5"); return; }
+                if bus > 5 {
+                    let _ = writeln!(w, "  error: bus 0–5");
+                    return;
+                }
                 let mut tx = [0u8; 32];
                 let mut rx = [0u8; 32];
                 let mut len = 0usize;
                 for tok in hex_s.split_ascii_whitespace() {
-                    if len >= 32 { break; }
+                    if len >= 32 {
+                        break;
+                    }
                     if let Ok(b) = parse_hex_u8(tok) {
                         tx[len] = b;
                         len += 1;
@@ -1596,10 +1862,14 @@ fn spi_cmd(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                 let spi = make_spi(bus);
                 spi.transfer(&tx[..len], &mut rx[..len]);
                 let _ = write!(w, "  TX:");
-                for i in 0..len { let _ = write!(w, " {:02X}", tx[i]); }
+                for i in 0..len {
+                    let _ = write!(w, " {:02X}", tx[i]);
+                }
                 let _ = writeln!(w);
                 let _ = write!(w, "  RX:");
-                for i in 0..len { let _ = write!(w, " {:02X}", rx[i]); }
+                for i in 0..len {
+                    let _ = write!(w, " {:02X}", rx[i]);
+                }
                 let _ = writeln!(w);
             } else {
                 let _ = writeln!(w, "  usage: spi xfer <bus> <hex bytes...>");
@@ -1662,15 +1932,21 @@ fn split_at_space(s: &str) -> (&str, &str) {
 
 fn parse_u8(s: &str) -> Result<u8, ()> {
     let s = s.trim();
-    if s.is_empty() { return Err(()); }
+    if s.is_empty() {
+        return Err(());
+    }
     if s.starts_with("0x") || s.starts_with("0X") {
         parse_hex_u8(s)
     } else {
         let mut val: u16 = 0;
         for &b in s.as_bytes() {
-            if b < b'0' || b > b'9' { return Err(()); }
+            if b < b'0' || b > b'9' {
+                return Err(());
+            }
             val = val * 10 + (b - b'0') as u16;
-            if val > 255 { return Err(()); }
+            if val > 255 {
+                return Err(());
+            }
         }
         Ok(val as u8)
     }
@@ -1678,20 +1954,32 @@ fn parse_u8(s: &str) -> Result<u8, ()> {
 
 fn parse_u16(s: &str) -> Result<u16, ()> {
     let s = s.trim();
-    if s.is_empty() { return Err(()); }
+    if s.is_empty() {
+        return Err(());
+    }
     let mut val: u32 = 0;
     for &b in s.as_bytes() {
-        if b < b'0' || b > b'9' { return Err(()); }
+        if b < b'0' || b > b'9' {
+            return Err(());
+        }
         val = val * 10 + (b - b'0') as u32;
-        if val > 65535 { return Err(()); }
+        if val > 65535 {
+            return Err(());
+        }
     }
     Ok(val as u16)
 }
 
 fn parse_hex_u8(s: &str) -> Result<u8, ()> {
     let s = s.trim();
-    let s = if s.starts_with("0x") || s.starts_with("0X") { &s[2..] } else { s };
-    if s.is_empty() || s.len() > 2 { return Err(()); }
+    let s = if s.starts_with("0x") || s.starts_with("0X") {
+        &s[2..]
+    } else {
+        s
+    };
+    if s.is_empty() || s.len() > 2 {
+        return Err(());
+    }
     let mut val: u8 = 0;
     for &b in s.as_bytes() {
         let nib = match b {

@@ -42,7 +42,7 @@ pub fn scancode_to_ascii(scancode: u8) -> Option<u8> {
         let released = scancode & 0x7F;
         match released {
             0x2A | 0x36 => SHIFT_HELD.store(false, Ordering::Relaxed), // L/R Shift
-            0x1D        => CTRL_HELD.store(false, Ordering::Relaxed),  // Ctrl
+            0x1D => CTRL_HELD.store(false, Ordering::Relaxed),         // Ctrl
             _ => {}
         }
         return None;
@@ -50,9 +50,15 @@ pub fn scancode_to_ascii(scancode: u8) -> Option<u8> {
 
     // Press codes.
     match scancode {
-        0x2A | 0x36 => { SHIFT_HELD.store(true, Ordering::Relaxed); return None; }
-        0x1D        => { CTRL_HELD.store(true, Ordering::Relaxed);  return None; }
-        0x3A        => {
+        0x2A | 0x36 => {
+            SHIFT_HELD.store(true, Ordering::Relaxed);
+            return None;
+        }
+        0x1D => {
+            CTRL_HELD.store(true, Ordering::Relaxed);
+            return None;
+        }
+        0x3A => {
             // Caps Lock toggle.
             let prev = CAPS_LOCK.load(Ordering::Relaxed);
             CAPS_LOCK.store(!prev, Ordering::Relaxed);
@@ -62,8 +68,8 @@ pub fn scancode_to_ascii(scancode: u8) -> Option<u8> {
     }
 
     let shift = SHIFT_HELD.load(Ordering::Relaxed);
-    let ctrl  = CTRL_HELD.load(Ordering::Relaxed);
-    let caps  = CAPS_LOCK.load(Ordering::Relaxed);
+    let ctrl = CTRL_HELD.load(Ordering::Relaxed);
+    let caps = CAPS_LOCK.load(Ordering::Relaxed);
 
     // Lookup un-shifted ASCII.
     let base = match scancode {

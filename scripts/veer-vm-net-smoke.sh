@@ -18,7 +18,16 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HOST_OS="$(uname -s)"
 
 if [[ "$HOST_OS" == "Darwin" ]]; then
-    TARGET_TRIPLE="${VEER_VM_MAC_TARGET:-x86_64-apple-darwin}"
+    case "${VEER_VM_MAC_TARGET:-native}" in
+        native|all)
+            case "$(uname -m)" in
+                arm64|aarch64) TARGET_TRIPLE="aarch64-apple-darwin" ;;
+                x86_64|amd64) TARGET_TRIPLE="x86_64-apple-darwin" ;;
+                *) die "unsupported macOS host architecture: $(uname -m)" ;;
+            esac
+            ;;
+        *) TARGET_TRIPLE="${VEER_VM_MAC_TARGET}" ;;
+    esac
     PROFILE="${VEER_VM_MAC_PROFILE:-debug}"
     VEER_VM_DEFAULT="$REPO/target/$TARGET_TRIPLE/$PROFILE/veer-vm"
 else

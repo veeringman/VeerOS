@@ -30,7 +30,10 @@ struct FutexWaiter {
 
 impl FutexWaiter {
     const fn empty() -> Self {
-        Self { addr: 0, task_id: usize::MAX }
+        Self {
+            addr: 0,
+            task_id: usize::MAX,
+        }
     }
 }
 
@@ -123,7 +126,8 @@ impl FutexTable {
             }
             if slot.addr == addr {
                 let tid = slot.task_id;
-                if tid < MAX_TASKS && sched.tasks[tid].state == TaskState::Blocked
+                if tid < MAX_TASKS
+                    && sched.tasks[tid].state == TaskState::Blocked
                     && sched.tasks[tid].block_reason == BlockReason::Futex
                 {
                     sched.tasks[tid].state = TaskState::Ready;

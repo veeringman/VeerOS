@@ -29,15 +29,17 @@ use std::time::Instant;
 
 use crate::config::{BootSource, GuestArch, VmConfig};
 use crate::elf;
-use crate::iso;
 use crate::irq::IrqLine;
+use crate::iso;
 use crate::memory::GuestMem;
 use crate::multiboot;
 use crate::pci::{self, PciHost};
 use crate::serial::{Serial16550, SerialShared};
 use crate::snapshot;
 use crate::termios_guard::RawMode;
-use crate::virtio::{blk::VirtioBlk, net::VirtioNet, VirtioDevice, REG_DEVICE_CONFIG, REG_QUEUE_NOTIFY};
+use crate::virtio::{
+    blk::VirtioBlk, net::VirtioNet, VirtioDevice, REG_DEVICE_CONFIG, REG_QUEUE_NOTIFY,
+};
 
 /// Global shutdown flag. Flipped by:
 ///   * SIGTERM / SIGHUP handlers
@@ -86,8 +88,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         BootSource::Kernel(_) => None,
     };
     // ── 1. Open /dev/kvm ─────────────────────────────────────
-    let kvm = Kvm::new()
-        .context("open /dev/kvm (is it present and are you in the kvm group?)")?;
+    let kvm = Kvm::new().context("open /dev/kvm (is it present and are you in the kvm group?)")?;
     let api = kvm.get_api_version();
     if api != 12 {
         bail!("unexpected KVM API version {api} (expected 12)");
@@ -98,7 +99,8 @@ pub fn run(cfg: VmConfig) -> Result<()> {
 
     // On x86, the TSS address must be set before creating the irqchip
     // / any vCPU when running on Intel hosts without unrestricted_guest.
-    vm.set_tss_address(0xfffb_d000).context("KVM_SET_TSS_ADDR")?;
+    vm.set_tss_address(0xfffb_d000)
+        .context("KVM_SET_TSS_ADDR")?;
 
     // In-kernel IRQ chip: PIC + IOAPIC + LAPIC. Must come BEFORE any vCPU
     // creation so the vCPU gets an in-kernel LAPIC. After this call, the
@@ -107,7 +109,10 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     vm.create_irq_chip().context("KVM_CREATE_IRQCHIP")?;
 
     // In-kernel 8254 PIT (legacy interval timer).
-    let pit_cfg = kvm_pit_config { flags: 0, pad: [0; 15] };
+    let pit_cfg = kvm_pit_config {
+        flags: 0,
+        pad: [0; 15],
+    };
     vm.create_pit2(pit_cfg).context("KVM_CREATE_PIT2")?;
 
     // ── 3. Guest memory region ───────────────────────────────
@@ -132,8 +137,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         userspace_addr: guest.host_addr(),
     };
     // SAFETY: region lifetime is tied to `guest`, which outlives the VM.
-    unsafe { vm.set_user_memory_region(region) }
-        .context("KVM_SET_USER_MEMORY_REGION")?;
+    unsafe { vm.set_user_memory_region(region) }.context("KVM_SET_USER_MEMORY_REGION")?;
 
     // Share the VM fd so the UART can inject IRQ 4.
     let vm = Arc::new(vm);
@@ -147,16 +151,15 @@ pub fn run(cfg: VmConfig) -> Result<()> {
 
     // ── 4. vCPU + CPUID ──────────────────────────────────────
     let mut vcpu: VcpuFd = vm.create_vcpu(0).context("KVM_CREATE_VCPU")?;
-    let cpuid = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
+    let cpuid = kvm
+        .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
         .context("KVM_GET_SUPPORTED_CPUID")?;
     vcpu.set_cpuid2(&cpuid).context("KVM_SET_CPUID2")?;
 
     let mut guest_entry = match &cfg.boot {
         BootSource::Kernel(kernel_path) => {
             if cfg.guest_arch == GuestArch::Riscv32 && is_iso_path(kernel_path) {
-                bail!(
-                    "--arch riscv32 requires a flat ELF kernel image; ISO boot is x86_64-only"
-                );
+                bail!("--arch riscv32 requires a flat ELF kernel image; ISO boot is x86_64-only");
             }
             let loaded = if is_iso_path(kernel_path) {
                 let kernel = iso::extract_boot_kernel(kernel_path)
@@ -225,7 +228,12 @@ pub fn run(cfg: VmConfig) -> Result<()> {
         eprintln!(
             "[veer-vm] virtio-net-pci: tap={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             dev.tap_name(),
-            cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5],
+            cfg.mac[0],
+            cfg.mac[1],
+            cfg.mac[2],
+            cfg.mac[3],
+            cfg.mac[4],
+            cfg.mac[5],
         );
         let dev = Arc::new(Mutex::new(dev));
         pci.lock().unwrap().set_net(dev.clone());
@@ -330,7 +338,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
                     cfg.tap_name.as_deref(),
                     cfg.mac,
                 )
-                    .with_context(|| format!("saving snapshot {}", path.display()))?;
+                .with_context(|| format!("saving snapshot {}", path.display()))?;
                 eprintln!("\r\n[veer-vm] snapshot saved to {}", path.display());
             }
             eprintln!("\r\n[veer-vm] shutdown requested — stopping guest");
@@ -347,7 +355,9 @@ pub fn run(cfg: VmConfig) -> Result<()> {
                 } else if let Some(off) = pio_net_bar0_offset(&pci, port) {
                     handle_net_bar0_in(off, data, net.as_ref());
                 } else {
-                    for b in data.iter_mut() { *b = 0xFF; }
+                    for b in data.iter_mut() {
+                        *b = 0xFF;
+                    }
                 }
             }
             Ok(VcpuExit::IoOut(port, data)) => {
@@ -363,11 +373,21 @@ pub fn run(cfg: VmConfig) -> Result<()> {
                 // else: silently drop writes to unmapped PIO.
             }
             Ok(VcpuExit::MmioRead(addr, data)) => {
-                eprintln!("[veer-vm] unhandled MMIO read {:#x} len={}", addr, data.len());
-                for b in data.iter_mut() { *b = 0; }
+                eprintln!(
+                    "[veer-vm] unhandled MMIO read {:#x} len={}",
+                    addr,
+                    data.len()
+                );
+                for b in data.iter_mut() {
+                    *b = 0;
+                }
             }
             Ok(VcpuExit::MmioWrite(addr, data)) => {
-                eprintln!("[veer-vm] unhandled MMIO write {:#x} len={}", addr, data.len());
+                eprintln!(
+                    "[veer-vm] unhandled MMIO write {:#x} len={}",
+                    addr,
+                    data.len()
+                );
             }
             Ok(VcpuExit::Hlt) => {
                 // Should not happen with in-kernel LAPIC (KVM handles HLT
@@ -431,8 +451,7 @@ fn run_riscv32(cfg: VmConfig) -> Result<()> {
         bail!("--arch riscv32 requires a flat ELF kernel image; ISO boot is x86_64-only");
     }
 
-    let kvm = Kvm::new()
-        .context("open /dev/kvm (is it present and are you in the kvm group?)")?;
+    let kvm = Kvm::new().context("open /dev/kvm (is it present and are you in the kvm group?)")?;
     let vm: VmFd = kvm.create_vm().context("KVM_CREATE_VM")?;
 
     let guest = Arc::new(GuestMem::new_with_base(RISCV32_GPA_BASE, cfg.memory_bytes)?);
@@ -443,14 +462,14 @@ fn run_riscv32(cfg: VmConfig) -> Result<()> {
         memory_size: guest.size() as u64,
         userspace_addr: guest.host_addr(),
     };
-    unsafe { vm.set_user_memory_region(region) }
-        .context("KVM_SET_USER_MEMORY_REGION")?;
+    unsafe { vm.set_user_memory_region(region) }.context("KVM_SET_USER_MEMORY_REGION")?;
 
     let mut vcpu: VcpuFd = vm.create_vcpu(0).context("KVM_CREATE_VCPU")?;
     let mut vcpu_init = kvm_vcpu_init::default();
     vm.get_preferred_target(&mut vcpu_init)
         .context("KVM_ARM_PREFERRED_TARGET / riscv preferred target")?;
-    vcpu.vcpu_init(&vcpu_init).context("KVM_ARM_VCPU_INIT / riscv vcpu_init")?;
+    vcpu.vcpu_init(&vcpu_init)
+        .context("KVM_ARM_VCPU_INIT / riscv vcpu_init")?;
 
     let loaded = elf::load(kernel_path, guest.as_ref())
         .with_context(|| format!("loading {}", kernel_path.display()))?;
@@ -493,7 +512,10 @@ fn run_riscv32(cfg: VmConfig) -> Result<()> {
     }
 
     let clint = ClintModel::new();
-    eprintln!("[veer-vm] vcpu entering riscv32 guest at {:#x}", loaded.entry);
+    eprintln!(
+        "[veer-vm] vcpu entering riscv32 guest at {:#x}",
+        loaded.entry
+    );
 
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
@@ -504,17 +526,29 @@ fn run_riscv32(cfg: VmConfig) -> Result<()> {
         match vcpu.run() {
             Ok(VcpuExit::MmioRead(addr, data)) => {
                 if !handle_riscv_mmio_read(addr, data, &rx_queue, &clint) {
-                    eprintln!("[veer-vm] unhandled RISC-V MMIO read {:#x} len={}", addr, data.len());
-                    for b in data.iter_mut() { *b = 0; }
+                    eprintln!(
+                        "[veer-vm] unhandled RISC-V MMIO read {:#x} len={}",
+                        addr,
+                        data.len()
+                    );
+                    for b in data.iter_mut() {
+                        *b = 0;
+                    }
                 }
             }
             Ok(VcpuExit::MmioWrite(addr, data)) => {
                 if !handle_riscv_mmio_write(addr, data, &clint)? {
-                    eprintln!("[veer-vm] unhandled RISC-V MMIO write {:#x} len={}", addr, data.len());
+                    eprintln!(
+                        "[veer-vm] unhandled RISC-V MMIO write {:#x} len={}",
+                        addr,
+                        data.len()
+                    );
                 }
             }
             Ok(VcpuExit::Hlt) | Ok(VcpuExit::Shutdown) => return Ok(()),
-            Ok(VcpuExit::Intr) | Ok(VcpuExit::IrqWindowOpen) | Ok(VcpuExit::IoapicEoi(_)) => continue,
+            Ok(VcpuExit::Intr) | Ok(VcpuExit::IrqWindowOpen) | Ok(VcpuExit::IoapicEoi(_)) => {
+                continue
+            }
             Ok(other) => {
                 eprintln!("[veer-vm] unhandled riscv vcpu exit: {:?}", other);
                 return Ok(());
@@ -582,8 +616,12 @@ fn handle_riscv_mmio_read(
         match off {
             RISCV_UART_RBR_THR => {
                 let b = rx_queue.lock().unwrap().pop_front().unwrap_or(0);
-                for v in data.iter_mut() { *v = 0; }
-                if !data.is_empty() { data[0] = b; }
+                for v in data.iter_mut() {
+                    *v = 0;
+                }
+                if !data.is_empty() {
+                    data[0] = b;
+                }
                 return true;
             }
             RISCV_UART_LSR => {
@@ -592,12 +630,18 @@ fn handle_riscv_mmio_read(
                 if has_data {
                     lsr |= RISCV_UART_LSR_DR;
                 }
-                for v in data.iter_mut() { *v = 0; }
-                if !data.is_empty() { data[0] = lsr; }
+                for v in data.iter_mut() {
+                    *v = 0;
+                }
+                if !data.is_empty() {
+                    data[0] = lsr;
+                }
                 return true;
             }
             _ => {
-                for v in data.iter_mut() { *v = 0; }
+                for v in data.iter_mut() {
+                    *v = 0;
+                }
                 return true;
             }
         }
@@ -618,7 +662,9 @@ fn handle_riscv_mmio_read(
         let le = value.to_le_bytes();
         let n = data.len().min(4);
         data[..n].copy_from_slice(&le[..n]);
-        for v in &mut data[n..] { *v = 0; }
+        for v in &mut data[n..] {
+            *v = 0;
+        }
         return true;
     }
 
@@ -709,15 +755,35 @@ fn setup_sregs(vcpu: &mut VcpuFd) -> Result<()> {
 
     // Code: base=0, limit=4GiB (G=1), DPL=0, P=1, S=1, type=0xB, DB=1.
     let code = kvm_segment {
-        base: 0, limit: 0xFFFF_FFFF, selector: 0x08,
-        type_: 0xB, present: 1, dpl: 0, db: 1, s: 1, l: 0, g: 1,
-        avl: 0, unusable: 0, padding: 0,
+        base: 0,
+        limit: 0xFFFF_FFFF,
+        selector: 0x08,
+        type_: 0xB,
+        present: 1,
+        dpl: 0,
+        db: 1,
+        s: 1,
+        l: 0,
+        g: 1,
+        avl: 0,
+        unusable: 0,
+        padding: 0,
     };
     // Data: type=0x3 (read/write/accessed).
     let data = kvm_segment {
-        base: 0, limit: 0xFFFF_FFFF, selector: 0x10,
-        type_: 0x3, present: 1, dpl: 0, db: 1, s: 1, l: 0, g: 1,
-        avl: 0, unusable: 0, padding: 0,
+        base: 0,
+        limit: 0xFFFF_FFFF,
+        selector: 0x10,
+        type_: 0x3,
+        present: 1,
+        dpl: 0,
+        db: 1,
+        s: 1,
+        l: 0,
+        g: 1,
+        avl: 0,
+        unusable: 0,
+        padding: 0,
     };
 
     sregs.cs = code;
@@ -880,18 +946,30 @@ fn pio_is_pci_config(port: u16) -> bool {
 /// window, return the offset within that BAR; else `None`.
 fn pio_blk_bar0_offset(pci: &Arc<Mutex<PciHost>>, port: u16) -> Option<u16> {
     let base = pci.lock().unwrap().blk_bar0_base();
-    if base == 0 { return None; }
+    if base == 0 {
+        return None;
+    }
     let end = base.saturating_add(pci::VIRTIO_BLK_PIO_SIZE);
-    if port >= base && port < end { Some(port - base) } else { None }
+    if port >= base && port < end {
+        Some(port - base)
+    } else {
+        None
+    }
 }
 
 /// If `port` falls inside the currently-programmed virtio-net BAR0
 /// window, return the offset within that BAR; else `None`.
 fn pio_net_bar0_offset(pci: &Arc<Mutex<PciHost>>, port: u16) -> Option<u16> {
     let base = pci.lock().unwrap().net_bar0_base();
-    if base == 0 { return None; }
+    if base == 0 {
+        return None;
+    }
     let end = base.saturating_add(pci::VIRTIO_NET_PIO_SIZE);
-    if port >= base && port < end { Some(port - base) } else { None }
+    if port >= base && port < end {
+        Some(port - base)
+    } else {
+        None
+    }
 }
 
 fn handle_pci_in(pci: &Arc<Mutex<PciHost>>, port: u16, data: &mut [u8]) {
@@ -902,7 +980,9 @@ fn handle_pci_in(pci: &Arc<Mutex<PciHost>>, port: u16, data: &mut [u8]) {
         let byte_off = (port - pci::PCI_CONFIG_ADDR) as usize;
         let n = data.len().min(4 - byte_off);
         data[..n].copy_from_slice(&bytes[byte_off..byte_off + n]);
-        for b in &mut data[n..] { *b = 0xFF; }
+        for b in &mut data[n..] {
+            *b = 0xFF;
+        }
     } else {
         host.read_data(data.len(), data);
     }
@@ -921,13 +1001,11 @@ fn handle_pci_out(pci: &Arc<Mutex<PciHost>>, port: u16, data: &[u8]) {
     }
 }
 
-fn handle_blk_bar0_in(
-    offset: u16,
-    data: &mut [u8],
-    blk: Option<&Arc<Mutex<VirtioBlk>>>,
-) {
+fn handle_blk_bar0_in(offset: u16, data: &mut [u8], blk: Option<&Arc<Mutex<VirtioBlk>>>) {
     let Some(dev) = blk else {
-        for b in data.iter_mut() { *b = 0xFF; }
+        for b in data.iter_mut() {
+            *b = 0xFF;
+        }
         return;
     };
     let mut dev = dev.lock().unwrap();
@@ -944,7 +1022,9 @@ fn handle_blk_bar0_out(
     blk: Option<&Arc<Mutex<VirtioBlk>>>,
     mem: &GuestMem,
 ) -> Result<()> {
-    let Some(dev) = blk else { return Ok(()); };
+    let Some(dev) = blk else {
+        return Ok(());
+    };
     if offset < REG_DEVICE_CONFIG {
         if offset == REG_QUEUE_NOTIFY {
             let mut bytes = [0u8; 2];
@@ -959,13 +1039,11 @@ fn handle_blk_bar0_out(
     Ok(())
 }
 
-fn handle_net_bar0_in(
-    offset: u16,
-    data: &mut [u8],
-    net: Option<&Arc<Mutex<VirtioNet>>>,
-) {
+fn handle_net_bar0_in(offset: u16, data: &mut [u8], net: Option<&Arc<Mutex<VirtioNet>>>) {
     let Some(dev) = net else {
-        for b in data.iter_mut() { *b = 0xFF; }
+        for b in data.iter_mut() {
+            *b = 0xFF;
+        }
         return;
     };
     let mut dev = dev.lock().unwrap();
@@ -982,7 +1060,9 @@ fn handle_net_bar0_out(
     net: Option<&Arc<Mutex<VirtioNet>>>,
     mem: &GuestMem,
 ) -> Result<()> {
-    let Some(dev) = net else { return Ok(()); };
+    let Some(dev) = net else {
+        return Ok(());
+    };
     if offset < REG_DEVICE_CONFIG {
         if offset == REG_QUEUE_NOTIFY {
             let mut bytes = [0u8; 2];
@@ -1001,45 +1081,60 @@ fn handle_net_bar0_out(
 /// device) and hands each Ethernet frame to `VirtioNet::deliver_rx_frame`,
 /// which places it into the guest's receiveq. Frames that arrive with no
 /// posted RX descriptor are dropped.
-fn net_rx_thread(
-    tap_fd: libc::c_int,
-    dev: Arc<Mutex<VirtioNet>>,
-    mem: Arc<GuestMem>,
-) {
+fn net_rx_thread(tap_fd: libc::c_int, dev: Arc<Mutex<VirtioNet>>, mem: Arc<GuestMem>) {
     // TAP was opened O_NONBLOCK in the VMM; use poll(2) to block cheaply.
     let mut buf = vec![0u8; 2048];
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
-            unsafe { libc::close(tap_fd); }
+            unsafe {
+                libc::close(tap_fd);
+            }
             return;
         }
         // Wait up to 200ms for TAP readability, then re-check SHUTDOWN.
-        let mut pfd = libc::pollfd { fd: tap_fd, events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: tap_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let rc = unsafe { libc::poll(&mut pfd as *mut _, 1, 200) };
         if rc < 0 {
             let e = std::io::Error::last_os_error();
-            if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
             eprintln!("[veer-vm] virtio-net rx: poll: {e}");
-            unsafe { libc::close(tap_fd); }
+            unsafe {
+                libc::close(tap_fd);
+            }
             return;
         }
-        if rc == 0 || (pfd.revents & libc::POLLIN) == 0 { continue; }
+        if rc == 0 || (pfd.revents & libc::POLLIN) == 0 {
+            continue;
+        }
 
         loop {
-            let n = unsafe {
-                libc::read(tap_fd, buf.as_mut_ptr() as _, buf.len())
-            };
+            let n = unsafe { libc::read(tap_fd, buf.as_mut_ptr() as _, buf.len()) };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
-                if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK)) {
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK)
+                ) {
                     break;
                 }
-                if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
                 eprintln!("[veer-vm] virtio-net rx: read: {e}");
-                unsafe { libc::close(tap_fd); }
+                unsafe {
+                    libc::close(tap_fd);
+                }
                 return;
             }
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             if std::env::var_os("VEER_VM_NET_TRACE").is_some() {
                 eprintln!("[veer-vm/net] rx-read: {n} bytes from tap");
             }

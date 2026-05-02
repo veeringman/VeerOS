@@ -142,10 +142,22 @@ impl SocketTable {
     pub const fn new() -> Self {
         Self {
             socks: [
-                Socket::empty(), Socket::empty(), Socket::empty(), Socket::empty(),
-                Socket::empty(), Socket::empty(), Socket::empty(), Socket::empty(),
-                Socket::empty(), Socket::empty(), Socket::empty(), Socket::empty(),
-                Socket::empty(), Socket::empty(), Socket::empty(), Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
+                Socket::empty(),
             ],
         }
     }
@@ -276,12 +288,7 @@ impl SocketTable {
 
     /// Connect to a listening socket. For local sockets, addr is the port
     /// number the server bound to. Returns 0 on success (queued), `usize::MAX` on error.
-    pub fn connect(
-        &mut self,
-        sched: &mut Scheduler,
-        handle: usize,
-        addr: usize,
-    ) -> usize {
+    pub fn connect(&mut self, sched: &mut Scheduler, handle: usize, addr: usize) -> usize {
         if handle >= MAX_SOCKETS || self.socks[handle].state != SockState::Created {
             return usize::MAX;
         }
@@ -345,8 +352,7 @@ impl SocketTable {
 
         // Wake any task blocked on recv from peer.
         for task in sched.tasks.iter_mut() {
-            if task.state == TaskState::Blocked
-                && task.block_reason == BlockReason::SockRecv(peer)
+            if task.state == TaskState::Blocked && task.block_reason == BlockReason::SockRecv(peer)
             {
                 task.state = TaskState::Ready;
                 task.block_reason = BlockReason::None;
@@ -360,11 +366,7 @@ impl SocketTable {
 
     /// Read bytes from this socket's RX buffer. Returns number of bytes
     /// read, or `None` if empty (caller should block).
-    pub fn recv_bytes(
-        &mut self,
-        handle: usize,
-        out: &mut [u8],
-    ) -> Option<usize> {
+    pub fn recv_bytes(&mut self, handle: usize, out: &mut [u8]) -> Option<usize> {
         if handle >= MAX_SOCKETS || self.socks[handle].state != SockState::Connected {
             return Some(usize::MAX);
         }

@@ -213,9 +213,7 @@ impl UserTable {
             self.failed_attempts[idx] += 1;
             if self.failed_attempts[idx] >= MAX_LOGIN_ATTEMPTS {
                 // Lock the account after too many failures.
-                self.users[idx].flags = UserFlags(
-                    self.users[idx].flags.0 | UserFlags::LOCKED.0,
-                );
+                self.users[idx].flags = UserFlags(self.users[idx].flags.0 | UserFlags::LOCKED.0);
             }
             return Err(LoginError::BadCredentials);
         }
@@ -284,9 +282,7 @@ impl UserTable {
         if let Some(idx) = self.find_uid(uid) {
             self.users[idx].password_hash = simple_hash(new_password);
             // Unlock if previously locked.
-            self.users[idx].flags = UserFlags(
-                self.users[idx].flags.0 & !UserFlags::LOCKED.0,
-            );
+            self.users[idx].flags = UserFlags(self.users[idx].flags.0 & !UserFlags::LOCKED.0);
             self.failed_attempts[idx] = 0;
             true
         } else {

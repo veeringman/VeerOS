@@ -16,8 +16,8 @@ use crate::virtio::{self, Virtqueue, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 pub const SECTOR_SIZE: usize = 512;
 
 /// VIRTIO block request types.
-const VIRTIO_BLK_T_IN: u32 = 0;   // read
-const VIRTIO_BLK_T_OUT: u32 = 1;  // write
+const VIRTIO_BLK_T_IN: u32 = 0; // read
+const VIRTIO_BLK_T_OUT: u32 = 1; // write
 
 /// VIRTIO block status codes.
 const VIRTIO_BLK_S_OK: u8 = 0;
@@ -76,7 +76,11 @@ impl VirtioBlk {
             capacity: 0,
             read_only: false,
             active: false,
-            req_header: VirtioBlkReqHeader { req_type: 0, reserved: 0, sector: 0 },
+            req_header: VirtioBlkReqHeader {
+                req_type: 0,
+                reserved: 0,
+                sector: 0,
+            },
             status_byte: 0xFF,
         }
     }
@@ -168,11 +172,24 @@ impl VirtioBlk {
         };
         self.status_byte = 0xFF;
 
-        let d0 = match queue.alloc_desc() { Some(d) => d, None => return false };
-        let d1 = match queue.alloc_desc() { Some(d) => d, None => { queue.free_desc(d0); return false } };
+        let d0 = match queue.alloc_desc() {
+            Some(d) => d,
+            None => return false,
+        };
+        let d1 = match queue.alloc_desc() {
+            Some(d) => d,
+            None => {
+                queue.free_desc(d0);
+                return false;
+            }
+        };
         let d2 = match queue.alloc_desc() {
             Some(d) => d,
-            None => { queue.free_desc(d1); queue.free_desc(d0); return false }
+            None => {
+                queue.free_desc(d1);
+                queue.free_desc(d0);
+                return false;
+            }
         };
 
         // Descriptor 0: request header (device-readable).

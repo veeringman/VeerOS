@@ -60,19 +60,19 @@ pub const MAX_CONTEXT_VALUE_LEN: usize = 32;
 #[repr(u8)]
 pub enum AgentState {
     /// Slot is unused.
-    Free        = 0,
+    Free = 0,
     /// Agent has been created but has not started planning.
-    Spawned     = 1,
+    Spawned = 1,
     /// Agent is decomposing its goal into sub-tasks / sub-agents.
-    Planning    = 2,
+    Planning = 2,
     /// Agent is actively executing towards its goal.
-    Executing   = 3,
+    Executing = 3,
     /// Agent is waiting on an external event (child completion, I/O, etc.).
-    Blocked     = 4,
+    Blocked = 4,
     /// Agent successfully achieved its goal.
-    Completed   = 5,
+    Completed = 5,
     /// Agent failed to achieve its goal after exhausting retries.
-    Failed      = 6,
+    Failed = 6,
 }
 
 /// Why an agent is blocked.
@@ -80,15 +80,15 @@ pub enum AgentState {
 #[repr(u8)]
 pub enum AgentBlockReason {
     /// Not blocked.
-    None        = 0,
+    None = 0,
     /// Waiting for a child agent to complete.
-    ChildWait   = 1,
+    ChildWait = 1,
     /// Waiting for an intent resolution.
-    IntentWait  = 2,
+    IntentWait = 2,
     /// Waiting for a memory query result.
     MemoryQuery = 3,
     /// Waiting for a fabric node assignment.
-    FabricWait  = 4,
+    FabricWait = 4,
     /// Waiting for inter-agent message.
     MessageWait = 5,
 }
@@ -100,15 +100,15 @@ pub enum AgentBlockReason {
 #[repr(u8)]
 pub enum GoalPriority {
     /// Background — best-effort, may be preempted freely.
-    Background  = 0,
+    Background = 0,
     /// Normal — standard interactive priority.
-    Normal      = 1,
+    Normal = 1,
     /// Elevated — time-sensitive but not critical.
-    Elevated    = 2,
+    Elevated = 2,
     /// Critical — hard deadline, preempts everything below.
-    Critical    = 3,
+    Critical = 3,
     /// Realtime — zero-miss, reserved for safety-critical goals.
-    Realtime    = 4,
+    Realtime = 4,
 }
 
 /// A goal that an agent pursues.
@@ -197,9 +197,7 @@ impl AgentContext {
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
         // Check if key already exists.
         for i in 0..self.count {
-            if self.slots[i].key_len == key.len()
-                && &self.slots[i].key[..key.len()] == key
-            {
+            if self.slots[i].key_len == key.len() && &self.slots[i].key[..key.len()] == key {
                 let vlen = value.len().min(MAX_CONTEXT_VALUE_LEN);
                 self.slots[i].value[..vlen].copy_from_slice(&value[..vlen]);
                 self.slots[i].value_len = vlen;
@@ -224,9 +222,7 @@ impl AgentContext {
     /// Get a value by key.
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
         for i in 0..self.count {
-            if self.slots[i].key_len == key.len()
-                && &self.slots[i].key[..key.len()] == key
-            {
+            if self.slots[i].key_len == key.len() && &self.slots[i].key[..key.len()] == key {
                 return Some(&self.slots[i].value[..self.slots[i].value_len]);
             }
         }
@@ -310,13 +306,7 @@ impl AgentTable {
     /// Spawn a new agent bound to the given task (thread) ID.
     ///
     /// Returns the agent ID on success, or `None` if the table is full.
-    pub fn spawn(
-        &mut self,
-        goal: Goal,
-        task_id: usize,
-        parent: usize,
-        tick: u64,
-    ) -> Option<usize> {
+    pub fn spawn(&mut self, goal: Goal, task_id: usize, parent: usize, tick: u64) -> Option<usize> {
         for (i, slot) in self.agents.iter_mut().enumerate() {
             if slot.state == AgentState::Free {
                 *slot = AgentCb {
@@ -467,7 +457,10 @@ impl AgentTable {
 
     /// Count active (non-Free) agents.
     pub fn active_count(&self) -> usize {
-        self.agents.iter().filter(|a| a.state != AgentState::Free).count()
+        self.agents
+            .iter()
+            .filter(|a| a.state != AgentState::Free)
+            .count()
     }
 
     /// Tick all executing agents — increment ticks_used and enforce budgets.
@@ -506,15 +499,15 @@ impl AgentTable {
 #[repr(u8)]
 pub enum AgentMsgKind {
     /// Request: "please do X" (parent → child or peer → peer).
-    Request     = 0,
+    Request = 0,
     /// Response: "here is the result of X".
-    Response    = 1,
+    Response = 1,
     /// Status update: "I am N% done".
-    Progress    = 2,
+    Progress = 2,
     /// Error: "I failed at X because Y".
-    Error       = 3,
+    Error = 3,
     /// Coordination: "I need resource R" / "I release resource R".
-    Coordinate  = 4,
+    Coordinate = 4,
     /// Observation: "I noticed X" (for episodic memory logging).
     Observation = 5,
 }
@@ -540,9 +533,8 @@ pub struct AgentMessage {
 impl AgentMessage {
     /// Pack into 4 usize words for channel transport.
     pub fn pack(&self) -> [usize; 4] {
-        let w0 = (self.sender as usize)
-            | ((self.kind as usize) << 16)
-            | ((self.seq as usize) << 24);
+        let w0 =
+            (self.sender as usize) | ((self.kind as usize) << 16) | ((self.seq as usize) << 24);
         let w3 = (self.intent_id as usize) | ((self.priority as usize) << 16);
         [w0, self.payload[0], self.payload[1], w3]
     }

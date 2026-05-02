@@ -44,10 +44,7 @@ const MAX_ATTEMPTS: u8 = 3;
 ///
 /// `password_hash` is the pre-computed FNV-1a hash of the expected
 /// password (use `auth::fnv1a(b"your-password")` at compile time).
-pub fn login_prompt<S: Serial>(
-    con: &mut Console<S>,
-    password_hash: u32,
-) -> bool {
+pub fn login_prompt<S: Serial>(con: &mut Console<S>, password_hash: u32) -> bool {
     login_prompt_full(con, password_hash, None)
 }
 
@@ -71,8 +68,12 @@ pub fn login_prompt_full<S: Serial>(
     for attempt in 0..MAX_ATTEMPTS {
         let remaining = MAX_ATTEMPTS - attempt;
         if remaining < MAX_ATTEMPTS {
-            let _ = writeln!(con, "  ({} attempt{} remaining)", remaining,
-                if remaining == 1 { "" } else { "s" });
+            let _ = writeln!(
+                con,
+                "  ({} attempt{} remaining)",
+                remaining,
+                if remaining == 1 { "" } else { "s" }
+            );
         }
 
         // Read username if callback provided.

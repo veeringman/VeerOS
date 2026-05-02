@@ -121,10 +121,10 @@ impl SavedContext for X86_64Context {
     fn set_ret(&mut self, index: usize, val: usize) {
         // Return registers: rax, rdx, rdi, rsi.
         match index {
-            0 => self.gpr[0]  = val, // rax
-            1 => self.gpr[2]  = val, // rdx
-            2 => self.gpr[7]  = val, // rdi
-            3 => self.gpr[6]  = val, // rsi
+            0 => self.gpr[0] = val, // rax
+            1 => self.gpr[2] = val, // rdx
+            2 => self.gpr[7] = val, // rdi
+            3 => self.gpr[6] = val, // rsi
             _ => {}
         }
     }
@@ -133,10 +133,10 @@ impl SavedContext for X86_64Context {
     fn get_ret(&self, index: usize) -> usize {
         // Return registers: rax, rdx, rdi, rsi.
         match index {
-            0 => self.gpr[0],  // rax
-            1 => self.gpr[2],  // rdx
-            2 => self.gpr[7],  // rdi
-            3 => self.gpr[6],  // rsi
+            0 => self.gpr[0], // rax
+            1 => self.gpr[2], // rdx
+            2 => self.gpr[7], // rdi
+            3 => self.gpr[6], // rsi
             _ => 0,
         }
     }

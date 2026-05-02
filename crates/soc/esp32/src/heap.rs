@@ -84,8 +84,8 @@ unsafe fn heap_alloc(size: usize) -> *mut u8 {
             // Can we split?
             if cur.size >= aligned_size + HEADER_SIZE + min_block {
                 // Split: create a new free block after the allocation.
-                let new_free = (current as *mut u8).add(HEADER_SIZE + aligned_size)
-                    as *mut BlockHeader;
+                let new_free =
+                    (current as *mut u8).add(HEADER_SIZE + aligned_size) as *mut BlockHeader;
                 unsafe {
                     (*new_free).size = cur.size - aligned_size - HEADER_SIZE;
                     (*new_free).next = cur.next;

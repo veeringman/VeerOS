@@ -6,12 +6,12 @@
 
 #![no_std]
 
-use core::fmt::Write;
 use arch::{Console, Serial};
+use core::fmt::Write;
 
-pub mod vi;
 mod line_ed;
 pub mod script;
+pub mod vi;
 
 pub use line_ed::{History, LineEditor, LineResult};
 
@@ -21,6 +21,13 @@ pub use line_ed::{History, LineEditor, LineResult};
 
 /// Shell prompt string.
 const PROMPT: &str = "veeros> ";
+
+#[cfg(feature = "full-vi")]
+const VI_SAVE_BUF_SIZE: usize = 2 * 1024 * 1024;
+#[cfg(all(feature = "large-vi", not(feature = "full-vi")))]
+const VI_SAVE_BUF_SIZE: usize = 64 * 1024;
+#[cfg(not(any(feature = "large-vi", feature = "full-vi")))]
+const VI_SAVE_BUF_SIZE: usize = 16 * 1024;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ShellEnv — static configuration supplied by the boot code
@@ -292,7 +299,12 @@ impl Shell {
                 if let Ok(s) = core::str::from_utf8(&host_buf[..n]) {
                     let s = s.trim();
                     if !s.is_empty() {
-                        host_name = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(s.as_ptr(), s.len())) };
+                        host_name = unsafe {
+                            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                                s.as_ptr(),
+                                s.len(),
+                            ))
+                        };
                     }
                 }
             }
@@ -333,8 +345,13 @@ impl Shell {
         let mut exit = false;
         for seg in line.split(';') {
             let s = seg.trim();
-            if s.is_empty() { continue; }
-            if self.run_stmt(con, s) { exit = true; break; }
+            if s.is_empty() {
+                continue;
+            }
+            if self.run_stmt(con, s) {
+                exit = true;
+                break;
+            }
             if self.script_ctx.script_exit {
                 self.script_ctx.script_exit = false;
                 exit = true;
@@ -390,7 +407,11 @@ impl Shell {
             "elif" => {
                 let parent_active = {
                     let d = self.script_ctx.depth;
-                    if d < 2 { true } else { self.script_ctx.blocks[d - 2].active }
+                    if d < 2 {
+                        true
+                    } else {
+                        self.script_ctx.blocks[d - 2].active
+                    }
                 };
                 let already_taken = match self.script_ctx.current() {
                     Some(b) if matches!(b.kind, script::BlockKind::If) => b.if_taken,
@@ -400,20 +421,28 @@ impl Shell {
                     }
                 };
                 if already_taken {
-                    if let Some(bs) = self.script_ctx.current_mut() { bs.active = false; }
+                    if let Some(bs) = self.script_ctx.current_mut() {
+                        bs.active = false;
+                    }
                     return false;
                 }
                 let cond = parent_active && self.eval_condition(con, args);
                 if let Some(bs) = self.script_ctx.current_mut() {
                     bs.active = cond;
-                    if cond { bs.if_taken = true; }
+                    if cond {
+                        bs.if_taken = true;
+                    }
                 }
                 return false;
             }
             "else" => {
                 let parent_active = {
                     let d = self.script_ctx.depth;
-                    if d < 2 { true } else { self.script_ctx.blocks[d - 2].active }
+                    if d < 2 {
+                        true
+                    } else {
+                        self.script_ctx.blocks[d - 2].active
+                    }
                 };
                 if let Some(bs) = self.script_ctx.current_mut() {
                     if !matches!(bs.kind, script::BlockKind::If) {
@@ -519,7 +548,9 @@ impl Shell {
         let n = script::expand_vars(args, &self.script_vars, &mut exp);
         let expanded = core::str::from_utf8(&exp[..n]).unwrap_or(args);
         let expanded = expanded.trim();
-        if expanded.is_empty() { return false; }
+        if expanded.is_empty() {
+            return false;
+        }
         let (cmd, rest) = split_first_word(expanded);
         match cmd {
             "true" | ":" => true,
@@ -574,7 +605,9 @@ impl Shell {
                         n
                     };
                     let cond_str = core::str::from_utf8(&cond_buf[..cond_len]).unwrap_or("");
-                    if !self.eval_condition(con, cond_str) { break; }
+                    if !self.eval_condition(con, cond_str) {
+                        break;
+                    }
 
                     let n_lines = self.script_ctx.line_count;
                     for i in 0..n_lines {
@@ -586,8 +619,14 @@ impl Shell {
                             m
                         };
                         let l = core::str::from_utf8(&line_buf[..ln]).unwrap_or("");
-                        if self.run_stmt(con, l) { exit = true; break 'outer; }
-                        if self.script_ctx.script_exit { exit = true; break 'outer; }
+                        if self.run_stmt(con, l) {
+                            exit = true;
+                            break 'outer;
+                        }
+                        if self.script_ctx.script_exit {
+                            exit = true;
+                            break 'outer;
+                        }
                         if self.script_ctx.loop_break {
                             self.script_ctx.loop_break = false;
                             break 'outer;
@@ -619,11 +658,18 @@ impl Shell {
                     let list_str = core::str::from_utf8(&list_buf[..list_len]).unwrap_or("");
                     let mut word: Option<&str> = None;
                     for (ci, w) in list_str.split_whitespace().enumerate() {
-                        if ci == idx { word = Some(w); break; }
+                        if ci == idx {
+                            word = Some(w);
+                            break;
+                        }
                     }
-                    let Some(w) = word else { break; };
+                    let Some(w) = word else {
+                        break;
+                    };
                     self.script_vars.set(var_name, w);
-                    if let Some(bs) = self.script_ctx.current_mut() { bs.for_idx += 1; }
+                    if let Some(bs) = self.script_ctx.current_mut() {
+                        bs.for_idx += 1;
+                    }
 
                     let n_lines = self.script_ctx.line_count;
                     for i in 0..n_lines {
@@ -635,8 +681,14 @@ impl Shell {
                             m
                         };
                         let l = core::str::from_utf8(&line_buf[..ln]).unwrap_or("");
-                        if self.run_stmt(con, l) { exit = true; break 'outer2; }
-                        if self.script_ctx.script_exit { exit = true; break 'outer2; }
+                        if self.run_stmt(con, l) {
+                            exit = true;
+                            break 'outer2;
+                        }
+                        if self.script_ctx.script_exit {
+                            exit = true;
+                            break 'outer2;
+                        }
                         if self.script_ctx.loop_break {
                             self.script_ctx.loop_break = false;
                             break 'outer2;
@@ -715,7 +767,7 @@ impl Shell {
                 let _ = writeln!(con, "Logged out.");
                 return true;
             }
-            "vi" | "edit" => self.cmd_vi(con, args),
+            "vi" | "vim" | "edit" => self.cmd_vi(con, args),
             "history" => self.cmd_history(con, args),
             "set" => self.cmd_set(con, args),
             // ── file commands ────────────────────────────
@@ -776,8 +828,12 @@ impl Shell {
                 let inner = t.strip_suffix(']').unwrap_or(t).trim_end();
                 self.script_vars.last_status = if script::eval_test(inner, None) { 0 } else { 1 };
             }
-            "true" | ":" => { self.script_vars.last_status = 0; }
-            "false" => { self.script_vars.last_status = 1; }
+            "true" | ":" => {
+                self.script_vars.last_status = 0;
+            }
+            "false" => {
+                self.script_vars.last_status = 1;
+            }
             "unset" => self.cmd_unset(con, args),
             "vars" | "env" => self.cmd_vars(con),
             "export" => self.cmd_export(con, args),
@@ -917,23 +973,30 @@ impl Shell {
         for raw_line in content.lines() {
             // Strip comments (# at start of a trimmed line).
             let line = raw_line.trim();
-            if line.is_empty() { continue; }
-            if line.starts_with('#') { continue; }
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
             // Still honor ; separators by running through run_stmt per segment.
             for seg in line.split(';') {
                 let s = seg.trim();
-                if s.is_empty() { continue; }
+                if s.is_empty() {
+                    continue;
+                }
                 if self.run_stmt(con, s) {
                     self.script_ctx.script_exit = true;
                     return;
                 }
-                if self.script_ctx.script_exit { return; }
+                if self.script_ctx.script_exit {
+                    return;
+                }
             }
         }
     }
 
     // ── built-in commands ────────────────────────────────────────────────
-
 
     fn cmd_help<S: Serial>(&self, con: &mut Console<S>) {
         let _ = writeln!(con, "");
@@ -948,8 +1011,14 @@ impl Shell {
         let _ = writeln!(con, "  meminfo    Memory pool statistics");
         let _ = writeln!(con, "  drivers    List registered drivers");
         let _ = writeln!(con, "  wifi       Wi-Fi (scan/list/set/connect/status)");
-        let _ = writeln!(con, "  bt         Bluetooth LE (scan/list/advertise/stop/status)");
-        let _ = writeln!(con, "  zigbee     ZigBee/Thread 802.15.4 (init/scan/channel/send/status)");
+        let _ = writeln!(
+            con,
+            "  bt         Bluetooth LE (scan/list/advertise/stop/status)"
+        );
+        let _ = writeln!(
+            con,
+            "  zigbee     ZigBee/Thread 802.15.4 (init/scan/channel/send/status)"
+        );
         let _ = writeln!(con, "  sensor     Virtual sensors (list/read/set/status)");
         let _ = writeln!(con, "  clear      Clear the screen");
         let _ = writeln!(con, "  echo       Echo arguments");
@@ -1008,7 +1077,10 @@ impl Shell {
         let _ = writeln!(con, "  hostname   Get/set system hostname");
         let _ = writeln!(con, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} ai-native \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
         let _ = writeln!(con, "  agents     Agent lifecycle (list/spawn/kill/status)");
-        let _ = writeln!(con, "  intent     Intent engine (submit/status/cancel/stats)");
+        let _ = writeln!(
+            con,
+            "  intent     Intent engine (submit/status/cancel/stats)"
+        );
         let _ = writeln!(con, "  memory     Persistent memory (get/set/stats)");
         let _ = writeln!(con, "  fabric     Execution fabric node status");
         let _ = writeln!(con, "  demo       Run AI-native interactive walkthrough");
@@ -1199,11 +1271,35 @@ impl Shell {
         editor.settings.tabstop = self.vars.vi_tabstop;
         editor.settings.showmatch = self.vars.vi_showmatch;
         editor.settings.autoindent = self.vars.vi_autoindent;
-        if !args.is_empty() {
-            editor.load(args);
-            editor.set_filename("scratch");
+        let path = args.trim();
+        if !path.is_empty() {
+            if let Some(read_fn) = self.env.vfs_read_file {
+                let mut load_buf = [0u8; VI_SAVE_BUF_SIZE];
+                let n = read_fn(path, &mut load_buf);
+                if n > 0 {
+                    if let Ok(text) = core::str::from_utf8(&load_buf[..n]) {
+                        editor.load(text);
+                    }
+                } else if self.path_exists(path) {
+                    editor.load("");
+                }
+            }
+            editor.set_filename(path);
         }
-        let _saved = editor.run(con);
+        let write_fn = self.env.vfs_write_file;
+        let _saved = editor.run_with_save(con, |ed| {
+            let Some(write_fn) = write_fn else {
+                return false;
+            };
+            if path.is_empty() {
+                return false;
+            }
+            let mut save_buf = [0u8; VI_SAVE_BUF_SIZE];
+            let Some(n) = ed.write_contents_to_slice(&mut save_buf) else {
+                return false;
+            };
+            write_fn(path, &save_buf[..n], false)
+        });
     }
 
     fn cmd_history<S: Serial>(&mut self, con: &mut Console<S>, args: &str) {
@@ -1224,7 +1320,11 @@ impl Shell {
         // Optionally limit: "history N" shows last N entries
         let show = if !args.is_empty() {
             if let Ok(n) = parse_usize_simple(args) {
-                if n < count { n } else { count }
+                if n < count {
+                    n
+                } else {
+                    count
+                }
             } else {
                 count
             }
@@ -1246,10 +1346,22 @@ impl Shell {
         if args.is_empty() {
             // Show all variables
             let _ = writeln!(con, "  Shell variables:");
-            let _ = writeln!(con, "    number      = {}", if self.vars.vi_number { "on" } else { "off" });
+            let _ = writeln!(
+                con,
+                "    number      = {}",
+                if self.vars.vi_number { "on" } else { "off" }
+            );
             let _ = writeln!(con, "    tabstop     = {}", self.vars.vi_tabstop);
-            let _ = writeln!(con, "    showmatch   = {}", if self.vars.vi_showmatch { "on" } else { "off" });
-            let _ = writeln!(con, "    autoindent  = {}", if self.vars.vi_autoindent { "on" } else { "off" });
+            let _ = writeln!(
+                con,
+                "    showmatch   = {}",
+                if self.vars.vi_showmatch { "on" } else { "off" }
+            );
+            let _ = writeln!(
+                con,
+                "    autoindent  = {}",
+                if self.vars.vi_autoindent { "on" } else { "off" }
+            );
             if self.vars.prompt_len > 0 {
                 if let Ok(s) = core::str::from_utf8(&self.vars.prompt_str[..self.vars.prompt_len]) {
                     let _ = writeln!(con, "    prompt      = \"{}\"", s);
@@ -1272,7 +1384,11 @@ impl Shell {
         match key {
             "number" => {
                 self.vars.vi_number = !matches!(val, "off" | "0" | "false" | "no");
-                let _ = writeln!(con, "  number = {}", if self.vars.vi_number { "on" } else { "off" });
+                let _ = writeln!(
+                    con,
+                    "  number = {}",
+                    if self.vars.vi_number { "on" } else { "off" }
+                );
             }
             "nonumber" => {
                 self.vars.vi_number = false;
@@ -1288,7 +1404,11 @@ impl Shell {
             }
             "showmatch" | "sm" => {
                 self.vars.vi_showmatch = !matches!(val, "off" | "0" | "false" | "no");
-                let _ = writeln!(con, "  showmatch = {}", if self.vars.vi_showmatch { "on" } else { "off" });
+                let _ = writeln!(
+                    con,
+                    "  showmatch = {}",
+                    if self.vars.vi_showmatch { "on" } else { "off" }
+                );
             }
             "noshowmatch" | "nosm" => {
                 self.vars.vi_showmatch = false;
@@ -1296,7 +1416,11 @@ impl Shell {
             }
             "autoindent" | "ai" => {
                 self.vars.vi_autoindent = !matches!(val, "off" | "0" | "false" | "no");
-                let _ = writeln!(con, "  autoindent = {}", if self.vars.vi_autoindent { "on" } else { "off" });
+                let _ = writeln!(
+                    con,
+                    "  autoindent = {}",
+                    if self.vars.vi_autoindent { "on" } else { "off" }
+                );
             }
             "noautoindent" | "noai" => {
                 self.vars.vi_autoindent = false;
@@ -1311,7 +1435,10 @@ impl Shell {
             }
             _ => {
                 let _ = writeln!(con, "  unknown variable: '{}'", key);
-                let _ = writeln!(con, "  Variables: number tabstop showmatch autoindent prompt");
+                let _ = writeln!(
+                    con,
+                    "  Variables: number tabstop showmatch autoindent prompt"
+                );
             }
         }
     }
@@ -1344,10 +1471,17 @@ impl Shell {
     fn cmd_ls<S: Serial>(&self, con: &mut Console<S>, args: &str) {
         match self.env.vfs_list_dir {
             Some(f) => {
-                let path = if args.is_empty() { "." } else { args };
+                let mut path = ".";
+                for part in args.split_whitespace() {
+                    if !part.starts_with('-') {
+                        path = part;
+                    }
+                }
                 f(path, con);
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1361,6 +1495,9 @@ impl Shell {
                 let mut buf = [0u8; 1024];
                 let n = f(args, &mut buf);
                 if n == 0 {
+                    if self.path_exists(args) {
+                        return;
+                    }
                     let _ = writeln!(con, "cat: cannot read '{}'", args);
                 } else if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                     // Write without extra trailing newline if content already ends with one
@@ -1372,7 +1509,39 @@ impl Shell {
                     let _ = writeln!(con, "cat: '{}': binary file ({} bytes)", args, n);
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
+        }
+    }
+
+    fn path_exists(&self, path: &str) -> bool {
+        struct StatBuffer {
+            data: [u8; 96],
+            len: usize,
+        }
+
+        impl core::fmt::Write for StatBuffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let remaining = self.data.len().saturating_sub(self.len);
+                let take = remaining.min(s.len());
+                self.data[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+                self.len += take;
+                Ok(())
+            }
+        }
+
+        let Some(stat_fn) = self.env.vfs_stat else {
+            return true;
+        };
+        let mut stat = StatBuffer {
+            data: [0u8; 96],
+            len: 0,
+        };
+        stat_fn(path, &mut stat);
+        match core::str::from_utf8(&stat.data[..stat.len]) {
+            Ok(text) => !text.contains("no such file or directory"),
+            Err(_) => true,
         }
     }
 
@@ -1387,7 +1556,9 @@ impl Shell {
                     let _ = writeln!(con, "mkdir: cannot create '{}'", args);
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1402,7 +1573,9 @@ impl Shell {
                     let _ = writeln!(con, "touch: cannot create '{}'", args);
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1417,7 +1590,9 @@ impl Shell {
                     let _ = writeln!(con, "rm: cannot remove '{}'", args);
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1436,11 +1611,17 @@ impl Shell {
         }
         let read_fn = match self.env.vfs_read_file {
             Some(f) => f,
-            None => { let _ = writeln!(con, "filesystem not available"); return; }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+                return;
+            }
         };
         let write_fn = match self.env.vfs_write_file {
             Some(f) => f,
-            None => { let _ = writeln!(con, "filesystem not available"); return; }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+                return;
+            }
         };
         let mut buf = [0u8; 1024];
         let n = read_fn(src, &mut buf);
@@ -1471,7 +1652,9 @@ impl Shell {
                     let _ = writeln!(con, "mv: cannot move '{}' to '{}'", src, dst);
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1488,7 +1671,9 @@ impl Shell {
                     let _ = writeln!(con, "/");
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1500,7 +1685,9 @@ impl Shell {
                     let _ = writeln!(con, "cd: no such directory: '{}'", path);
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1511,7 +1698,9 @@ impl Shell {
         }
         match self.env.vfs_stat {
             Some(f) => f(args, con),
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1522,7 +1711,10 @@ impl Shell {
         }
         let read_fn = match self.env.vfs_read_file {
             Some(f) => f,
-            None => { let _ = writeln!(con, "filesystem not available"); return; }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+                return;
+            }
         };
         let mut buf = [0u8; 512];
         let n = read_fn(args, &mut buf);
@@ -1581,7 +1773,9 @@ impl Shell {
                     let _ = writeln!(con, "write: cannot write to '{}'", path);
                 }
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1591,7 +1785,9 @@ impl Shell {
                 let path = if args.is_empty() { "/" } else { args };
                 f(path, con);
             }
-            None => { let _ = writeln!(con, "filesystem not available"); }
+            None => {
+                let _ = writeln!(con, "filesystem not available");
+            }
         }
     }
 
@@ -1602,7 +1798,9 @@ impl Shell {
             // No arguments → list mounts.
             match self.env.mount_list {
                 Some(f) => f(con),
-                None => { let _ = writeln!(con, "mount: not available"); }
+                None => {
+                    let _ = writeln!(con, "mount: not available");
+                }
             }
             return;
         }
@@ -1622,7 +1820,9 @@ impl Shell {
                     let _ = writeln!(con, "mount: failed to mount {} at {}", dev, path);
                 }
             }
-            None => { let _ = writeln!(con, "mount: not available"); }
+            None => {
+                let _ = writeln!(con, "mount: not available");
+            }
         }
     }
 
@@ -1639,21 +1839,27 @@ impl Shell {
                     let _ = writeln!(con, "umount: {} not mounted", args);
                 }
             }
-            None => { let _ = writeln!(con, "umount: not available"); }
+            None => {
+                let _ = writeln!(con, "umount: not available");
+            }
         }
     }
 
     fn cmd_lsblk<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.lsblk {
             Some(f) => f(con),
-            None => { let _ = writeln!(con, "lsblk: not available"); }
+            None => {
+                let _ = writeln!(con, "lsblk: not available");
+            }
         }
     }
 
     fn cmd_df<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.df_cmd {
             Some(f) => f(con),
-            None => { let _ = writeln!(con, "df: not available"); }
+            None => {
+                let _ = writeln!(con, "df: not available");
+            }
         }
     }
 
@@ -1661,7 +1867,9 @@ impl Shell {
         let _ = writeln!(con, "── Input Devices ──");
         match self.env.input_status {
             Some(f) => f(con),
-            None => { let _ = writeln!(con, "  input subsystem: not available"); }
+            None => {
+                let _ = writeln!(con, "  input subsystem: not available");
+            }
         }
         // Show BLE HID devices if callback available.
         if let Some(f) = self.env.ble_hid_list {
@@ -1678,7 +1886,9 @@ impl Shell {
     fn cmd_lsusb<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.usb_list {
             Some(f) => f(con),
-            None => { let _ = writeln!(con, "lsusb: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "lsusb: not available on this platform");
+            }
         }
     }
 
@@ -1694,7 +1904,9 @@ impl Shell {
                     f(sub, rest, con);
                 }
             }
-            None => { let _ = writeln!(con, "gpio: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "gpio: not available on this platform");
+            }
         }
     }
 
@@ -1706,14 +1918,19 @@ impl Shell {
             Some(f) => {
                 if sub.is_empty() {
                     let _ = writeln!(con, "Usage: i2c <scan|read|write> [bus] [addr] [reg] [val]");
-                    let _ = writeln!(con, "  i2c scan [bus]         Scan for devices (bus 0-6, default 1)");
+                    let _ = writeln!(
+                        con,
+                        "  i2c scan [bus]         Scan for devices (bus 0-6, default 1)"
+                    );
                     let _ = writeln!(con, "  i2c read <bus> <addr> <reg>    Read register");
                     let _ = writeln!(con, "  i2c write <bus> <addr> <reg> <val>  Write register");
                 } else {
                     f(sub, rest, con);
                 }
             }
-            None => { let _ = writeln!(con, "i2c: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "i2c: not available on this platform");
+            }
         }
     }
 
@@ -1731,7 +1948,9 @@ impl Shell {
                     f(sub, rest, con);
                 }
             }
-            None => { let _ = writeln!(con, "spi: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "spi: not available on this platform");
+            }
         }
     }
 
@@ -1740,7 +1959,9 @@ impl Shell {
     fn cmd_hwinfo<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.hw_info {
             Some(f) => f(con),
-            None => { let _ = writeln!(con, "hwinfo: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "hwinfo: not available on this platform");
+            }
         }
     }
 
@@ -1752,21 +1973,27 @@ impl Shell {
                 let frac = ((mc % 1000).unsigned_abs() / 100) as u32;
                 let _ = writeln!(con, "  SoC temperature: {}.{}°C", deg, frac);
             }
-            None => { let _ = writeln!(con, "temp: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "temp: not available on this platform");
+            }
         }
     }
 
     fn cmd_dmesg<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.dmesg {
             Some(f) => f(con),
-            None => { let _ = writeln!(con, "dmesg: no kernel log available"); }
+            None => {
+                let _ = writeln!(con, "dmesg: no kernel log available");
+            }
         }
     }
 
     fn cmd_auditlog<S: Serial>(&self, con: &mut Console<S>, args: &str) {
         match self.env.auditlog_cmd {
             Some(f) => f(args, con as &mut dyn core::fmt::Write),
-            None => { let _ = writeln!(con, "auditlog: not available"); }
+            None => {
+                let _ = writeln!(con, "auditlog: not available");
+            }
         }
     }
 
@@ -1779,35 +2006,45 @@ impl Shell {
                 };
                 f(sub, rest, con as &mut dyn core::fmt::Write);
             }
-            None => { let _ = writeln!(con, "caps: not available"); }
+            None => {
+                let _ = writeln!(con, "caps: not available");
+            }
         }
     }
 
     fn cmd_ifconfig<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.ifconfig_cmd {
             Some(f) => f(con as &mut dyn core::fmt::Write),
-            None => { let _ = writeln!(con, "ifconfig: not available"); }
+            None => {
+                let _ = writeln!(con, "ifconfig: not available");
+            }
         }
     }
 
     fn cmd_ping<S: Serial>(&self, con: &mut Console<S>, args: &str) {
         match self.env.ping_cmd {
             Some(f) => f(args, con as &mut dyn core::fmt::Write),
-            None => { let _ = writeln!(con, "ping: not available"); }
+            None => {
+                let _ = writeln!(con, "ping: not available");
+            }
         }
     }
 
     fn cmd_netstat<S: Serial>(&self, con: &mut Console<S>) {
         match self.env.netstat_cmd {
             Some(f) => f(con as &mut dyn core::fmt::Write),
-            None => { let _ = writeln!(con, "netstat: not available"); }
+            None => {
+                let _ = writeln!(con, "netstat: not available");
+            }
         }
     }
 
     fn cmd_ssh<S: Serial>(&self, con: &mut Console<S>, args: &str) {
         match self.env.ssh_cmd {
             Some(f) => f(args, con.serial()),
-            None => { let _ = writeln!(con, "ssh: not available"); }
+            None => {
+                let _ = writeln!(con, "ssh: not available");
+            }
         }
     }
 
@@ -1841,7 +2078,9 @@ impl Shell {
                 let _ = writeln!(con, "Rebooting...");
                 f();
             }
-            None => { let _ = writeln!(con, "reboot: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "reboot: not available on this platform");
+            }
         }
     }
 
@@ -1851,7 +2090,9 @@ impl Shell {
                 let _ = writeln!(con, "Shutting down...");
                 f();
             }
-            None => { let _ = writeln!(con, "shutdown: not available on this platform"); }
+            None => {
+                let _ = writeln!(con, "shutdown: not available on this platform");
+            }
         }
     }
 
@@ -2341,8 +2582,14 @@ impl Shell {
             "" | "help" => {
                 let _ = writeln!(con, "  VeerOS AI-Native Demo Scenarios");
                 let _ = writeln!(con, "  ─────────────────────────────────");
-                let _ = writeln!(con, "  demo deploy    Deploy a service (intent → agents → memory)");
-                let _ = writeln!(con, "  demo pipeline  Data pipeline (multi-step intent decomposition)");
+                let _ = writeln!(
+                    con,
+                    "  demo deploy    Deploy a service (intent → agents → memory)"
+                );
+                let _ = writeln!(
+                    con,
+                    "  demo pipeline  Data pipeline (multi-step intent decomposition)"
+                );
                 let _ = writeln!(con, "  demo monitor   Spawn a monitoring agent swarm");
                 let _ = writeln!(con, "  demo full      Run all scenarios end-to-end");
                 let _ = writeln!(con, "");
@@ -2382,25 +2629,49 @@ impl Shell {
         // Step 2: Store configuration in memory
         let _ = writeln!(con, "  ── Step 2: Store deployment config in memory ──");
         if let Some(f) = self.env.memory_cmd {
-            f("set", "deploy.target host-demo", con as &mut dyn core::fmt::Write);
+            f(
+                "set",
+                "deploy.target host-demo",
+                con as &mut dyn core::fmt::Write,
+            );
             f("set", "deploy.replicas 3", con as &mut dyn core::fmt::Write);
-            f("set", "deploy.service web-api-v2", con as &mut dyn core::fmt::Write);
+            f(
+                "set",
+                "deploy.service web-api-v2",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
         // Step 3: Submit deploy intent
         let _ = writeln!(con, "  ── Step 3: Submit deploy intent ──");
         if let Some(f) = self.env.intent_cmd {
-            f("submit", "deploy deploy web-api-v2 to edge cluster", con as &mut dyn core::fmt::Write);
+            f(
+                "submit",
+                "deploy deploy web-api-v2 to edge cluster",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
         // Step 4: Spawn agents for each deploy step
         let _ = writeln!(con, "  ── Step 4: Spawn agents for deployment steps ──");
         if let Some(f) = self.env.agent_cmd {
-            f("spawn", "validate web-api-v2 image", con as &mut dyn core::fmt::Write);
-            f("spawn", "provision container on host-demo", con as &mut dyn core::fmt::Write);
-            f("spawn", "health-check web-api-v2 endpoints", con as &mut dyn core::fmt::Write);
+            f(
+                "spawn",
+                "validate web-api-v2 image",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "provision container on host-demo",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "health-check web-api-v2 endpoints",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
@@ -2424,15 +2695,26 @@ impl Shell {
         // Step 7: Record outcome in memory
         let _ = writeln!(con, "  ── Step 7: Record deployment outcome ──");
         if let Some(f) = self.env.memory_cmd {
-            f("set", "deploy.status success", con as &mut dyn core::fmt::Write);
-            f("set", "deploy.version v2.1.0", con as &mut dyn core::fmt::Write);
+            f(
+                "set",
+                "deploy.status success",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "set",
+                "deploy.version v2.1.0",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
         // Summary
         let _ = writeln!(con, "  ── Summary ──");
         let _ = writeln!(con, "  Service deployment completed successfully.");
-        let _ = writeln!(con, "  Intent decomposed → agents spawned → executed → memory updated.");
+        let _ = writeln!(
+            con,
+            "  Intent decomposed → agents spawned → executed → memory updated."
+        );
         let _ = writeln!(con, "  Verify with: agents, intent, memory stats");
     }
 
@@ -2448,26 +2730,54 @@ impl Shell {
         // Submit pipeline intent
         let _ = writeln!(con, "  ── Step 1: Submit pipeline intent ──");
         if let Some(f) = self.env.intent_cmd {
-            f("submit", "pipeline sensor-data ETL to dashboard", con as &mut dyn core::fmt::Write);
+            f(
+                "submit",
+                "pipeline sensor-data ETL to dashboard",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
         // Spawn pipeline agents
         let _ = writeln!(con, "  ── Step 2: Spawn pipeline stage agents ──");
         if let Some(f) = self.env.agent_cmd {
-            f("spawn", "ingest sensor readings from esp32c6", con as &mut dyn core::fmt::Write);
-            f("spawn", "transform raw data to normalized format", con as &mut dyn core::fmt::Write);
-            f("spawn", "validate data integrity checksums", con as &mut dyn core::fmt::Write);
-            f("spawn", "output results to dashboard endpoint", con as &mut dyn core::fmt::Write);
+            f(
+                "spawn",
+                "ingest sensor readings from esp32c6",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "transform raw data to normalized format",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "validate data integrity checksums",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "output results to dashboard endpoint",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
         // Store pipeline metadata
         let _ = writeln!(con, "  ── Step 3: Store pipeline metadata ──");
         if let Some(f) = self.env.memory_cmd {
-            f("set", "pipeline.source esp32c6-sensor", con as &mut dyn core::fmt::Write);
+            f(
+                "set",
+                "pipeline.source esp32c6-sensor",
+                con as &mut dyn core::fmt::Write,
+            );
             f("set", "pipeline.stages 4", con as &mut dyn core::fmt::Write);
-            f("set", "pipeline.format normalized-json", con as &mut dyn core::fmt::Write);
+            f(
+                "set",
+                "pipeline.format normalized-json",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
@@ -2480,8 +2790,14 @@ impl Shell {
         }
         let _ = writeln!(con, "");
 
-        let _ = writeln!(con, "  Pipeline configured with 4 stages: ingest → transform → validate → output");
-        let _ = writeln!(con, "  Verify with: agents, intent list, memory get pipeline.stages");
+        let _ = writeln!(
+            con,
+            "  Pipeline configured with 4 stages: ingest → transform → validate → output"
+        );
+        let _ = writeln!(
+            con,
+            "  Verify with: agents, intent list, memory get pipeline.stages"
+        );
     }
 
     /// Demo: monitoring agent swarm.
@@ -2496,26 +2812,58 @@ impl Shell {
         // Submit monitor intent
         let _ = writeln!(con, "  ── Step 1: Submit monitoring intent ──");
         if let Some(f) = self.env.intent_cmd {
-            f("submit", "monitor cluster health and thermals", con as &mut dyn core::fmt::Write);
+            f(
+                "submit",
+                "monitor cluster health and thermals",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
         // Spawn monitoring agents across fabric nodes
         let _ = writeln!(con, "  ── Step 2: Spawn monitoring agents ──");
         if let Some(f) = self.env.agent_cmd {
-            f("spawn", "monitor host-demo CPU and memory", con as &mut dyn core::fmt::Write);
-            f("spawn", "monitor rpi5-edge-01 thermals", con as &mut dyn core::fmt::Write);
-            f("spawn", "monitor esp32c6-sensor battery", con as &mut dyn core::fmt::Write);
-            f("spawn", "aggregate health metrics", con as &mut dyn core::fmt::Write);
+            f(
+                "spawn",
+                "monitor host-demo CPU and memory",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "monitor rpi5-edge-01 thermals",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "monitor esp32c6-sensor battery",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "aggregate health metrics",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
         // Store monitoring config
         let _ = writeln!(con, "  ── Step 3: Configure monitoring thresholds ──");
         if let Some(f) = self.env.memory_cmd {
-            f("set", "monitor.interval_ms 5000", con as &mut dyn core::fmt::Write);
-            f("set", "monitor.cpu_threshold 80", con as &mut dyn core::fmt::Write);
-            f("set", "monitor.temp_threshold 75", con as &mut dyn core::fmt::Write);
+            f(
+                "set",
+                "monitor.interval_ms 5000",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "set",
+                "monitor.cpu_threshold 80",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "set",
+                "monitor.temp_threshold 75",
+                con as &mut dyn core::fmt::Write,
+            );
         }
         let _ = writeln!(con, "");
 
@@ -2527,7 +2875,10 @@ impl Shell {
         let _ = writeln!(con, "");
 
         let _ = writeln!(con, "  Monitoring swarm active across 3 fabric nodes.");
-        let _ = writeln!(con, "  Verify with: agents, fabric, memory get monitor.interval_ms");
+        let _ = writeln!(
+            con,
+            "  Verify with: agents, fabric, memory get monitor.interval_ms"
+        );
     }
 }
 
@@ -2550,14 +2901,22 @@ fn split_first_word(s: &str) -> (&str, &str) {
 /// alphanumerics or underscores, followed by `=`.
 fn is_assignment_line(line: &str) -> bool {
     let b = line.as_bytes();
-    if b.is_empty() { return false; }
+    if b.is_empty() {
+        return false;
+    }
     let first = b[0];
-    if !(first.is_ascii_alphabetic() || first == b'_') { return false; }
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
     let mut i = 1;
     while i < b.len() {
         let c = b[i];
-        if c == b'=' { return i > 0; }
-        if !(c.is_ascii_alphanumeric() || c == b'_') { return false; }
+        if c == b'=' {
+            return i > 0;
+        }
+        if !(c.is_ascii_alphanumeric() || c == b'_') {
+            return false;
+        }
         i += 1;
     }
     false
@@ -2566,10 +2925,14 @@ fn is_assignment_line(line: &str) -> bool {
 /// Simple no_std usize parser.
 fn parse_usize_simple(s: &str) -> Result<usize, ()> {
     let bytes = s.as_bytes();
-    if bytes.is_empty() { return Err(()); }
+    if bytes.is_empty() {
+        return Err(());
+    }
     let mut val: usize = 0;
     for &b in bytes {
-        if b < b'0' || b > b'9' { return Err(()); }
+        if b < b'0' || b > b'9' {
+            return Err(());
+        }
         val = val.checked_mul(10).ok_or(())?;
         val = val.checked_add((b - b'0') as usize).ok_or(())?;
     }
@@ -2579,7 +2942,11 @@ fn parse_usize_simple(s: &str) -> Result<usize, ()> {
 /// Simple no_std u8 parser.
 fn parse_u8_simple(s: &str) -> Result<u8, ()> {
     let n = parse_usize_simple(s)?;
-    if n > 255 { Err(()) } else { Ok(n as u8) }
+    if n > 255 {
+        Err(())
+    } else {
+        Ok(n as u8)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2587,7 +2954,9 @@ fn parse_u8_simple(s: &str) -> Result<u8, ()> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 static MAN_PAGES: &[(&str, &str)] = &[
-    ("scheduler", "\
+    (
+        "scheduler",
+        "\
 SCHEDULER(7) — VeerOS Scheduler
 
 The VeerOS scheduler is a preemptive, priority-based round-robin scheduler.
@@ -2597,9 +2966,11 @@ ready task. Equal-priority tasks are round-robined.
 
 Task states: Free, Ready, Running, Blocked, Suspended, Zombie.
 
-See also: tasks, yield, exit, spawn"),
-
-    ("ipc", "\
+See also: tasks, yield, exit, spawn",
+    ),
+    (
+        "ipc",
+        "\
 IPC(7) — VeerOS Inter-Process Communication
 
 VeerOS provides two IPC mechanisms:
@@ -2615,9 +2986,11 @@ VeerOS provides two IPC mechanisms:
 Channels support blocking send/recv with automatic wakeup.
 Typed channels: Channel<T> in userlib for compile-time type safety.
 
-See also: channel, send, recv, poll"),
-
-    ("memory", "\
+See also: channel, send, recv, poll",
+    ),
+    (
+        "memory",
+        "\
 MEMORY(7) — VeerOS Memory Management
 
 Memory isolation uses RISC-V PMP (Physical Memory Protection) on rv32imc.
@@ -2630,9 +3003,11 @@ Syscalls: SYS_ALLOC (0x40), SYS_FREE (0x41),
 Pointer validation: user pointers in syscalls are checked against the
 calling task's granted memory regions.
 
-See also: meminfo, alloc, free"),
-
-    ("boot", "\
+See also: meminfo, alloc, free",
+    ),
+    (
+        "boot",
+        "\
 BOOT(7) — VeerOS Boot Sequence
 
 1. Reset vector → _start (assembly): set up stack, zero BSS
@@ -2643,18 +3018,22 @@ BOOT(7) — VeerOS Boot Sequence
 
 Boot tasks: idle (lowest priority), shell, net listener (QEMU).
 
-See also: scheduler, tasks"),
-
-    ("yield", "\
+See also: scheduler, tasks",
+    ),
+    (
+        "yield",
+        "\
 YIELD(1) — Yield CPU to scheduler
 
   Syscall: SYS_YIELD (0x00)
   Userlib: task::yield_now()
 
 Voluntarily gives up the current time slice. The scheduler picks the
-next ready task. If no other task is ready, the caller continues."),
-
-    ("exit", "\
+next ready task. If no other task is ready, the caller continues.",
+    ),
+    (
+        "exit",
+        "\
 EXIT(1) — Terminate the calling task
 
   Syscall: SYS_EXIT (0x01)
@@ -2662,9 +3041,11 @@ EXIT(1) — Terminate the calling task
   Userlib: task::exit(code)
 
 Terminates the calling task, sets state to Free, and wakes any tasks
-blocked in SYS_JOIN on this task, delivering the exit code."),
-
-    ("spawn", "\
+blocked in SYS_JOIN on this task, delivering the exit code.",
+    ),
+    (
+        "spawn",
+        "\
 SPAWN(1) — Create a new task
 
   Syscall: SYS_SPAWN (0x05)
@@ -2675,9 +3056,11 @@ SPAWN(1) — Create a new task
 Creates a new task (thread) within the current process. The new task
 starts at the given entry point with the given stack and priority.
 
-See also: join, exit"),
-
-    ("join", "\
+See also: join, exit",
+    ),
+    (
+        "join",
+        "\
 JOIN(1) — Wait for a task to exit
 
   Syscall: SYS_JOIN (0x06)
@@ -2686,9 +3069,11 @@ JOIN(1) — Wait for a task to exit
   Userlib: task::join(task_id) -> usize
 
 Blocks the caller until the target task exits. Returns the target's
-exit code. If the target has already exited, returns immediately."),
-
-    ("sleep", "\
+exit code. If the target has already exited, returns immediately.",
+    ),
+    (
+        "sleep",
+        "\
 SLEEP(1) — Sleep for N ticks
 
   Syscall: SYS_SLEEP (0x30)
@@ -2696,9 +3081,11 @@ SLEEP(1) — Sleep for N ticks
   Userlib: time::sleep(ticks)
 
 Blocks the calling task for at least the specified number of timer
-ticks (1 ms per tick). The task is woken by the timer ISR."),
-
-    ("send", "\
+ticks (1 ms per tick). The task is woken by the timer ISR.",
+    ),
+    (
+        "send",
+        "\
 SEND(1) — Send a message on a channel
 
   Syscall: SYS_CHAN_SEND (0x59)
@@ -2708,9 +3095,11 @@ SEND(1) — Send a message on a channel
 
 Sends a 4-word message. Blocks if the channel is full.
 
-See also: recv, channel, poll"),
-
-    ("recv", "\
+See also: recv, channel, poll",
+    ),
+    (
+        "recv",
+        "\
 RECV(1) — Receive a message from a channel
 
   Syscall: SYS_CHAN_RECV (0x5A)
@@ -2720,9 +3109,11 @@ RECV(1) — Receive a message from a channel
 
 Receives a 4-word message. Blocks if the channel is empty.
 
-See also: send, channel, poll"),
-
-    ("channel", "\
+See also: send, channel, poll",
+    ),
+    (
+        "channel",
+        "\
 CHANNEL(7) — Bounded message channels
 
 Channels are bounded ring-buffer queues (depth 8) from a fixed pool (8 max).
@@ -2737,9 +3128,11 @@ Operations:
 
 Typed wrapper: Channel<T> for compile-time type safety (T <= 4 words).
 
-See also: send, recv, ipc"),
-
-    ("socket", "\
+See also: send, recv, ipc",
+    ),
+    (
+        "socket",
+        "\
 SOCKET(7) — BSD-style sockets
 
 VeerOS provides local (Unix-domain-like) sockets backed by in-kernel
@@ -2757,9 +3150,11 @@ Operations:
 
 Domains: Local (0), Inet (1).  Types: Stream (0), Dgram (1).
 
-See also: ipc, channel"),
-
-    ("futex", "\
+See also: ipc, channel",
+    ),
+    (
+        "futex",
+        "\
 FUTEX(7) — Fast userspace mutexes
 
 VeerOS implements Linux-style futexes as the universal synchronization
@@ -2772,9 +3167,11 @@ Syscalls:
 Built on futex: Mutex<T>, RwLock<T>, Condvar, Semaphore.
 Priority inheritance: holder is boosted to max waiter priority.
 
-See also: sync, mutex"),
-
-    ("sync", "\
+See also: sync, mutex",
+    ),
+    (
+        "sync",
+        "\
 SYNC(7) — Synchronization primitives
 
 Userlib synchronization built on kernel futexes:
@@ -2786,23 +3183,29 @@ Userlib synchronization built on kernel futexes:
 
 All use volatile read/write (no atomics on rv32imc) + futex for blocking.
 
-See also: futex"),
-
-    ("tasks", "\
+See also: futex",
+    ),
+    (
+        "tasks",
+        "\
 TASKS(1) — Shell command: list running tasks
 
 Displays the task table: ID, name, state, priority, process ID.
 Alias: ps
 
-See also: scheduler, spawn, exit"),
-
-    ("help", "\
+See also: scheduler, spawn, exit",
+    ),
+    (
+        "help",
+        "\
 HELP(1) — Shell command: show available commands
 
 Type 'help' or '?' at the shell prompt to see all built-in commands.
-Type 'man <topic>' for detailed documentation on a specific topic."),
-
-    ("poll", "\
+Type 'man <topic>' for detailed documentation on a specific topic.",
+    ),
+    (
+        "poll",
+        "\
 POLL(7) — Event polling subsystem
 
 Register interest in multiple events and block until any fires.
@@ -2816,9 +3219,11 @@ Syscalls:
 
 Async runtime: block_on() executor uses poll for cooperative I/O.
 
-See also: async, channel, ipc"),
-
-    ("process", "\
+See also: async, channel, ipc",
+    ),
+    (
+        "process",
+        "\
 PROCESS(7) — Process model
 
 A process owns an address space (ASID), capability token set, and child
@@ -2831,9 +3236,11 @@ Syscalls:
 
 Userlib: task::spawn_process(), task::process_id(), task::thread_count()
 
-See also: spawn, tls, memory"),
-
-    ("tls", "\
+See also: spawn, tls, memory",
+    ),
+    (
+        "tls",
+        "\
 TLS(7) — Thread-Local Storage
 
 Each thread has a TLS base pointer stored in the RISC-V tp register.
@@ -2844,9 +3251,11 @@ Syscalls:
 
 Userlib: task::tls_get(), task::tls_set(base)
 
-See also: process, spawn"),
-
-    ("alloc", "\
+See also: process, spawn",
+    ),
+    (
+        "alloc",
+        "\
 ALLOC(1) — Memory allocation
 
 VeerOS uses a fixed-pool allocator with two block sizes:
@@ -2858,9 +3267,11 @@ Syscalls:
 
 Returns null (0) if no block of sufficient size is available.
 
-See also: memory, meminfo"),
-
-    ("mutex", "\
+See also: memory, meminfo",
+    ),
+    (
+        "mutex",
+        "\
 MUTEX(3) — Mutual exclusion lock
 
   userlib::sync::Mutex<T>
@@ -2874,9 +3285,11 @@ kernel futex for blocking (no atomics on rv32imc).
 
 Priority inheritance: holder is boosted to max waiter priority.
 
-See also: rwlock, condvar, semaphore, futex"),
-
-    ("rwlock", "\
+See also: rwlock, condvar, semaphore, futex",
+    ),
+    (
+        "rwlock",
+        "\
 RWLOCK(3) — Reader-writer lock
 
   userlib::sync::RwLock<T>
@@ -2889,9 +3302,11 @@ Allows multiple concurrent readers or one exclusive writer.
 
 Uses futex-based blocking. No atomics required.
 
-See also: mutex, sync, futex"),
-
-    ("condvar", "\
+See also: mutex, sync, futex",
+    ),
+    (
+        "condvar",
+        "\
 CONDVAR(3) — Condition variable
 
   userlib::sync::Condvar
@@ -2905,9 +3320,11 @@ Wait for and signal conditions between tasks.
 
 Based on futex with a sequence counter to avoid lost wakes.
 
-See also: mutex, sync, futex"),
-
-    ("semaphore", "\
+See also: mutex, sync, futex",
+    ),
+    (
+        "semaphore",
+        "\
 SEMAPHORE(3) — Counting semaphore
 
   userlib::sync::Semaphore
@@ -2920,9 +3337,11 @@ Controls concurrent access to a bounded resource pool.
 
 Built on futex. Useful for producer-consumer and resource limiting.
 
-See also: mutex, sync, futex"),
-
-    ("async", "\
+See also: mutex, sync, futex",
+    ),
+    (
+        "async",
+        "\
 ASYNC(7) — Async/await runtime
 
 VeerOS provides a single-threaded no_std async executor.
@@ -2939,9 +3358,11 @@ Futures:
 
 The executor uses SYS_POLL_WAIT to avoid busy-spinning.
 
-See also: poll, channel"),
-
-    ("io", "\
+See also: poll, channel",
+    ),
+    (
+        "io",
+        "\
 IO(7) — Console I/O
 
 Syscalls:
@@ -2952,9 +3373,11 @@ Syscalls:
 Userlib: io::write_byte(), io::write_buf(), io::read_byte()
 Macros:  print!(), println!() — formatted output via Console
 
-See also: help"),
-
-    ("tick", "\
+See also: help",
+    ),
+    (
+        "tick",
+        "\
 TICK(1) — Kernel tick counter
 
   Syscall: SYS_TICK (0x30)
@@ -2963,9 +3386,11 @@ TICK(1) — Kernel tick counter
 
 The kernel increments a 64-bit counter every timer ISR (1 ms).
 
-See also: sleep, uptime"),
-
-    ("drivers", "\
+See also: sleep, uptime",
+    ),
+    (
+        "drivers",
+        "\
 DRIVERS(7) — Driver isolation framework
 
 VeerOS maintains a driver registry for hardware device drivers.
@@ -2977,9 +3402,11 @@ Driver registration:
 Access is checked: drivers may only touch their granted MMIO regions.
 Shell: 'drivers' or 'lsdrv' to list registered drivers.
 
-See also: memory, pmp"),
-
-    ("pmp", "\
+See also: memory, pmp",
+    ),
+    (
+        "pmp",
+        "\
 PMP(7) — Physical Memory Protection
 
 RISC-V PMP enforces hardware memory isolation. On every context switch,
@@ -2990,9 +3417,11 @@ Each task gets up to 4 regions with R/W/X permissions.
 Stack regions are auto-granted at task creation.
 64-byte guard zones below each stack catch overflows (no-access).
 
-See also: memory, drivers"),
-
-    ("wifi", "\
+See also: memory, drivers",
+    ),
+    (
+        "wifi",
+        "\
 WIFI(1) — Shell Wi-Fi management
 
 Commands:
@@ -3004,9 +3433,11 @@ Commands:
 
 Requires: ESP32 radio hardware or QEMU net bridge.
 
-See also: bt, zigbee"),
-
-    ("bt", "\
+See also: bt, zigbee",
+    ),
+    (
+        "bt",
+        "\
 BT(1) — Shell Bluetooth LE management
 
 Commands:
@@ -3018,9 +3449,11 @@ Commands:
 
 Aliases: ble
 
-See also: wifi, zigbee"),
-
-    ("zigbee", "\
+See also: wifi, zigbee",
+    ),
+    (
+        "zigbee",
+        "\
 ZIGBEE(1) — Shell IEEE 802.15.4 / Thread management
 
 Commands:
@@ -3032,17 +3465,21 @@ Commands:
 
 Aliases: thread, 802154
 
-See also: wifi, bt"),
-
-    ("uname", "\
+See also: wifi, bt",
+    ),
+    (
+        "uname",
+        "\
 UNAME(1) — Shell command: print system information
 
 Displays: VeerOS version, platform name, scheduler profile.
 Equivalent to: uname -a on Unix systems.
 
-See also: sysinfo, version"),
-
-    ("meminfo", "\
+See also: sysinfo, version",
+    ),
+    (
+        "meminfo",
+        "\
 MEMINFO(1) — Shell command: show memory statistics
 
 Displays usage for small-block and large-block memory pools:
@@ -3050,9 +3487,11 @@ total blocks, used blocks, free blocks, block size.
 
 Aliases: mem, free
 
-See also: alloc, memory"),
-
-    ("whoami", "\
+See also: alloc, memory",
+    ),
+    (
+        "whoami",
+        "\
 WHOAMI(1) — Print effective user name
 
 Displays the username and UID of the current session.
@@ -3064,9 +3503,11 @@ Example:
   veeros> whoami
   root (uid=0)
 
-See also: users, login, logout"),
-
-    ("users", "\
+See also: users, login, logout",
+    ),
+    (
+        "users",
+        "\
 USERS(1) — List user accounts and active sessions
 
 Displays all registered users, their UIDs, and whether they have
@@ -3080,9 +3521,11 @@ Example:
   root       0  active
   user       1
 
-See also: whoami, login, logout"),
-
-    ("login", "\
+See also: whoami, login, logout",
+    ),
+    (
+        "login",
+        "\
 LOGIN(3) — Authenticate and start a user session
 
 Syscall: SYS_LOGIN (0x93)
@@ -3094,9 +3537,11 @@ Returns a non-zero session token on success, 0 on failure.
 After 3 consecutive failures for the same account, the
 account is locked until the password is reset by root.
 
-See also: logout, whoami, users"),
-
-    ("logout", "\
+See also: logout, whoami, users",
+    ),
+    (
+        "logout",
+        "\
 LOGOUT(3) — End a user session
 
 Syscall: SYS_LOGOUT (0x94)
@@ -3106,9 +3551,11 @@ The session token is invalidated.
 
 Returns 1 on success, 0 if no active session.
 
-See also: login, whoami"),
-
-    ("getuid", "\
+See also: login, whoami",
+    ),
+    (
+        "getuid",
+        "\
 GETUID(3) — Get effective user ID
 
 Syscall: SYS_GETUID (0x90)
@@ -3118,9 +3565,11 @@ Root UID is 0, nobody is 0xFFFF.
 
 Userlib: userlib::user::getuid() -> u16
 
-See also: getgid, setuid, whoami"),
-
-    ("getgid", "\
+See also: getgid, setuid, whoami",
+    ),
+    (
+        "getgid",
+        "\
 GETGID(3) — Get effective group ID
 
 Syscall: SYS_GETGID (0x91)
@@ -3129,9 +3578,11 @@ Returns the GID (u16) of the calling process.
 
 Userlib: userlib::user::getgid() -> u16
 
-See also: getuid, setuid"),
-
-    ("setuid", "\
+See also: getuid, setuid",
+    ),
+    (
+        "setuid",
+        "\
 SETUID(3) — Set effective user ID (privileged)
 
 Syscall: SYS_SETUID (0x92)
@@ -3143,9 +3594,11 @@ the caller is not root.
 
 Userlib: userlib::user::setuid(uid: u16) -> bool
 
-See also: getuid, getgid, login"),
-
-    ("vi", "\
+See also: getuid, getgid, login",
+    ),
+    (
+        "vi",
+        "\
 VI(1) — Built-in modal text editor
 
 Usage:
@@ -3198,9 +3651,11 @@ Command-mode (:) commands:
   :s/pat/rep/   — substitute first match on line
   :s/pat/rep/g  — substitute all matches on line
 
-See also: help, edit"),
-
-    ("history", "\
+See also: help, edit",
+    ),
+    (
+        "history",
+        "\
 HISTORY(1) — Shell command history
 
 Usage:
@@ -3224,9 +3679,11 @@ Readline keys at the prompt:
   Alt-d     — kill word forward
   Tab       — (reserved for completion)
 
-See also: set, help"),
-
-    ("set", "\
+See also: set, help",
+    ),
+    (
+        "set",
+        "\
 SET(1) — View / change shell variables
 
 Usage:
@@ -3250,9 +3707,11 @@ Examples:
 
 Settings are passed to the vi editor when it is launched.
 
-See also: history, vi, help"),
-
-    ("ls", "\
+See also: history, vi, help",
+    ),
+    (
+        "ls",
+        "\
 LS(1) — List directory contents
 
 Usage:
@@ -3261,9 +3720,11 @@ Usage:
 
 Columns: type (d=dir, f=file, c=device), size, name.
 
-See also: tree, cd, pwd, stat"),
-
-    ("cat", "\
+See also: tree, cd, pwd, stat",
+    ),
+    (
+        "cat",
+        "\
 CAT(1) — Display file contents
 
 Usage:
@@ -3271,9 +3732,11 @@ Usage:
 
 Binary files show a summary instead. Maximum read: 1024 bytes.
 
-See also: hexdump, write, cp"),
-
-    ("mkdir", "\
+See also: hexdump, write, cp",
+    ),
+    (
+        "mkdir",
+        "\
 MKDIR(1) — Create a directory
 
 Usage:
@@ -3281,9 +3744,11 @@ Usage:
 
 Parent directories must already exist.
 
-See also: rmdir, ls, tree"),
-
-    ("touch", "\
+See also: rmdir, ls, tree",
+    ),
+    (
+        "touch",
+        "\
 TOUCH(1) — Create an empty file
 
 Usage:
@@ -3291,9 +3756,11 @@ Usage:
 
 If the file already exists, this command has no effect.
 
-See also: write, rm, cat"),
-
-    ("rm", "\
+See also: write, rm, cat",
+    ),
+    (
+        "rm",
+        "\
 RM(1) — Remove files or directories
 
 Usage:
@@ -3303,9 +3770,11 @@ Usage:
 
 Cannot remove non-empty directories or mounted filesystems.
 
-See also: touch, mkdir, ls"),
-
-    ("cp", "\
+See also: touch, mkdir, ls",
+    ),
+    (
+        "cp",
+        "\
 CP(1) — Copy a file
 
 Usage:
@@ -3313,9 +3782,11 @@ Usage:
 
 Maximum file size for copy: 1024 bytes. Does not copy directories.
 
-See also: mv, cat, write"),
-
-    ("mv", "\
+See also: mv, cat, write",
+    ),
+    (
+        "mv",
+        "\
 MV(1) — Move or rename a file/directory
 
 Usage:
@@ -3323,17 +3794,21 @@ Usage:
 
 Moves within the same filesystem only (no cross-mount).
 
-See also: cp, rm, rename"),
-
-    ("pwd", "\
+See also: cp, rm, rename",
+    ),
+    (
+        "pwd",
+        "\
 PWD(1) — Print working directory
 
 Usage:
   pwd            — print the current working directory path
 
-See also: cd, ls"),
-
-    ("cd", "\
+See also: cd, ls",
+    ),
+    (
+        "cd",
+        "\
 CD(1) — Change working directory
 
 Usage:
@@ -3342,9 +3817,11 @@ Usage:
 
 Supports absolute paths (/etc) and relative paths (../tmp).
 
-See also: pwd, ls"),
-
-    ("stat", "\
+See also: pwd, ls",
+    ),
+    (
+        "stat",
+        "\
 STAT(1) — Show file/directory metadata
 
 Usage:
@@ -3352,9 +3829,11 @@ Usage:
 
 Shows: type, size, inode number, parent, device major/minor.
 
-See also: ls, cat"),
-
-    ("hexdump", "\
+See also: ls, cat",
+    ),
+    (
+        "hexdump",
+        "\
 HEXDUMP(1) — Hex dump of a file
 
 Usage:
@@ -3363,9 +3842,11 @@ Usage:
 
 Maximum read: 512 bytes.
 
-See also: cat, stat"),
-
-    ("write", "\
+See also: cat, stat",
+    ),
+    (
+        "write",
+        "\
 WRITE(1) — Write text to a file
 
 Usage:
@@ -3374,9 +3855,11 @@ Usage:
 Creates the file if it doesn't exist. Overwrites existing content.
 For appending, use 'echo text >> file'.
 
-See also: echo, cat, touch"),
-
-    ("tree", "\
+See also: echo, cat, touch",
+    ),
+    (
+        "tree",
+        "\
 TREE(1) — Recursive directory tree
 
 Usage:
@@ -3385,9 +3868,11 @@ Usage:
 
 Shows the directory hierarchy with indentation.
 
-See also: ls, cd, pwd"),
-
-    ("echo", "\
+See also: ls, cd, pwd",
+    ),
+    (
+        "echo",
+        "\
 ECHO(1) — Echo arguments / file redirection
 
 Usage:
@@ -3395,9 +3880,11 @@ Usage:
   echo <text> > <file>   — write text to file (overwrite)
   echo <text> >> <file>  — append text to file
 
-See also: write, cat"),
-
-    ("vfs", "\
+See also: write, cat",
+    ),
+    (
+        "vfs",
+        "\
 VFS(7) — VeerOS Virtual Filesystem
 
 VeerOS provides an in-memory virtual filesystem with:
@@ -3409,9 +3896,11 @@ VeerOS provides an in-memory virtual filesystem with:
 Standard directories at boot: /, /dev, /tmp, /etc
 Boot files: /etc/motd, /etc/hostname
 
-See also: ls, cat, stat, tree"),
-
-    ("gpio", "\
+See also: ls, cat, stat, tree",
+    ),
+    (
+        "gpio",
+        "\
 GPIO(1) — GPIO pin control
 
 Commands:
@@ -3431,9 +3920,11 @@ Examples:
 
 Pin numbers are 0–27 on Raspberry Pi 5 (RP1 southbridge).
 
-See also: hwinfo, i2c, spi"),
-
-    ("i2c", "\
+See also: hwinfo, i2c, spi",
+    ),
+    (
+        "i2c",
+        "\
 I2C(1) — I\u{00B2}C bus commands
 
 Commands:
@@ -3452,9 +3943,11 @@ Examples:
   i2c read 1 0x48 0    Read register 0 from device 0x48 on bus 1
   i2c write 1 0x20 6 0xFF  Write 0xFF to register 6 on device 0x20
 
-See also: gpio, spi, hwinfo"),
-
-    ("spi", "\
+See also: gpio, spi, hwinfo",
+    ),
+    (
+        "spi",
+        "\
 SPI(1) — SPI bus commands
 
 Commands:
@@ -3471,9 +3964,11 @@ Examples:
   spi cfg 0 0 64        Configure SPI0: mode 0, divisor 64
   spi xfer 0 9F 00 00   Send 3 bytes, print responses (JEDEC read)
 
-See also: gpio, i2c, hwinfo"),
-
-    ("hwinfo", "\
+See also: gpio, i2c, hwinfo",
+    ),
+    (
+        "hwinfo",
+        "\
 HWINFO(1) — Hardware information
 
 Displays platform hardware details:
@@ -3486,9 +3981,11 @@ Displays platform hardware details:
 
 Alias: devinfo
 
-See also: sysinfo, temp, gpio"),
-
-    ("temp", "\
+See also: sysinfo, temp, gpio",
+    ),
+    (
+        "temp",
+        "\
 TEMP(1) — SoC temperature
 
 Reads and displays the SoC temperature from hardware sensors.
@@ -3498,9 +3995,11 @@ Example output:
 
 Uses VideoCore mailbox (RPi) or internal ADC (ESP32).
 
-See also: hwinfo, sysinfo"),
-
-    ("dmesg", "\
+See also: hwinfo, sysinfo",
+    ),
+    (
+        "dmesg",
+        "\
 DMESG(1) — Kernel log buffer
 
 Displays messages from the kernel log ring buffer, including boot
@@ -3508,9 +4007,11 @@ messages, driver init, interrupts, errors, and hardware detection.
 
 The log is a fixed-size ring buffer (newest entries overwrite oldest).
 
-See also: sysinfo, hwinfo, drivers"),
-
-    ("caps", "\
+See also: sysinfo, hwinfo, drivers",
+    ),
+    (
+        "caps",
+        "\
 CAPS(1) — Process capability management
 
 Show, inspect, or drop per-process capabilities.
@@ -3528,9 +4029,11 @@ Capabilities restrict which syscall groups a process may invoke.
 Once dropped, a capability cannot be restored — the process and
 its children are permanently denied access to those syscalls.
 
-See also: tasks, sysinfo"),
-
-    ("reboot", "\
+See also: tasks, sysinfo",
+    ),
+    (
+        "reboot",
+        "\
 REBOOT(1) — Reboot the system
 
 Triggers a hardware reset. Uses the watchdog timer (RPi) or
@@ -3538,9 +4041,11 @@ software reset register (ESP32).
 
 Warning: rebooting clears all in-memory state.
 
-See also: shutdown"),
-
-    ("shutdown", "\
+See also: shutdown",
+    ),
+    (
+        "shutdown",
+        "\
 SHUTDOWN(1) — Halt or power off
 
 Halts the CPU. On Raspberry Pi, enters low-power halt via firmware.
@@ -3548,11 +4053,12 @@ On emulators (QEMU), exits the emulator.
 
 Aliases: halt, poweroff
 
-See also: reboot"),
-
+See also: reboot",
+    ),
     // ── AI-Native Execution man pages ────────────────────────────────
-
-    ("agents", "\
+    (
+        "agents",
+        "\
 AGENTS(1) — Autonomous agent lifecycle management
 
 Agents are first-class autonomous execution primitives in VeerOS.
@@ -3577,9 +4083,11 @@ SYS_AGENT_CTX_SET (0xF3) and SYS_AGENT_CTX_GET (0xF4) syscalls.
 Userlib: userlib::agent (spawn, status, complete_agent, fail_agent,
          ctx_set, ctx_get, count).
 
-See also: intent, fabric, memory"),
-
-    ("intent", "\
+See also: intent, fabric, memory",
+    ),
+    (
+        "intent",
+        "\
 INTENT(1) — Declarative goal submission and tracking
 
 Intents are high-level goals submitted to the kernel's Intent Engine.
@@ -3609,9 +4117,11 @@ Decomposition rules (built-in):
 
 Userlib: userlib::intent (submit, status, cancel, sched_stats).
 
-See also: agents, fabric, memory"),
-
-    ("memory", "\
+See also: agents, fabric, memory",
+    ),
+    (
+        "memory",
+        "\
 MEMORY(1) — Persistent kernel knowledge store
 
 The Memory Engine provides three tiers of memory for AI-native workloads:
@@ -3639,9 +4149,11 @@ Syscalls: SYS_MEMORY_STORE (0xF8), SYS_MEMORY_QUERY (0xF9).
 
 Userlib: userlib::memory (store, query, fabric_status).
 
-See also: agents, intent, fabric"),
-
-    ("fabric", "\
+See also: agents, intent, fabric",
+    ),
+    (
+        "fabric",
+        "\
 FABRIC(1) — Execution fabric node topology
 
 The Execution Fabric tracks heterogeneous compute nodes available
@@ -3669,9 +4181,11 @@ Node scoring algorithm:
 
 Syscalls: SYS_FABRIC_STATUS (0xFA) — returns (total, healthy).
 
-See also: agents, intent, memory"),
-
-    ("demo", "\
+See also: agents, intent, memory",
+    ),
+    (
+        "demo",
+        "\
 DEMO(1) — AI-native interactive walkthrough
 
 Runs live demonstrations of VeerOS AI-native execution primitives.
@@ -3709,9 +4223,11 @@ Scenarios:
 After each demo, use individual commands (agents, intent, memory,
 fabric) to inspect the resulting kernel state.
 
-See also: agents, intent, memory, fabric"),
-
-    ("peers", "\
+See also: agents, intent, memory, fabric",
+    ),
+    (
+        "peers",
+        "\
 PEERS(1) — Zero Trust peer management
 
 Manage remote fabric nodes with mutual authentication.
@@ -3733,9 +4249,11 @@ Subcommands:
 Syscalls: SYS_PEER_REGISTER (0xE2), SYS_PEER_VERIFY (0xE3),
           SYS_PEER_STATUS (0xE4).
 
-See also: mesh, zkp, fabric"),
-
-    ("mesh", "\
+See also: mesh, zkp, fabric",
+    ),
+    (
+        "mesh",
+        "\
 MESH(1) — Mesh transport layer
 
 The mesh transport provides multi-hop message delivery between
@@ -3755,9 +4273,11 @@ Subcommands:
 
 Syscalls: SYS_MESH_SEND (0xE7), SYS_MESH_STATUS (0xE8).
 
-See also: peers, zkp, fabric"),
-
-    ("zkp", "\
+See also: peers, zkp, fabric",
+    ),
+    (
+        "zkp",
+        "\
 ZKP(1) — Zero-Knowledge Proof operations
 
 Prove or verify capabilities without revealing the full
@@ -3778,9 +4298,11 @@ Subcommands:
 
 Syscalls: SYS_ZKP_PROVE (0xE5), SYS_ZKP_VERIFY (0xE6).
 
-See also: peers, mesh, fabric"),
-
-    ("df", "\
+See also: peers, mesh, fabric",
+    ),
+    (
+        "df",
+        "\
 DF(1) — Report filesystem disk space usage
 
 Usage:
@@ -3800,7 +4322,8 @@ Example:
     inodes          12/128
     /dev/vda        64 MB                           (block device)
 
-See also: mount, lsblk, meminfo, vfs"),
+See also: mount, lsblk, meminfo, vfs",
+    ),
 ];
 
 #[cfg(test)]

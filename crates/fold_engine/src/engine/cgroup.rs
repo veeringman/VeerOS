@@ -24,12 +24,16 @@ pub struct CgroupHandle {
 
 #[allow(dead_code)]
 impl CgroupHandle {
-    pub fn dir(&self) -> &Path { &self.dir }
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
 
     /// Remove the cgroup directory. No-op if we did not create it or if the
     /// directory still contains processes.
     pub fn cleanup(self) {
-        if !self.owns { return; }
+        if !self.owns {
+            return;
+        }
         // `rmdir` only succeeds when the cgroup is empty; ignore EBUSY etc.
         let _ = fs::remove_dir(&self.dir);
     }
@@ -43,8 +47,7 @@ pub fn create(name: &str, limits: &Limits) -> Result<CgroupHandle> {
     ensure_v2(&parent)?;
 
     let dir = parent.join(format!("fold-{name}"));
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("creating cgroup {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating cgroup {}", dir.display()))?;
 
     // Enable required controllers in the parent *before* writing our limits.
     // This is a best-effort: if the parent already has them enabled (the
@@ -52,25 +55,21 @@ pub fn create(name: &str, limits: &Limits) -> Result<CgroupHandle> {
     let _ = enable_controllers(&parent);
 
     if let Some(cpu) = &limits.cpu_max {
-        write_file(&dir.join("cpu.max"), cpu)
-            .context("writing cpu.max")?;
+        write_file(&dir.join("cpu.max"), cpu).context("writing cpu.max")?;
     }
     if let Some(mem) = limits.memory_max {
-        write_file(&dir.join("memory.max"), &mem.to_string())
-            .context("writing memory.max")?;
+        write_file(&dir.join("memory.max"), &mem.to_string()).context("writing memory.max")?;
     }
     if let Some(swap) = limits.memory_swap_max {
         // memory.swap.max is unavailable on kernels without swap accounting;
         // don't fail hard on ENOENT.
         let p = dir.join("memory.swap.max");
         if p.exists() {
-            write_file(&p, &swap.to_string())
-                .context("writing memory.swap.max")?;
+            write_file(&p, &swap.to_string()).context("writing memory.swap.max")?;
         }
     }
     if let Some(pids) = limits.pids_max {
-        write_file(&dir.join("pids.max"), &pids.to_string())
-            .context("writing pids.max")?;
+        write_file(&dir.join("pids.max"), &pids.to_string()).context("writing pids.max")?;
     }
 
     Ok(CgroupHandle { dir, owns: true })
@@ -130,7 +129,9 @@ fn find_v2_root(start: &Path) -> Option<PathBuf> {
 
 fn enable_controllers(parent: &Path) -> Result<()> {
     let sctl = parent.join("cgroup.subtree_control");
-    if !sctl.exists() { return Ok(()); }
+    if !sctl.exists() {
+        return Ok(());
+    }
     // Enable the controllers we care about. If a controller isn't available
     // in this subtree, the kernel will reject the write — ignore the error
     // per controller.
@@ -147,9 +148,9 @@ fn resolve_parent(override_: Option<&Path>) -> Result<PathBuf> {
         return Ok(p.to_path_buf());
     }
     // Parse our own cgroup v2 membership line: "0::/user.slice/...".
-    let text = fs::read_to_string("/proc/self/cgroup")
-        .context("reading /proc/self/cgroup")?;
-    let rel = text.lines()
+    let text = fs::read_to_string("/proc/self/cgroup").context("reading /proc/self/cgroup")?;
+    let rel = text
+        .lines()
         .find_map(|l| l.strip_prefix("0::"))
         .context("no cgroup v2 line (0::) in /proc/self/cgroup — v1 system?")?
         .trim();

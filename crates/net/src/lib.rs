@@ -18,9 +18,11 @@ pub mod secure;
 use arch::{NetMedium, NetworkDevice, Serial};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer};
+use smoltcp::socket::tcp::{RecvError, Socket as TcpSocket, SocketBuffer};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, Ieee802154Address, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{
+    EthernetAddress, HardwareAddress, Ieee802154Address, IpCidr, Ipv4Address, Ipv4Cidr,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // smoltcp phy adapter — bridges our `NetworkDevice` trait to smoltcp's
@@ -39,13 +41,16 @@ impl<'a, D: NetworkDevice> DeviceAdapter<'a, D> {
 }
 
 impl<D: NetworkDevice> Device for DeviceAdapter<'_, D> {
-    type RxToken<'a> = VeerRxToken<'a, D> where Self: 'a;
-    type TxToken<'a> = VeerTxToken<'a, D> where Self: 'a;
+    type RxToken<'a>
+        = VeerRxToken<'a, D>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = VeerTxToken<'a, D>
+    where
+        Self: 'a;
 
-    fn receive(
-        &mut self,
-        _timestamp: Instant,
-    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         if self.inner.has_rx() {
             Some((
                 VeerRxToken { dev: self.inner },
@@ -166,14 +171,12 @@ impl<D: NetworkDevice> NetStack<D> {
         iface.update_ip_addrs(|addrs| {
             let _ = addrs.push(ip);
         });
-        iface
-            .routes_mut()
-            .add_default_ipv4_route(gateway)
-            .ok();
+        iface.routes_mut().add_default_ipv4_route(gateway).ok();
 
         let rx_buf = SocketBuffer::new(&mut storage.tcp_rx_buf[..]);
         let tx_buf = SocketBuffer::new(&mut storage.tcp_tx_buf[..]);
-        let tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        let mut tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        tcp_socket.set_nagle_enabled(false);
         let tcp_handle = sockets.add(tcp_socket);
 
         Self {
@@ -187,11 +190,7 @@ impl<D: NetworkDevice> NetStack<D> {
     ///
     /// Use this when the IP will be acquired via DHCP. Call
     /// [`apply_ip_config()`] once the DHCP lease is obtained.
-    pub fn new_dhcp(
-        dev: D,
-        sockets: &mut SocketSet<'_>,
-        storage: &'static mut NetStorage,
-    ) -> Self {
+    pub fn new_dhcp(dev: D, sockets: &mut SocketSet<'_>, storage: &'static mut NetStorage) -> Self {
         let hw_addr = match dev.medium() {
             NetMedium::Ethernet => {
                 let mac = dev.mac_address();
@@ -209,7 +208,8 @@ impl<D: NetworkDevice> NetStack<D> {
 
         let rx_buf = SocketBuffer::new(&mut storage.tcp_rx_buf[..]);
         let tx_buf = SocketBuffer::new(&mut storage.tcp_tx_buf[..]);
-        let tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        let mut tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        tcp_socket.set_nagle_enabled(false);
         let tcp_handle = sockets.add(tcp_socket);
 
         Self {
@@ -280,7 +280,8 @@ impl<D: NetworkDevice> NetStack<D> {
     ) -> SocketHandle {
         let rx_buf = SocketBuffer::new(&mut storage.tcp_rx_buf[..]);
         let tx_buf = SocketBuffer::new(&mut storage.tcp_tx_buf[..]);
-        let tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        let mut tcp_socket = TcpSocket::new(rx_buf, tx_buf);
+        tcp_socket.set_nagle_enabled(false);
         sockets.add(tcp_socket)
     }
 
@@ -398,7 +399,9 @@ impl Serial for TcpSerial {
 
         // Drive the stack once more so buffered data gets pushed promptly.
         let locked = (self.poll_fn)();
-        if locked { (self.unlock_fn)(); }
+        if locked {
+            (self.unlock_fn)();
+        }
     }
 
     fn read_byte(&self) -> u8 {
@@ -412,17 +415,32 @@ impl Serial for TcpSerial {
             let socket = sockets.get_mut::<TcpSocket>(self.handle);
             if !socket.may_recv() {
                 (self.unlock_fn)();
-                return 0x04; // EOF → Ctrl-D → shell exit
+                return 0x04; // hard EOF (Closed / TimeWait / etc.)
             }
-            if socket.can_recv() {
-                let mut buf = [0u8; 1];
-                if let Ok(n) = socket.recv_slice(&mut buf) {
-                    if n > 0 {
-                        (self.unlock_fn)();
-                        return buf[0];
-                    }
+            // Always call recv_slice so we can detect RecvError::Finished
+            // which occurs in CloseWait when the peer sent FIN and the RX
+            // buffer is empty — may_recv() is still true there but no more
+            // data will ever arrive.
+            let mut buf = [0u8; 1];
+            match socket.recv_slice(&mut buf) {
+                Ok(n) if n > 0 => {
+                    (self.unlock_fn)();
+                    return buf[0];
                 }
+                Err(RecvError::Finished) => {
+                    // Remote sent FIN and buffer is drained — treat as EOF.
+                    (self.unlock_fn)();
+                    return 0x04;
+                }
+                // Ok(0) — nothing in the RX buffer yet. Unlock, drive the
+                // network stack forward (so any pending FIN/data gets
+                // processed), then retry.
+                _ => {}
             }
+            (self.unlock_fn)();
+            // Drive the stack while waiting — this is essential so smoltcp
+            // can process incoming segments (including FIN) while we spin.
+            (self.poll_fn)();
             (self.unlock_fn)();
             core::hint::spin_loop();
         }
@@ -444,6 +462,8 @@ impl Serial for TcpSerial {
 
     fn flush(&self) {
         let locked = (self.poll_fn)();
-        if locked { (self.unlock_fn)(); }
+        if locked {
+            (self.unlock_fn)();
+        }
     }
 }

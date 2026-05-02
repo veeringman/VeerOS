@@ -9,7 +9,7 @@ use std::path::PathBuf;
     version,
     about = "VeerOS Fold — secure compute envelope",
     long_about = "Manage VeerOS Folds: lightweight, secure, namespace-isolated \
-                  compute envelopes. Not a container, not a VM.",
+                  compute envelopes. Not a container, not a VM."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -37,9 +37,7 @@ pub enum Cmd {
     },
 
     /// Send SIGTERM to a fold's init process.
-    Stop {
-        name: String,
-    },
+    Stop { name: String },
 
     /// Delete a fold's state record and log. Fails if the fold is still alive.
     Rm {
@@ -78,6 +76,10 @@ pub enum VmCmd {
         #[arg(long, default_value_t = 128)]
         memory: usize,
 
+        /// Disk image passed through to `veer-vm --disk`.
+        #[arg(long)]
+        disk: Option<PathBuf>,
+
         /// Guest architecture passed through to `veer-vm --arch`.
         #[arg(long, value_enum, default_value_t = VmArchArg::X8664)]
         arch: VmArchArg,
@@ -85,6 +87,10 @@ pub enum VmCmd {
         /// Host TAP interface passed through to `veer-vm --tap`.
         #[arg(long)]
         tap: Option<String>,
+
+        /// macOS vmnet mode passed through to `veer-vm --vmnet`.
+        #[arg(long, value_parser = ["shared", "host"])]
+        vmnet: Option<String>,
 
         /// Fold name. Defaults to `veeros-vm-<6-hex>`.
         #[arg(long, short)]
@@ -122,6 +128,8 @@ pub enum VmCmd {
 pub enum VmArchArg {
     #[value(name = "x86_64")]
     X8664,
+    #[value(name = "aarch64")]
+    Aarch64,
     #[value(name = "riscv32")]
     Riscv32,
 }
@@ -130,6 +138,7 @@ impl VmArchArg {
     pub fn as_cli_value(self) -> &'static str {
         match self {
             VmArchArg::X8664 => "x86_64",
+            VmArchArg::Aarch64 => "aarch64",
             VmArchArg::Riscv32 => "riscv32",
         }
     }
@@ -205,7 +214,11 @@ mod tests {
         .unwrap();
 
         match cli.cmd {
-            Cmd::Vm { cmd: VmCmd::Spawn { tap, arch, memory, .. } } => {
+            Cmd::Vm {
+                cmd: VmCmd::Spawn {
+                    tap, arch, memory, ..
+                },
+            } => {
                 assert_eq!(tap.as_deref(), Some("tap0"));
                 assert_eq!(arch, VmArchArg::Riscv32);
                 assert_eq!(memory, 256);
@@ -216,17 +229,13 @@ mod tests {
 
     #[test]
     fn vm_spawn_defaults_tap_to_none() {
-        let cli = Cli::try_parse_from([
-            "fold",
-            "vm",
-            "spawn",
-            "--kernel",
-            "/tmp/kernel.elf",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["fold", "vm", "spawn", "--kernel", "/tmp/kernel.elf"]).unwrap();
 
         match cli.cmd {
-            Cmd::Vm { cmd: VmCmd::Spawn { tap, .. } } => {
+            Cmd::Vm {
+                cmd: VmCmd::Spawn { tap, .. },
+            } => {
                 assert!(tap.is_none());
             }
             _ => panic!("parsed wrong command variant"),
@@ -251,13 +260,14 @@ mod tests {
 
         match cli.cmd {
             Cmd::Mobility {
-                cmd: MobilityCmd::MigratePlan {
-                    name,
-                    target_zone,
-                    target_device,
-                    strategy,
-                    ..
-                },
+                cmd:
+                    MobilityCmd::MigratePlan {
+                        name,
+                        target_zone,
+                        target_device,
+                        strategy,
+                        ..
+                    },
             } => {
                 assert_eq!(name, "worker-a");
                 assert_eq!(target_zone, "zone-east");
@@ -286,12 +296,13 @@ mod tests {
 
         match cli.cmd {
             Cmd::Mobility {
-                cmd: MobilityCmd::ReplicatePlan {
-                    name,
-                    targets,
-                    consistency,
-                    ..
-                },
+                cmd:
+                    MobilityCmd::ReplicatePlan {
+                        name,
+                        targets,
+                        consistency,
+                        ..
+                    },
             } => {
                 assert_eq!(name, "worker-a");
                 assert_eq!(targets.len(), 2);

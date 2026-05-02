@@ -95,7 +95,8 @@ impl InputSubsystem {
 
     /// Feed a 3-byte USB HID boot mouse report into the subsystem.
     pub fn feed_mouse_report(&mut self, report: &[u8; 3]) {
-        self.mouse_state.process_report(report, &mut self.mouse_queue);
+        self.mouse_state
+            .process_report(report, &mut self.mouse_queue);
         self.mouse_report_count = self.mouse_report_count.wrapping_add(1);
     }
 
@@ -179,10 +180,24 @@ impl InputSubsystem {
 
     /// Write input subsystem status.
     pub fn write_status(&self, w: &mut dyn core::fmt::Write) {
-        let _ = writeln!(w, "Input subsystem: {}", if self.active { "active" } else { "inactive" });
-        let _ = writeln!(w, "  Keyboard queue: {}/{} events, {} reports processed",
-            self.kbd_queue.len(), crate::hid::INPUT_QUEUE_SIZE, self.kbd_report_count);
-        let _ = writeln!(w, "  Mouse queue:    {}/{} events, {} reports processed",
-            self.mouse_queue.len(), crate::hid::INPUT_QUEUE_SIZE, self.mouse_report_count);
+        let _ = writeln!(
+            w,
+            "Input subsystem: {}",
+            if self.active { "active" } else { "inactive" }
+        );
+        let _ = writeln!(
+            w,
+            "  Keyboard queue: {}/{} events, {} reports processed",
+            self.kbd_queue.len(),
+            crate::hid::INPUT_QUEUE_SIZE,
+            self.kbd_report_count
+        );
+        let _ = writeln!(
+            w,
+            "  Mouse queue:    {}/{} events, {} reports processed",
+            self.mouse_queue.len(),
+            crate::hid::INPUT_QUEUE_SIZE,
+            self.mouse_report_count
+        );
     }
 }

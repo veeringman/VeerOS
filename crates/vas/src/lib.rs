@@ -246,7 +246,10 @@ pub fn encode_with_registry(address: &VasAddress, registry: &mut AtomRegistry) -
     }
 }
 
-pub fn parse_and_encode(input: &str, registry: &mut AtomRegistry) -> Result<BinaryAddress, ParseError> {
+pub fn parse_and_encode(
+    input: &str,
+    registry: &mut AtomRegistry,
+) -> Result<BinaryAddress, ParseError> {
     let addr = VasAddress::parse(input)?;
     Ok(encode_with_registry(&addr, registry))
 }

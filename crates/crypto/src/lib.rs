@@ -40,22 +40,22 @@
 
 // ── Modules ──────────────────────────────────────────────────────────────
 
-#[cfg(feature = "sha256")]
-pub mod sha256;
-#[cfg(feature = "sha512")]
-pub mod sha512;
 #[cfg(feature = "chacha20")]
 pub mod chacha20;
-#[cfg(feature = "chacha20")]
-pub mod rng;
 #[cfg(any(feature = "x25519", feature = "ed25519"))]
 pub mod curve25519;
-#[cfg(feature = "x25519")]
-pub mod x25519;
 #[cfg(feature = "ed25519")]
 pub mod ed25519;
 #[cfg(feature = "hybrid")]
 pub mod hybrid;
+#[cfg(feature = "chacha20")]
+pub mod rng;
+#[cfg(feature = "sha256")]
+pub mod sha256;
+#[cfg(feature = "sha512")]
+pub mod sha512;
+#[cfg(feature = "x25519")]
+pub mod x25519;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Core Crypto Traits
@@ -233,11 +233,7 @@ pub trait Kem {
     ) -> Result<(), CryptoError>;
 
     /// Decapsulate: given secret key + ciphertext, recover shared_secret.
-    fn decapsulate(
-        sk: &[u8],
-        ct: &[u8],
-        ss_out: &mut [u8],
-    ) -> Result<(), CryptoError>;
+    fn decapsulate(sk: &[u8], ct: &[u8], ss_out: &mut [u8]) -> Result<(), CryptoError>;
 }
 
 // ── RNG trait ────────────────────────────────────────────────────────────
@@ -347,7 +343,11 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Digest {
 pub fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], okm: &mut [u8]) {
     // Extract: PRK = HMAC(salt, IKM)
     let default_salt = [0u8; 32];
-    let s = if salt.is_empty() { &default_salt[..] } else { salt };
+    let s = if salt.is_empty() {
+        &default_salt[..]
+    } else {
+        salt
+    };
     let prk = hmac_sha256(s, ikm);
 
     // Expand: output = T(1) || T(2) || ...

@@ -1,0 +1,25 @@
+[package]
+name = "kernel-aarch64-virt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VeerOS kernel for generic AArch64 virtual machines"
+
+[features]
+default = ["net", "shell", "ssh"]
+net    = ["dep:net", "dep:smoltcp"]
+shell  = ["dep:shell", "shell/multi-user"]
+ssh    = ["dep:ssh", "dep:crypto", "shell"]
+
+[dependencies]
+arch             = { path = "../../arch" }
+soc-aarch64-virt = { path = "../../soc/aarch64_virt" }
+net              = { path = "../../net", features = ["secure-connect"], optional = true }
+smoltcp          = { workspace = true, optional = true }
+shell            = { path = "../../shell", optional = true, features = ["full-vi"] }
+ssh              = { path = "../../ssh", optional = true }
+crypto           = { path = "../../crypto", features = ["sha256", "sha512", "chacha20", "x25519", "ed25519"], optional = true }
+microkernel      = { path = "../../microkernel", default-features = false, features = ["dist-full", "multi-user"] }
+panic-halt       = "1.0"

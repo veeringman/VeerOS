@@ -16,21 +16,20 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use crate::memory::GuestMem;
 use super::{
-    push_used, pop_avail, walk_chain, DescItem, VirtioDevice, VirtioTransport,
-    VirtioTransportSnapshot,
-    STATUS_DRIVER_OK,
+    pop_avail, push_used, walk_chain, DescItem, VirtioDevice, VirtioTransport,
+    VirtioTransportSnapshot, STATUS_DRIVER_OK,
 };
+use crate::memory::GuestMem;
 
 /// Sector size in the legacy virtio-blk interface (always 512).
 const SECTOR_SIZE: usize = 512;
 
-const VIRTIO_BLK_T_IN:  u32 = 0;
+const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
 
-const VIRTIO_BLK_S_OK:     u8 = 0;
-const VIRTIO_BLK_S_IOERR:  u8 = 1;
+const VIRTIO_BLK_S_OK: u8 = 0;
+const VIRTIO_BLK_S_IOERR: u8 = 1;
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
 #[repr(C)]
@@ -71,7 +70,8 @@ impl VirtioBlk {
         if size % SECTOR_SIZE as u64 != 0 {
             bail!(
                 "disk image {} size {} is not a multiple of 512",
-                path.display(), size,
+                path.display(),
+                size,
             );
         }
         let capacity = size / SECTOR_SIZE as u64;
@@ -79,13 +79,24 @@ impl VirtioBlk {
         // Feature negotiation: advertise only F_RO if we opened read-only.
         // We intentionally skip F_SIZE_MAX / F_SEG_MAX / F_GEOMETRY — the
         // guest driver ignores them all.
-        let features = if read_only { 1u32 << 5 /* VIRTIO_BLK_F_RO */ } else { 0 };
-        let transport = VirtioTransport::new(/*num_queues=*/1, features);
+        let features = if read_only {
+            1u32 << 5 /* VIRTIO_BLK_F_RO */
+        } else {
+            0
+        };
+        let transport = VirtioTransport::new(/*num_queues=*/ 1, features);
 
-        Ok(Self { transport, file, capacity, read_only })
+        Ok(Self {
+            transport,
+            file,
+            capacity,
+            read_only,
+        })
     }
 
-    pub fn capacity_sectors(&self) -> u64 { self.capacity }
+    pub fn capacity_sectors(&self) -> u64 {
+        self.capacity
+    }
     pub fn driver_ok(&self) -> bool {
         self.transport.device_status & STATUS_DRIVER_OK != 0
     }
@@ -129,8 +140,12 @@ impl VirtioDevice for VirtioBlk {
         }
     }
 
-    fn transport(&self) -> &VirtioTransport { &self.transport }
-    fn transport_mut(&mut self) -> &mut VirtioTransport { &mut self.transport }
+    fn transport(&self) -> &VirtioTransport {
+        &self.transport
+    }
+    fn transport_mut(&mut self) -> &mut VirtioTransport {
+        &mut self.transport
+    }
 
     fn notify(&mut self, queue_idx: u16, mem: &GuestMem) -> Result<bool> {
         if queue_idx != 0 {
@@ -143,7 +158,9 @@ impl VirtioDevice for VirtioBlk {
         loop {
             let head = {
                 let q = &mut self.transport.queues[0];
-                if !q.is_ready() { return Ok(false); }
+                if !q.is_ready() {
+                    return Ok(false);
+                }
                 match pop_avail(mem, q)? {
                     Some(h) => h,
                     None => break,
@@ -182,9 +199,8 @@ impl VirtioBlk {
         }
         // Split into readable (device reads → guest->device) and writable
         // (device writes → device->guest).
-        let (readable, writable): (Vec<_>, Vec<_>) = chain.iter()
-            .enumerate()
-            .partition(|(_, d)| !d.writable);
+        let (readable, writable): (Vec<_>, Vec<_>) =
+            chain.iter().enumerate().partition(|(_, d)| !d.writable);
 
         if readable.is_empty() || writable.is_empty() {
             bail!("blk request missing readable or writable descriptors");
@@ -214,7 +230,8 @@ impl VirtioBlk {
         match header.req_type {
             VIRTIO_BLK_T_IN => {
                 // Data descriptors = all writable except the final status byte.
-                let data_total: u64 = writable.iter()
+                let data_total: u64 = writable
+                    .iter()
                     .filter(|(pos, _)| *pos != status_pos_in_chain)
                     .map(|(_, d)| d.len as u64)
                     .sum();
@@ -229,9 +246,12 @@ impl VirtioBlk {
                 let mut off = header.sector * SECTOR_SIZE as u64;
                 let mut copied_into_writable: u64 = 0;
                 for (pos, d) in writable.iter() {
-                    if *pos == status_pos_in_chain { continue; }
+                    if *pos == status_pos_in_chain {
+                        continue;
+                    }
                     let dst = mem.slice_mut(d.addr, d.len as usize)?;
-                    self.file.read_exact_at(dst, off)
+                    self.file
+                        .read_exact_at(dst, off)
                         .with_context(|| format!("blk read sector {}", header.sector))?;
                     off += d.len as u64;
                     copied_into_writable += d.len as u64;
@@ -247,10 +267,7 @@ impl VirtioBlk {
                     return Ok(1);
                 }
                 // Data descriptors = all readable except the first (header).
-                let data_total: u64 = readable.iter()
-                    .skip(1)
-                    .map(|(_, d)| d.len as u64)
-                    .sum();
+                let data_total: u64 = readable.iter().skip(1).map(|(_, d)| d.len as u64).sum();
                 if data_total % SECTOR_SIZE as u64 != 0 {
                     write_status(mem, VIRTIO_BLK_S_IOERR)?;
                     bail!("blk write data total {} not sector-multiple", data_total);
@@ -262,7 +279,8 @@ impl VirtioBlk {
                 let mut off = header.sector * SECTOR_SIZE as u64;
                 for (_, d) in readable.iter().skip(1) {
                     let src = mem.slice_mut(d.addr, d.len as usize)?;
-                    self.file.write_all_at(src, off)
+                    self.file
+                        .write_all_at(src, off)
                         .with_context(|| format!("blk write sector {}", header.sector))?;
                     off += d.len as u64;
                 }

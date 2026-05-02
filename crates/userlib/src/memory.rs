@@ -67,7 +67,11 @@ pub fn query(key: &[u8], buf: &mut [u8]) -> Option<usize> {
         buf.as_mut_ptr() as usize,
         buf.len(),
     );
-    if ret == usize::MAX { None } else { Some(ret) }
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(ret)
+    }
 }
 
 /// Query execution fabric status.

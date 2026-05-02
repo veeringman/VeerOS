@@ -6,17 +6,20 @@
 //! calls into.
 
 #[allow(unused_imports)]
-use arch::{TaskContext, TickTimer};
-#[allow(unused_imports)]
 use arch::riscv32::pmp;
 #[allow(unused_imports)]
-use microkernel::task::Scheduler;
+use arch::{TaskContext, TickTimer};
 #[allow(unused_imports)]
 use microkernel::dispatch::{self, SyscallAction};
+#[allow(unused_imports)]
+use microkernel::task::Scheduler;
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT,
-            AGENTS, INTENTS, MEMORY_ENGINE, FABRIC, INTENT_SCHED};
+use crate::{
+    AGENTS, AUDIT, CHANNELS, DRIVERS, FABRIC, FAT32, FUTEX, HEAP, INODES, INPUT, INTENTS,
+    INTENT_SCHED, IPC, MEMORY_ENGINE, MOUNTS, POLL, PROCESSES, RAMFS, SCHEDULER, SOCKETS, TIMER,
+    USERS,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // mcause constants (standard RISC-V privilege spec)

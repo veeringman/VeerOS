@@ -4,7 +4,7 @@ use crypto::chacha20::ChaCha20Poly1305;
 use crypto::rng::ChaChaRng;
 use crypto::sha256::Sha256;
 use crypto::x25519::{x25519_diffie_hellman, x25519_keypair};
-use crypto::{Aead, Hash, zeroize};
+use crypto::{zeroize, Aead, Hash};
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -61,7 +61,8 @@ impl SecureChannel {
         let nonce = Self::make_nonce(self.tx_counter);
         self.tx_counter += 2;
 
-        let total = self.cipher
+        let total = self
+            .cipher
             .seal_in_place(&nonce, &[], &mut out[2..], plaintext.len())
             .ok()?;
         Some(2 + total)
@@ -103,8 +104,10 @@ pub fn client_handshake(stream: &TcpStream) -> Option<SecureChannel> {
         return None;
     }
     if hello[..4] != VSC_MAGIC {
-        eprintln!("[vsc] handshake: bad magic: {:02x} {:02x} {:02x} {:02x}",
-            hello[0], hello[1], hello[2], hello[3]);
+        eprintln!(
+            "[vsc] handshake: bad magic: {:02x} {:02x} {:02x} {:02x}",
+            hello[0], hello[1], hello[2], hello[3]
+        );
         return None;
     }
     let mut server_pk = [0u8; 32];

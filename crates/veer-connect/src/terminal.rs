@@ -58,8 +58,16 @@ fn terminal_loop(stream: &TcpStream, ch: &mut SecureChannel) -> Result<(), Strin
     loop {
         // Use poll(2) to wait on stdin and socket.
         let mut fds = [
-            libc::pollfd { fd: stdin_fd, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: sock_fd, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: stdin_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: sock_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
 
         let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 100) };
@@ -70,7 +78,8 @@ fn terminal_loop(stream: &TcpStream, ch: &mut SecureChannel) -> Result<(), Strin
         // Check stdin.
         if fds[0].revents & libc::POLLIN != 0 {
             let mut buf = [0u8; MAX_FRAME_PT];
-            let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let n =
+                unsafe { libc::read(stdin_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 return Ok(());
             }
@@ -125,16 +134,24 @@ fn terminal_loop(stream: &TcpStream, ch: &mut SecureChannel) -> Result<(), Strin
 fn get_termios(fd: i32) -> Option<termios> {
     let mut t: termios = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::tcgetattr(fd, &mut t as *mut termios) };
-    if ret == 0 { Some(t) } else { None }
+    if ret == 0 {
+        Some(t)
+    } else {
+        None
+    }
 }
 
 fn set_termios(fd: i32, t: &termios) {
-    unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, t as *const termios); }
+    unsafe {
+        libc::tcsetattr(fd, libc::TCSADRAIN, t as *const termios);
+    }
 }
 
 fn set_raw_mode(fd: i32) {
     if let Some(mut t) = get_termios(fd) {
-        unsafe { libc::cfmakeraw(&mut t as *mut termios); }
+        unsafe {
+            libc::cfmakeraw(&mut t as *mut termios);
+        }
         set_termios(fd, &t);
     }
 }

@@ -8,13 +8,16 @@
 #[allow(unused_imports)]
 use arch::{TaskContext, TickTimer};
 #[allow(unused_imports)]
-use microkernel::task::Scheduler;
-#[allow(unused_imports)]
 use microkernel::dispatch::{self, SyscallAction};
+#[allow(unused_imports)]
+use microkernel::task::Scheduler;
 
 #[allow(unused_imports)]
-use crate::{SCHEDULER, TIMER, IPC, HEAP, FUTEX, CHANNELS, POLL, PROCESSES, SOCKETS, USERS, GIC, INODES, RAMFS, FAT32, MOUNTS, INPUT, DRIVERS, AUDIT,
-            AGENTS, INTENTS, MEMORY_ENGINE, FABRIC, INTENT_SCHED};
+use crate::{
+    AGENTS, AUDIT, CHANNELS, DRIVERS, FABRIC, FAT32, FUTEX, GIC, HEAP, INODES, INPUT, INTENTS,
+    INTENT_SCHED, IPC, MEMORY_ENGINE, MOUNTS, POLL, PROCESSES, RAMFS, SCHEDULER, SOCKETS, TIMER,
+    USERS,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AArch64 ESR_EL1 constants
@@ -70,10 +73,14 @@ pub unsafe extern "C" fn _veer_trap_dispatch(ctx: *mut TaskContext) -> *mut Task
             // Data abort from current EL.
             // If a probe is active, skip the faulting instruction.
             if unsafe { PROBE_ACTIVE } {
-                unsafe { PROBE_FAULTED = true; }
+                unsafe {
+                    PROBE_FAULTED = true;
+                }
                 // Advance PC in the saved context (not ELR_EL1 directly,
                 // because the asm stub restores ELR_EL1 from ctx.pc).
-                unsafe { (*ctx).pc += 4; }
+                unsafe {
+                    (*ctx).pc += 4;
+                }
                 ctx
             } else {
                 // Unexpected data abort — park.
@@ -223,7 +230,11 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext, irq: u32) -> *mut TaskContext
     if sched.ticks == 6000 {
         // Helper to print a hex nibble
         fn hex_nibble(n: u8) -> u8 {
-            if n < 10 { b'0' + n } else { b'a' + (n - 10) }
+            if n < 10 {
+                b'0' + n
+            } else {
+                b'a' + (n - 10)
+            }
         }
         fn print_hex16(val: usize) {
             // Print the low 16 bits (4 hex digits) — enough to distinguish PCs.
@@ -233,13 +244,17 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext, irq: u32) -> *mut TaskContext
         }
 
         // Big visible separator
-        for _ in 0..3u8 { crate::console_write_byte(b'\n'); }
-        for _ in 0..40u8 { crate::console_write_byte(b'='); }
+        for _ in 0..3u8 {
+            crate::console_write_byte(b'\n');
+        }
+        for _ in 0..40u8 {
+            crate::console_write_byte(b'=');
+        }
         crate::console_write_byte(b'\n');
         // Print task states: idx=state@PC
         for i in 0..8usize {
-            use microkernel::task::TaskState;
             use arch::SavedContext;
+            use microkernel::task::TaskState;
             let ch = match sched.tasks[i].state {
                 TaskState::Free => b'F',
                 TaskState::Ready => b'R',
@@ -271,7 +286,9 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext, irq: u32) -> *mut TaskContext
             crate::console_write_byte(b' ');
         }
         crate::console_write_byte(b'\n');
-        for _ in 0..40u8 { crate::console_write_byte(b'='); }
+        for _ in 0..40u8 {
+            crate::console_write_byte(b'=');
+        }
         crate::console_write_byte(b'\n');
     }
     // At tick 8000, halt so user can read screen.
@@ -283,7 +300,9 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext, irq: u32) -> *mut TaskContext
         crate::console_write_byte(b'L');
         crate::console_write_byte(b'T');
         crate::console_write_byte(b'\n');
-        loop { core::hint::spin_loop(); }
+        loop {
+            core::hint::spin_loop();
+        }
     }
 
     // Poll USB HID keyboards every 8 ticks (~8 ms at 1 kHz).
@@ -291,9 +310,13 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext, irq: u32) -> *mut TaskContext
         let input = unsafe { &mut *crate::INPUT.0.get() };
         if input.active {
             let xhci0 = unsafe { &mut *crate::XHCI0.0.get() };
-            xhci0.poll_hid_keyboards(|report| { input.feed_keyboard_report(report); });
+            xhci0.poll_hid_keyboards(|report| {
+                input.feed_keyboard_report(report);
+            });
             let xhci1 = unsafe { &mut *crate::XHCI1.0.get() };
-            xhci1.poll_hid_keyboards(|report| { input.feed_keyboard_report(report); });
+            xhci1.poll_hid_keyboards(|report| {
+                input.feed_keyboard_report(report);
+            });
         }
     }
 
@@ -320,8 +343,7 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext, irq: u32) -> *mut TaskContext
         }
         // No task ready — only re-mark current as Running if it was
         // demoted to Ready above (not if it's Free or Blocked).
-        if sched.current < sched.tasks.len()
-            && sched.tasks[sched.current].state == TaskState::Ready
+        if sched.current < sched.tasks.len() && sched.tasks[sched.current].state == TaskState::Ready
         {
             sched.tasks[sched.current].state = TaskState::Running;
         }

@@ -28,20 +28,20 @@ use arch::BlockDevice;
 const SPI2_BASE: usize = 0x6000_3000;
 
 // ─── SPI registers (offsets from SPI2_BASE) ──────────────────────────
-const SPI_CMD_REG:      usize = 0x00;
-const SPI_ADDR_REG:     usize = 0x04;
-const SPI_CTRL_REG:     usize = 0x08;
-const SPI_CLOCK_REG:    usize = 0x0C;
-const SPI_USER_REG:     usize = 0x10;
-const SPI_USER1_REG:    usize = 0x14;
-const SPI_USER2_REG:    usize = 0x18;
-const SPI_MS_DLEN_REG:  usize = 0x1C;
-const SPI_W0_REG:       usize = 0x58; // Data buffer W0–W15 at 0x58–0x94
+const SPI_CMD_REG: usize = 0x00;
+const SPI_ADDR_REG: usize = 0x04;
+const SPI_CTRL_REG: usize = 0x08;
+const SPI_CLOCK_REG: usize = 0x0C;
+const SPI_USER_REG: usize = 0x10;
+const SPI_USER1_REG: usize = 0x14;
+const SPI_USER2_REG: usize = 0x18;
+const SPI_MS_DLEN_REG: usize = 0x1C;
+const SPI_W0_REG: usize = 0x58; // Data buffer W0–W15 at 0x58–0x94
 
 /// GPIO output register for controlling CS pin.
-const _GPIO_OUT_REG:     usize = 0x6009_1004;
-const GPIO_OUT_W1TS:    usize = 0x6009_1008; // set
-const GPIO_OUT_W1TC:    usize = 0x6009_100C; // clear
+const _GPIO_OUT_REG: usize = 0x6009_1004;
+const GPIO_OUT_W1TS: usize = 0x6009_1008; // set
+const GPIO_OUT_W1TC: usize = 0x6009_100C; // clear
 const GPIO_ENABLE_W1TS: usize = 0x6009_1024;
 
 /// CS pin (GPIO 18 by default).
@@ -66,9 +66,9 @@ fn sd_cmd_frame(cmd: u8, arg: u32) -> [u8; 6] {
     frame[4] = arg as u8;
     // CRC — only CMD0 and CMD8 require valid CRC in SPI mode.
     frame[5] = match cmd {
-        0  => 0x95,
-        8  => 0x87,
-        _  => 0x01,  // dummy + stop bit
+        0 => 0x95,
+        8 => 0x87,
+        _ => 0x01, // dummy + stop bit
     };
     frame
 }
@@ -213,9 +213,15 @@ impl SpiSd {
 
     /// Read a single 512-byte block.
     fn read_block_raw(&self, lba: u64, buf: &mut [u8]) -> bool {
-        if buf.len() < SD_BLOCK_SIZE { return false; }
+        if buf.len() < SD_BLOCK_SIZE {
+            return false;
+        }
 
-        let addr = if self.sdhc { lba as u32 } else { (lba as u32) * SD_BLOCK_SIZE as u32 };
+        let addr = if self.sdhc {
+            lba as u32
+        } else {
+            (lba as u32) * SD_BLOCK_SIZE as u32
+        };
 
         self.cs_assert();
         let frame = sd_cmd_frame(17, addr); // CMD17
@@ -227,7 +233,9 @@ impl SpiSd {
         let mut r1 = 0xFFu8;
         for _ in 0..16 {
             r1 = self.spi_transfer_byte(0xFF);
-            if r1 & 0x80 == 0 { break; }
+            if r1 & 0x80 == 0 {
+                break;
+            }
         }
         if r1 != 0x00 {
             self.cs_deassert();
@@ -238,7 +246,9 @@ impl SpiSd {
         let mut timeout = 100_000u32;
         loop {
             let token = self.spi_transfer_byte(0xFF);
-            if token == 0xFE { break; }
+            if token == 0xFE {
+                break;
+            }
             timeout -= 1;
             if timeout == 0 {
                 self.cs_deassert();
@@ -262,9 +272,15 @@ impl SpiSd {
 
     /// Write a single 512-byte block.
     fn write_block_raw(&self, lba: u64, buf: &[u8]) -> bool {
-        if buf.len() < SD_BLOCK_SIZE { return false; }
+        if buf.len() < SD_BLOCK_SIZE {
+            return false;
+        }
 
-        let addr = if self.sdhc { lba as u32 } else { (lba as u32) * SD_BLOCK_SIZE as u32 };
+        let addr = if self.sdhc {
+            lba as u32
+        } else {
+            (lba as u32) * SD_BLOCK_SIZE as u32
+        };
 
         self.cs_assert();
         let frame = sd_cmd_frame(24, addr); // CMD24
@@ -276,7 +292,9 @@ impl SpiSd {
         let mut r1 = 0xFFu8;
         for _ in 0..16 {
             r1 = self.spi_transfer_byte(0xFF);
-            if r1 & 0x80 == 0 { break; }
+            if r1 & 0x80 == 0 {
+                break;
+            }
         }
         if r1 != 0x00 {
             self.cs_deassert();
@@ -336,18 +354,24 @@ impl SpiSd {
         let l = n;
 
         unsafe {
-            write_reg(SPI2_BASE + SPI_CLOCK_REG,
-                      (l & 0x3F) | ((h & 0x3F) << 6) | ((n & 0x3F) << 12));
+            write_reg(
+                SPI2_BASE + SPI_CLOCK_REG,
+                (l & 0x3F) | ((h & 0x3F) << 6) | ((n & 0x3F) << 12),
+            );
             // SPI_USER: enable MOSI, MISO, duplex mode
-            write_reg(SPI2_BASE + SPI_USER_REG,
-                      (1 << 27) |  // SPI_USR_MOSI
+            write_reg(
+                SPI2_BASE + SPI_USER_REG,
+                (1 << 27) |  // SPI_USR_MOSI
                       (1 << 28) |  // SPI_USR_MISO
-                      (1 << 7));   // SPI_CK_OUT_EDGE (mode 0)
-            // SPI_USER1: MOSI bit length = 7 (8 bits - 1), MISO same
-            write_reg(SPI2_BASE + SPI_USER1_REG,
-                      (7 << 17) |  // SPI_USR_MOSI_BITLEN
-                      (7 << 0));   // SPI_USR_MISO_BITLEN
-            // SPI_MS_DLEN: total data bits -1 = 7
+                      (1 << 7),
+            ); // SPI_CK_OUT_EDGE (mode 0)
+               // SPI_USER1: MOSI bit length = 7 (8 bits - 1), MISO same
+            write_reg(
+                SPI2_BASE + SPI_USER1_REG,
+                (7 << 17) |  // SPI_USR_MOSI_BITLEN
+                      (7 << 0),
+            ); // SPI_USR_MISO_BITLEN
+               // SPI_MS_DLEN: total data bits -1 = 7
             write_reg(SPI2_BASE + SPI_MS_DLEN_REG, 7);
             // SPI_CTRL: clear all special modes
             write_reg(SPI2_BASE + SPI_CTRL_REG, 0);
@@ -360,7 +384,7 @@ impl SpiSd {
             write_reg(SPI2_BASE + SPI_W0_REG, tx as u32);
             // Start transfer
             write_reg(SPI2_BASE + SPI_CMD_REG, 1 << 18); // SPI_USR bit
-            // Wait for completion
+                                                         // Wait for completion
             while read_reg(SPI2_BASE + SPI_CMD_REG) & (1 << 18) != 0 {
                 core::hint::spin_loop();
             }
@@ -370,11 +394,15 @@ impl SpiSd {
     }
 
     fn cs_assert(&self) {
-        unsafe { write_reg(GPIO_OUT_W1TC, CS_MASK); } // drive low
+        unsafe {
+            write_reg(GPIO_OUT_W1TC, CS_MASK);
+        } // drive low
     }
 
     fn cs_deassert(&self) {
-        unsafe { write_reg(GPIO_OUT_W1TS, CS_MASK); } // drive high
+        unsafe {
+            write_reg(GPIO_OUT_W1TS, CS_MASK);
+        } // drive high
     }
 }
 
@@ -382,12 +410,16 @@ impl SpiSd {
 
 impl BlockDevice for SpiSd {
     fn read_block(&self, lba: u64, buf: &mut [u8]) -> bool {
-        if self.state != SdState::Ready { return false; }
+        if self.state != SdState::Ready {
+            return false;
+        }
         self.read_block_raw(lba, buf)
     }
 
     fn write_block(&self, lba: u64, buf: &[u8]) -> bool {
-        if self.state != SdState::Ready { return false; }
+        if self.state != SdState::Ready {
+            return false;
+        }
         self.write_block_raw(lba, buf)
     }
 

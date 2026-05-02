@@ -58,13 +58,21 @@ impl Esp32Riscv {
 impl Platform for Esp32Riscv {
     fn name(&self) -> &'static str {
         #[cfg(feature = "c6")]
-        { "ESP32-C6 (RISC-V)" }
+        {
+            "ESP32-C6 (RISC-V)"
+        }
         #[cfg(all(not(feature = "c6"), feature = "h2"))]
-        { "ESP32-H2 (RISC-V)" }
+        {
+            "ESP32-H2 (RISC-V)"
+        }
         #[cfg(all(not(feature = "c6"), not(feature = "h2"), feature = "c3"))]
-        { "ESP32-C3 (RISC-V)" }
+        {
+            "ESP32-C3 (RISC-V)"
+        }
         #[cfg(all(not(feature = "c6"), not(feature = "h2"), not(feature = "c3")))]
-        { "ESP32 RISC-V" }
+        {
+            "ESP32 RISC-V"
+        }
     }
 
     fn init_cpu(&self) {}

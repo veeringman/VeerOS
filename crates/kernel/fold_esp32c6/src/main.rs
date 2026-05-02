@@ -17,11 +17,9 @@ mod trap;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 
-use arch::{Console, SavedContext, TickTimer};
 #[cfg(feature = "net")]
 use arch::NetworkDevice;
-use soc_qemu_virt::{default_serial, system_timer, clint::Clint, QemuVirt};
-use microkernel::Kernel;
+use arch::{Console, SavedContext, TickTimer};
 use microkernel::alloc::Heap;
 use microkernel::channel::Channels;
 use microkernel::driver::{DriverCaps, DriverRegistry, MemRegion};
@@ -30,6 +28,7 @@ use microkernel::ipc::Ipc;
 use microkernel::task::Scheduler;
 #[cfg(feature = "shell")]
 use microkernel::task::TaskState;
+use microkernel::Kernel;
 #[cfg(feature = "net")]
 use net::{NetStack, NetStorage, TcpSerial};
 #[cfg(feature = "shell")]
@@ -38,7 +37,7 @@ use shell::{Shell, ShellEnv};
 use smoltcp::iface::{SocketHandle, SocketSet};
 #[cfg(feature = "net")]
 use smoltcp::socket::dhcpv4;
-
+use soc_qemu_virt::{clint::Clint, default_serial, system_timer, QemuVirt};
 
 // Custom panic handler that prints to serial
 #[panic_handler]
@@ -48,7 +47,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let _ = writeln!(con, "\r\n!!! PANIC: {}", info);
     loop {
         #[cfg(target_arch = "riscv32")]
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
         #[cfg(not(target_arch = "riscv32"))]
         core::hint::spin_loop();
     }
@@ -121,7 +122,7 @@ pub(crate) static POLL: PollCell = PollCell(UnsafeCell::new(PollTable::new()));
 // Process table
 // ---------------------------------------------------------------------------
 
-use microkernel::process::{ProcessTable, ProcessCaps};
+use microkernel::process::{ProcessCaps, ProcessTable};
 
 pub(crate) struct ProcessCell(pub UnsafeCell<ProcessTable>);
 unsafe impl Sync for ProcessCell {}
@@ -175,9 +176,12 @@ use microkernel::fat32::Fat32;
 
 pub(crate) struct Fat32Cell(pub UnsafeCell<[Fat32; microkernel::fat32::MAX_FAT32]>);
 unsafe impl Sync for Fat32Cell {}
-pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(
-    [Fat32::new(), Fat32::new(), Fat32::new(), Fat32::new()]
-));
+pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new([
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+]));
 
 // ---------------------------------------------------------------------------
 // Mount table
@@ -211,7 +215,7 @@ static DRIVERS: RegistryCell = RegistryCell(UnsafeCell::new(DriverRegistry::new(
 // Audit log
 // ---------------------------------------------------------------------------
 
-use microkernel::audit::{AuditLog, AuditEvent};
+use microkernel::audit::{AuditEvent, AuditLog};
 
 pub(crate) struct AuditCell(pub UnsafeCell<AuditLog>);
 unsafe impl Sync for AuditCell {}
@@ -222,10 +226,10 @@ pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()))
 // ---------------------------------------------------------------------------
 
 use microkernel::agent::AgentTable;
-use microkernel::intent::IntentEngine;
-use microkernel::memory_engine::MemoryEngine;
 use microkernel::fabric::ExecutionFabric;
+use microkernel::intent::IntentEngine;
 use microkernel::intent_sched::IntentScheduler;
+use microkernel::memory_engine::MemoryEngine;
 
 pub(crate) struct AgentCell(pub UnsafeCell<AgentTable>);
 unsafe impl Sync for AgentCell {}
@@ -237,7 +241,8 @@ pub(crate) static INTENTS: IntentCell = IntentCell(UnsafeCell::new(IntentEngine:
 
 pub(crate) struct MemoryEngineCell(pub UnsafeCell<MemoryEngine>);
 unsafe impl Sync for MemoryEngineCell {}
-pub(crate) static MEMORY_ENGINE: MemoryEngineCell = MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
+pub(crate) static MEMORY_ENGINE: MemoryEngineCell =
+    MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
 
 pub(crate) struct FabricCell(pub UnsafeCell<ExecutionFabric>);
 unsafe impl Sync for FabricCell {}
@@ -245,7 +250,8 @@ pub(crate) static FABRIC: FabricCell = FabricCell(UnsafeCell::new(ExecutionFabri
 
 pub(crate) struct IntentSchedCell(pub UnsafeCell<IntentScheduler>);
 unsafe impl Sync for IntentSchedCell {}
-pub(crate) static INTENT_SCHED: IntentSchedCell = IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
+pub(crate) static INTENT_SCHED: IntentSchedCell =
+    IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
 
 // ---------------------------------------------------------------------------
 // Static timer handle (used by the trap dispatcher)
@@ -288,7 +294,13 @@ mod sim_wifi {
 
     impl SimWifi {
         pub const fn new() -> Self {
-            Self { ssid: [0; 32], ssid_len: 0, pass: [0; 64], pass_len: 0, connected: false }
+            Self {
+                ssid: [0; 32],
+                ssid_len: 0,
+                pass: [0; 64],
+                pass_len: 0,
+                connected: false,
+            }
         }
 
         pub fn set_credentials(&mut self, ssid: &[u8], pass: &[u8]) {
@@ -301,12 +313,16 @@ mod sim_wifi {
         }
 
         pub fn connect(&mut self) -> Result<(), &'static str> {
-            if self.ssid_len == 0 { return Err("no SSID configured"); }
+            if self.ssid_len == 0 {
+                return Err("no SSID configured");
+            }
             self.connected = true;
             Ok(())
         }
 
-        pub fn disconnect(&mut self) { self.connected = false; }
+        pub fn disconnect(&mut self) {
+            self.connected = false;
+        }
 
         pub fn scan(&self) -> Result<usize, &'static str> {
             // Simulated: always finds 1 virtual network
@@ -320,8 +336,17 @@ mod sim_wifi {
 
         pub fn write_status(&self, w: &mut dyn Write) {
             let ssid = core::str::from_utf8(&self.ssid[..self.ssid_len]).unwrap_or("?");
-            let state = if self.connected { "connected" } else { "disconnected" };
-            let _ = writeln!(w, "  WiFi: {} (SSID: {})", state, if self.ssid_len > 0 { ssid } else { "<none>" });
+            let state = if self.connected {
+                "connected"
+            } else {
+                "disconnected"
+            };
+            let _ = writeln!(
+                w,
+                "  WiFi: {} (SSID: {})",
+                state,
+                if self.ssid_len > 0 { ssid } else { "<none>" }
+            );
             let _ = writeln!(w, "  Mode: simulated (QEMU virtual)");
         }
     }
@@ -348,10 +373,16 @@ mod sim_ble {
 
     impl SimBle {
         pub const fn new() -> Self {
-            Self { advertising: false, adv_name: [0; 32], adv_len: 0 }
+            Self {
+                advertising: false,
+                adv_name: [0; 32],
+                adv_len: 0,
+            }
         }
 
-        pub fn scan(&self) -> Result<usize, &'static str> { Ok(0) }
+        pub fn scan(&self) -> Result<usize, &'static str> {
+            Ok(0)
+        }
 
         pub fn write_scan_results(&self, w: &mut dyn Write) {
             let _ = writeln!(w, "  (no BLE devices in range — simulated)");
@@ -365,10 +396,16 @@ mod sim_ble {
             Ok(())
         }
 
-        pub fn stop(&mut self) { self.advertising = false; }
+        pub fn stop(&mut self) {
+            self.advertising = false;
+        }
 
         pub fn write_status(&self, w: &mut dyn Write) {
-            let state = if self.advertising { "advertising" } else { "idle" };
+            let state = if self.advertising {
+                "advertising"
+            } else {
+                "idle"
+            };
             let _ = writeln!(w, "  BLE: {} (simulated)", state);
             if self.advertising {
                 let name = core::str::from_utf8(&self.adv_name[..self.adv_len]).unwrap_or("?");
@@ -397,7 +434,11 @@ mod sim_802154 {
 
     impl Sim802154 {
         pub const fn new() -> Self {
-            Self { initialised: false, channel: 11, pan_id: 0xFFFF }
+            Self {
+                initialised: false,
+                channel: 11,
+                pan_id: 0xFFFF,
+            }
         }
 
         pub fn init(&mut self) -> Result<(), &'static str> {
@@ -405,19 +446,29 @@ mod sim_802154 {
             Ok(())
         }
 
-        pub fn channel(&self) -> u8 { self.channel }
-        pub fn pan_id(&self) -> u16 { self.pan_id }
+        pub fn channel(&self) -> u8 {
+            self.channel
+        }
+        pub fn pan_id(&self) -> u16 {
+            self.pan_id
+        }
 
         pub fn set_channel(&mut self, ch: u8) -> Result<(), &'static str> {
-            if !(11..=26).contains(&ch) { return Err("channel must be 11-26"); }
+            if !(11..=26).contains(&ch) {
+                return Err("channel must be 11-26");
+            }
             self.channel = ch;
             Ok(())
         }
 
-        pub fn set_pan_id(&mut self, id: u16) { self.pan_id = id; }
+        pub fn set_pan_id(&mut self, id: u16) {
+            self.pan_id = id;
+        }
 
         pub fn scan(&self) -> Result<usize, &'static str> {
-            if !self.initialised { return Err("radio not initialised"); }
+            if !self.initialised {
+                return Err("radio not initialised");
+            }
             Ok(0)
         }
 
@@ -426,14 +477,24 @@ mod sim_802154 {
         }
 
         pub fn send(&self, _data: &[u8]) -> Result<(), &'static str> {
-            if !self.initialised { return Err("radio not initialised"); }
+            if !self.initialised {
+                return Err("radio not initialised");
+            }
             Ok(())
         }
 
         pub fn write_status(&self, w: &mut dyn Write) {
-            let state = if self.initialised { "ready" } else { "uninitialised" };
+            let state = if self.initialised {
+                "ready"
+            } else {
+                "uninitialised"
+            };
             let _ = writeln!(w, "  802.15.4: {} (simulated)", state);
-            let _ = writeln!(w, "  Channel: {}  PAN ID: 0x{:04X}", self.channel, self.pan_id);
+            let _ = writeln!(
+                w,
+                "  Channel: {}  PAN ID: 0x{:04X}",
+                self.channel, self.pan_id
+            );
         }
     }
 }
@@ -443,7 +504,8 @@ struct Radio802154Cell(UnsafeCell<sim_802154::Sim802154>);
 #[cfg(feature = "ieee802154")]
 unsafe impl Sync for Radio802154Cell {}
 #[cfg(feature = "ieee802154")]
-static RADIO_802154: Radio802154Cell = Radio802154Cell(UnsafeCell::new(sim_802154::Sim802154::new()));
+static RADIO_802154: Radio802154Cell =
+    Radio802154Cell(UnsafeCell::new(sim_802154::Sim802154::new()));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Virtual Sensor Subsystem
@@ -469,8 +531,10 @@ struct VirtualSensor {
 impl VirtualSensor {
     const fn empty() -> Self {
         Self {
-            name: [0; 16], name_len: 0,
-            unit: [0; 8], unit_len: 0,
+            name: [0; 16],
+            name_len: 0,
+            unit: [0; 8],
+            unit_len: 0,
             value_centi: 0,
             active: false,
         }
@@ -483,12 +547,18 @@ struct SensorArray {
 
 impl SensorArray {
     const fn new() -> Self {
-        Self { sensors: [
-            VirtualSensor::empty(), VirtualSensor::empty(),
-            VirtualSensor::empty(), VirtualSensor::empty(),
-            VirtualSensor::empty(), VirtualSensor::empty(),
-            VirtualSensor::empty(), VirtualSensor::empty(),
-        ]}
+        Self {
+            sensors: [
+                VirtualSensor::empty(),
+                VirtualSensor::empty(),
+                VirtualSensor::empty(),
+                VirtualSensor::empty(),
+                VirtualSensor::empty(),
+                VirtualSensor::empty(),
+                VirtualSensor::empty(),
+                VirtualSensor::empty(),
+            ],
+        }
     }
 
     fn add(&mut self, name: &str, unit: &str, initial: i32) -> bool {
@@ -538,7 +608,9 @@ impl SensorArray {
 
     /// Format a single sensor value into a buffer (for VFS read).
     fn read_value(&self, idx: usize, buf: &mut [u8]) -> usize {
-        if idx >= MAX_SENSORS || !self.sensors[idx].active { return 0; }
+        if idx >= MAX_SENSORS || !self.sensors[idx].active {
+            return 0;
+        }
         let s = &self.sensors[idx];
         let whole = s.value_centi / 100;
         let frac = (s.value_centi % 100).unsigned_abs();
@@ -549,22 +621,57 @@ impl SensorArray {
         // Simple integer formatting
         let neg = whole < 0;
         let abs_whole = if neg { (-whole) as u32 } else { whole as u32 };
-        if neg && pos < tmp.len() { tmp[pos] = b'-'; pos += 1; }
+        if neg && pos < tmp.len() {
+            tmp[pos] = b'-';
+            pos += 1;
+        }
         let mut digits = [0u8; 10];
         let mut nd = 0;
         let mut v = abs_whole;
-        if v == 0 { digits[0] = b'0'; nd = 1; }
-        else {
-            while v > 0 && nd < 10 { digits[nd] = b'0' + (v % 10) as u8; nd += 1; v /= 10; }
+        if v == 0 {
+            digits[0] = b'0';
+            nd = 1;
+        } else {
+            while v > 0 && nd < 10 {
+                digits[nd] = b'0' + (v % 10) as u8;
+                nd += 1;
+                v /= 10;
+            }
         }
         let mut i = nd;
-        while i > 0 { i -= 1; if pos < tmp.len() { tmp[pos] = digits[i]; pos += 1; } }
-        if pos < tmp.len() { tmp[pos] = b'.'; pos += 1; }
-        if pos < tmp.len() { tmp[pos] = b'0' + (frac / 10) as u8; pos += 1; }
-        if pos < tmp.len() { tmp[pos] = b'0' + (frac % 10) as u8; pos += 1; }
-        if pos < tmp.len() { tmp[pos] = b' '; pos += 1; }
-        for &b in unit.as_bytes() { if pos < tmp.len() { tmp[pos] = b; pos += 1; } }
-        if pos < tmp.len() { tmp[pos] = b'\n'; pos += 1; }
+        while i > 0 {
+            i -= 1;
+            if pos < tmp.len() {
+                tmp[pos] = digits[i];
+                pos += 1;
+            }
+        }
+        if pos < tmp.len() {
+            tmp[pos] = b'.';
+            pos += 1;
+        }
+        if pos < tmp.len() {
+            tmp[pos] = b'0' + (frac / 10) as u8;
+            pos += 1;
+        }
+        if pos < tmp.len() {
+            tmp[pos] = b'0' + (frac % 10) as u8;
+            pos += 1;
+        }
+        if pos < tmp.len() {
+            tmp[pos] = b' ';
+            pos += 1;
+        }
+        for &b in unit.as_bytes() {
+            if pos < tmp.len() {
+                tmp[pos] = b;
+                pos += 1;
+            }
+        }
+        if pos < tmp.len() {
+            tmp[pos] = b'\n';
+            pos += 1;
+        }
         let len = pos.min(buf.len());
         buf[..len].copy_from_slice(&tmp[..len]);
         len
@@ -593,22 +700,33 @@ const ONBOARD_LED_PIN: usize = 15;
 
 #[cfg(feature = "gpio-sim")]
 #[derive(Copy, Clone, PartialEq)]
-enum GpioMode { Input, Output }
+enum GpioMode {
+    Input,
+    Output,
+}
 #[cfg(feature = "gpio-sim")]
 #[derive(Copy, Clone, PartialEq)]
-enum GpioPull { None, Up, Down }
+enum GpioPull {
+    None,
+    Up,
+    Down,
+}
 
 #[cfg(feature = "gpio-sim")]
 struct GpioPinState {
     mode: GpioMode,
-    level: u8,    // 0 or 1
+    level: u8, // 0 or 1
     pull: GpioPull,
 }
 
 #[cfg(feature = "gpio-sim")]
 impl GpioPinState {
     const fn new() -> Self {
-        Self { mode: GpioMode::Input, level: 0, pull: GpioPull::None }
+        Self {
+            mode: GpioMode::Input,
+            level: 0,
+            pull: GpioPull::None,
+        }
     }
 }
 
@@ -621,7 +739,9 @@ struct GpioArray {
 impl GpioArray {
     const fn new() -> Self {
         const P: GpioPinState = GpioPinState::new();
-        Self { pins: [P; MAX_GPIO_PINS] }
+        Self {
+            pins: [P; MAX_GPIO_PINS],
+        }
     }
 
     fn init_defaults(&mut self) {
@@ -634,10 +754,25 @@ impl GpioArray {
         let _ = writeln!(w, "  PIN  MODE  LEVEL  PULL   NOTE");
         let _ = writeln!(w, "  ───  ────  ─────  ─────  ────");
         for (i, p) in self.pins.iter().enumerate() {
-            let mode = match p.mode { GpioMode::Input => "in ", GpioMode::Output => "out" };
-            let pull = match p.pull { GpioPull::None => "none", GpioPull::Up => "up  ", GpioPull::Down => "down" };
-            let note = if i == ONBOARD_LED_PIN { "onboard LED" } else { "" };
-            let _ = writeln!(w, "  {:>3}  {}   {:>3}    {}   {}", i, mode, p.level, pull, note);
+            let mode = match p.mode {
+                GpioMode::Input => "in ",
+                GpioMode::Output => "out",
+            };
+            let pull = match p.pull {
+                GpioPull::None => "none",
+                GpioPull::Up => "up  ",
+                GpioPull::Down => "down",
+            };
+            let note = if i == ONBOARD_LED_PIN {
+                "onboard LED"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                w,
+                "  {:>3}  {}   {:>3}    {}   {}",
+                i, mode, p.level, pull, note
+            );
         }
     }
 
@@ -652,7 +787,11 @@ impl GpioArray {
                 return None;
             }
         }
-        if any && n < MAX_GPIO_PINS { Some(n) } else { None }
+        if any && n < MAX_GPIO_PINS {
+            Some(n)
+        } else {
+            None
+        }
     }
 }
 
@@ -728,8 +867,10 @@ static mut NET_STORAGE: NetStorage = NetStorage::new();
 // Per-connection TCP buffer storage
 #[cfg(feature = "net")]
 static mut CONN_STORAGE: [NetStorage; MAX_REMOTE_SESSIONS] = [
-    NetStorage::new(), NetStorage::new(),
-    NetStorage::new(), NetStorage::new(),
+    NetStorage::new(),
+    NetStorage::new(),
+    NetStorage::new(),
+    NetStorage::new(),
 ];
 
 // Per-connection task stacks (48KB each — vi editor needs headroom)
@@ -738,8 +879,10 @@ static mut CONN_STORAGE: [NetStorage; MAX_REMOTE_SESSIONS] = [
 struct ConnStack([u8; 49152]);
 #[cfg(feature = "net")]
 static CONN_STACKS: [ConnStack; MAX_REMOTE_SESSIONS] = [
-    ConnStack([0u8; 49152]), ConnStack([0u8; 49152]),
-    ConnStack([0u8; 49152]), ConnStack([0u8; 49152]),
+    ConnStack([0u8; 49152]),
+    ConnStack([0u8; 49152]),
+    ConnStack([0u8; 49152]),
+    ConnStack([0u8; 49152]),
 ];
 
 /// Session timeout: force-kill sessions older than this many scheduler ticks.
@@ -765,10 +908,30 @@ unsafe impl Sync for ConnSlotCell {}
 
 #[cfg(feature = "net")]
 static CONN_SLOTS: ConnSlotCell = ConnSlotCell(UnsafeCell::new([
-    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
-    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
-    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
-    ConnSlot { handle: None, active: false, started_tick: 0, task_idx: 0 },
+    ConnSlot {
+        handle: None,
+        active: false,
+        started_tick: 0,
+        task_idx: 0,
+    },
+    ConnSlot {
+        handle: None,
+        active: false,
+        started_tick: 0,
+        task_idx: 0,
+    },
+    ConnSlot {
+        handle: None,
+        active: false,
+        started_tick: 0,
+        task_idx: 0,
+    },
+    ConnSlot {
+        handle: None,
+        active: false,
+        started_tick: 0,
+        task_idx: 0,
+    },
 ]));
 
 /// Index of the connection currently being set up (passed to the spawned task).
@@ -797,12 +960,12 @@ static mut NET_POLL_BUSY: bool = false;
 #[cfg(feature = "net")]
 fn net_poll() -> bool {
     unsafe {
-        if NET_POLL_BUSY { return false; }
+        if NET_POLL_BUSY {
+            return false;
+        }
         NET_POLL_BUSY = true;
 
-        if let (Some(stack), Some(sockets)) =
-            (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
-        {
+        if let (Some(stack), Some(sockets)) = (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get()) {
             let ticks = (*SCHEDULER.0.get()).ticks;
             stack.poll(sockets, ticks);
 
@@ -819,13 +982,15 @@ fn net_poll() -> bool {
                         DHCP_CONFIGURED = true;
                         let serial = default_serial();
                         let mut c = Console::new(serial);
-                        let _ = writeln!(c,
+                        let _ = writeln!(
+                            c,
                             "[net] DHCP: acquired {}.{}.{}.{}/{}",
                             addr[0], addr[1], addr[2], addr[3], prefix,
                         );
                         if let Some(gw) = router {
                             let g = gw.0;
-                            let _ = writeln!(c,
+                            let _ = writeln!(
+                                c,
                                 "[net] DHCP: gateway {}.{}.{}.{}",
                                 g[0], g[1], g[2], g[3],
                             );
@@ -847,7 +1012,9 @@ fn net_poll() -> bool {
 
 #[cfg(feature = "net")]
 fn net_poll_unlock() {
-    unsafe { NET_POLL_BUSY = false; }
+    unsafe {
+        NET_POLL_BUSY = false;
+    }
 }
 
 /// Generate a random seed from timer + cycle counter.
@@ -918,20 +1085,33 @@ fn conn_task() -> ! {
                         let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
                         let mut secure_con = Console::new(secure_serial);
 
-                        if net::auth::login_prompt_full(&mut secure_con, REMOTE_PASSWORD_HASH, Some(do_login)) {
-                            let _ = writeln!(con, "[net] conn[{}]: authenticated \u{2014} starting shell", slot_idx);
+                        if net::auth::login_prompt_full(
+                            &mut secure_con,
+                            REMOTE_PASSWORD_HASH,
+                            Some(do_login),
+                        ) {
+                            let _ = writeln!(
+                                con,
+                                "[net] conn[{}]: authenticated \u{2014} starting shell",
+                                slot_idx
+                            );
                             let env = build_shell_env(true);
                             let mut sh = Shell::new(env);
                             sh.run(&mut secure_con);
                         } else {
-                            let _ = writeln!(con, "[net] conn[{}]: authentication failed", slot_idx);
+                            let _ =
+                                writeln!(con, "[net] conn[{}]: authentication failed", slot_idx);
                         }
                     }
                     Some(net::secure::MODE_PUSH) => {
                         let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
                         let mut secure_con = Console::new(secure_serial);
 
-                        if net::auth::login_prompt_full(&mut secure_con, REMOTE_PASSWORD_HASH, Some(do_login)) {
+                        if net::auth::login_prompt_full(
+                            &mut secure_con,
+                            REMOTE_PASSWORD_HASH,
+                            Some(do_login),
+                        ) {
                             let _ = writeln!(con, "[net] conn[{}]: push authenticated", slot_idx);
                             let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
                             net::secure::handle_push(&raw_serial, &mut channel, vfs_write_file);
@@ -942,7 +1122,11 @@ fn conn_task() -> ! {
                         let secure_serial = net::secure::SecureSerial::new(tcp_serial, ch);
                         let mut secure_con = Console::new(secure_serial);
 
-                        if net::auth::login_prompt_full(&mut secure_con, REMOTE_PASSWORD_HASH, Some(do_login)) {
+                        if net::auth::login_prompt_full(
+                            &mut secure_con,
+                            REMOTE_PASSWORD_HASH,
+                            Some(do_login),
+                        ) {
                             let _ = writeln!(con, "[net] conn[{}]: pull authenticated", slot_idx);
                             let (raw_serial, mut channel) = secure_con.into_inner().into_parts();
                             net::secure::handle_pull(&raw_serial, &mut channel, vfs_read_file);
@@ -967,7 +1151,9 @@ fn conn_task() -> ! {
             socket.abort();
         }
         slots[slot_idx].active = false;
-        if net_poll() { net_poll_unlock(); }
+        if net_poll() {
+            net_poll_unlock();
+        }
     }
 
     halt_task();
@@ -983,7 +1169,9 @@ fn halt_task() -> ! {
     }
     loop {
         #[cfg(target_arch = "riscv32")]
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
         #[cfg(not(target_arch = "riscv32"))]
         core::hint::spin_loop();
     }
@@ -1011,7 +1199,11 @@ fn shell_task() -> ! {
 fn build_shell_env(pre_auth: bool) -> ShellEnv {
     ShellEnv {
         version: VERSION,
-        platform: if pre_auth { "QEMU ESP32-C6 (RISC-V 32) [remote]" } else { "QEMU ESP32-C6 (RISC-V 32)" },
+        platform: if pre_auth {
+            "QEMU ESP32-C6 (RISC-V 32) [remote]"
+        } else {
+            "QEMU ESP32-C6 (RISC-V 32)"
+        },
         scheduler: "minimal",
         get_uptime_ticks: Some(get_uptime_ticks),
         get_task_list: Some(write_task_list),
@@ -1121,7 +1313,9 @@ fn net_task() -> ! {
             let _ = writeln!(con, "[net] no VIRTIO-NET device found \u{2014} task halted");
             loop {
                 #[cfg(target_arch = "riscv32")]
-                unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                unsafe {
+                    core::arch::asm!("wfi", options(nomem, nostack));
+                }
                 #[cfg(not(target_arch = "riscv32"))]
                 core::hint::spin_loop();
             }
@@ -1132,7 +1326,13 @@ fn net_task() -> ! {
     let _ = writeln!(
         con,
         "[net] found NIC  MMIO-v{}  MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        nic.mmio_version(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        nic.mmio_version(),
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
     );
 
     let _ = writeln!(con, "[net] configuring DHCP stack...");
@@ -1166,22 +1366,27 @@ fn net_task() -> ! {
 
     // Wait for DHCP lease before listening for connections.
     loop {
-        if net_poll() { net_poll_unlock(); }
+        if net_poll() {
+            net_poll_unlock();
+        }
         unsafe {
-            if DHCP_CONFIGURED { break; }
+            if DHCP_CONFIGURED {
+                break;
+            }
         }
         core::hint::spin_loop();
     }
 
-    let _ = writeln!(con, "[net] DHCP complete \u{2014} listening on port {} (max {} sessions)",
-        REMOTE_SHELL_PORT, MAX_REMOTE_SESSIONS);
+    let _ = writeln!(
+        con,
+        "[net] DHCP complete \u{2014} listening on port {} (max {} sessions)",
+        REMOTE_SHELL_PORT, MAX_REMOTE_SESSIONS
+    );
 
     // Start listening on the first slot only (smoltcp: one listener per port).
     let mut listen_slot: usize = 0;
     unsafe {
-        if let (Some(stack), Some(sockets)) =
-            (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
-        {
+        if let (Some(stack), Some(sockets)) = (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get()) {
             let slots = &*CONN_SLOTS.0.get();
             if let Some(h) = slots[listen_slot].handle {
                 stack.listen_handle(sockets, h, REMOTE_SHELL_PORT);
@@ -1196,24 +1401,27 @@ fn net_task() -> ! {
     // Also: detect and force-reclaim stale/dead sessions (timeout or
     // TCP socket no longer active).
     loop {
-        if net_poll() { net_poll_unlock(); }
+        if net_poll() {
+            net_poll_unlock();
+        }
 
         unsafe {
             let slots = &mut *CONN_SLOTS.0.get();
             let sched = &mut *SCHEDULER.0.get();
             let now = sched.ticks;
 
-            if let (Some(stack), Some(sockets)) =
-                (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
-            {
+            if let (Some(stack), Some(sockets)) = (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get()) {
                 // --- Reap stale / dead sessions ---
                 for i in 0..MAX_REMOTE_SESSIONS {
-                    if !slots[i].active { continue; }
+                    if !slots[i].active {
+                        continue;
+                    }
                     if let Some(h) = slots[i].handle {
                         let socket = sockets.get::<smoltcp::socket::tcp::Socket>(h);
                         // Peer has closed (FIN received or socket fully closed).
                         let dead_tcp = !socket.is_active() || !socket.may_recv();
-                        let timed_out = now.wrapping_sub(slots[i].started_tick) > SESSION_TIMEOUT_TICKS;
+                        let timed_out =
+                            now.wrapping_sub(slots[i].started_tick) > SESSION_TIMEOUT_TICKS;
                         if dead_tcp || timed_out {
                             // Force-kill the task and reclaim the slot.
                             let reason = if dead_tcp { "dead socket" } else { "timeout" };
@@ -1245,13 +1453,24 @@ fn net_task() -> ! {
                             if let Some(idx) = sched.create_task(
                                 "remote",
                                 conn_task as *const () as usize,
-                                st, sb, 1, 0,
+                                st,
+                                sb,
+                                1,
+                                0,
                             ) {
                                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
                                 slots[listen_slot].task_idx = idx;
-                                let _ = writeln!(con, "[net] conn[{}]: accepted \u{2014} spawned task", listen_slot);
+                                let _ = writeln!(
+                                    con,
+                                    "[net] conn[{}]: accepted \u{2014} spawned task",
+                                    listen_slot
+                                );
                             } else {
-                                let _ = writeln!(con, "[net] conn[{}]: no free task slots", listen_slot);
+                                let _ = writeln!(
+                                    con,
+                                    "[net] conn[{}]: no free task slots",
+                                    listen_slot
+                                );
                                 slots[listen_slot].active = false;
                             }
                         }
@@ -1270,7 +1489,8 @@ fn net_task() -> ! {
                             }
                         }
                         if !found {
-                            let _ = writeln!(con, "[net] all {} sessions in use", MAX_REMOTE_SESSIONS);
+                            let _ =
+                                writeln!(con, "[net] all {} sessions in use", MAX_REMOTE_SESSIONS);
                         }
                     }
                 }
@@ -1315,12 +1535,16 @@ fn get_uptime_ticks() -> u64 {
 
 #[cfg(feature = "shell")]
 fn write_mem_info(w: &mut dyn core::fmt::Write) {
-    unsafe { (*HEAP.0.get()).write_stats(w); }
+    unsafe {
+        (*HEAP.0.get()).write_stats(w);
+    }
 }
 
 #[cfg(feature = "shell")]
 fn write_driver_list(w: &mut dyn core::fmt::Write) {
-    unsafe { (*DRIVERS.0.get()).write_list(w); }
+    unsafe {
+        (*DRIVERS.0.get()).write_list(w);
+    }
 }
 
 #[cfg(feature = "shell")]
@@ -1447,8 +1671,12 @@ fn wifi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
         "connect" => {
             let _ = write!(w, "  Connecting...");
             match mgr.connect() {
-                Ok(()) => { let _ = writeln!(w, " connected!"); }
-                Err(e) => { let _ = writeln!(w, " failed: {}", e); }
+                Ok(()) => {
+                    let _ = writeln!(w, " connected!");
+                }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
             }
         }
         "disconnect" => {
@@ -1462,11 +1690,17 @@ fn wifi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     let _ = writeln!(w, " found {} network(s)", n);
                     mgr.write_scan_results(w);
                 }
-                Err(e) => { let _ = writeln!(w, " failed: {}", e); }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
             }
         }
-        "list" | "ls" => { mgr.write_scan_results(w); }
-        "status" | "info" | "" => { mgr.write_status(w); }
+        "list" | "ls" => {
+            mgr.write_scan_results(w);
+        }
+        "status" | "info" | "" => {
+            mgr.write_status(w);
+        }
         _ => {
             let _ = writeln!(w, "  wifi subcommands:");
             let _ = writeln!(w, "    wifi scan                  Scan for networks");
@@ -1491,25 +1725,35 @@ fn bt_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     let _ = writeln!(w, " found {} device(s)", n);
                     mgr.write_scan_results(w);
                 }
-                Err(e) => { let _ = writeln!(w, " failed: {}", e); }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
             }
         }
-        "list" | "ls" => { mgr.write_scan_results(w); }
+        "list" | "ls" => {
+            mgr.write_scan_results(w);
+        }
         "advertise" | "adv" => {
             if args.is_empty() {
                 let _ = writeln!(w, "  usage: bt advertise <name>");
                 return;
             }
             match mgr.advertise(args.as_bytes()) {
-                Ok(()) => { let _ = writeln!(w, "  Advertising as '{}'", args); }
-                Err(e) => { let _ = writeln!(w, "  Failed: {}", e); }
+                Ok(()) => {
+                    let _ = writeln!(w, "  Advertising as '{}'", args);
+                }
+                Err(e) => {
+                    let _ = writeln!(w, "  Failed: {}", e);
+                }
             }
         }
         "stop" => {
             mgr.stop();
             let _ = writeln!(w, "  Advertising stopped.");
         }
-        "status" | "info" | "" => { mgr.write_status(w); }
+        "status" | "info" | "" => {
+            mgr.write_status(w);
+        }
         _ => {
             let _ = writeln!(w, "  bt subcommands:");
             let _ = writeln!(w, "    bt scan                    Scan for BLE devices");
@@ -1529,8 +1773,12 @@ fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
         "init" => {
             let _ = write!(w, "  Initialising 802.15.4 radio...");
             match mgr.init() {
-                Ok(()) => { let _ = writeln!(w, " done"); }
-                Err(e) => { let _ = writeln!(w, " failed: {}", e); }
+                Ok(()) => {
+                    let _ = writeln!(w, " done");
+                }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
             }
         }
         "channel" | "ch" => {
@@ -1540,10 +1788,16 @@ fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             }
             match args.parse::<u8>() {
                 Ok(ch) => match mgr.set_channel(ch) {
-                    Ok(()) => { let _ = writeln!(w, "  Channel set to {}", ch); }
-                    Err(e) => { let _ = writeln!(w, "  Error: {}", e); }
+                    Ok(()) => {
+                        let _ = writeln!(w, "  Channel set to {}", ch);
+                    }
+                    Err(e) => {
+                        let _ = writeln!(w, "  Error: {}", e);
+                    }
                 },
-                Err(_) => { let _ = writeln!(w, "  Invalid channel number (must be 11-26)"); }
+                Err(_) => {
+                    let _ = writeln!(w, "  Invalid channel number (must be 11-26)");
+                }
             }
         }
         "panid" => {
@@ -1551,13 +1805,18 @@ fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                 let _ = writeln!(w, "  Current PAN ID: 0x{:04X}", mgr.pan_id());
                 return;
             }
-            let hex_str = args.strip_prefix("0x").or_else(|| args.strip_prefix("0X")).unwrap_or(args);
+            let hex_str = args
+                .strip_prefix("0x")
+                .or_else(|| args.strip_prefix("0X"))
+                .unwrap_or(args);
             match u16::from_str_radix(hex_str, 16) {
                 Ok(pan_id) => {
                     mgr.set_pan_id(pan_id);
                     let _ = writeln!(w, "  PAN ID set to 0x{:04X}", pan_id);
                 }
-                Err(_) => { let _ = writeln!(w, "  Invalid PAN ID (use hex, e.g. 0x1234)"); }
+                Err(_) => {
+                    let _ = writeln!(w, "  Invalid PAN ID (use hex, e.g. 0x1234)");
+                }
             }
         }
         "scan" => {
@@ -1567,21 +1826,31 @@ fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     let _ = writeln!(w, " found {} network(s)", n);
                     mgr.write_scan_results(w);
                 }
-                Err(e) => { let _ = writeln!(w, " failed: {}", e); }
+                Err(e) => {
+                    let _ = writeln!(w, " failed: {}", e);
+                }
             }
         }
-        "list" | "ls" => { mgr.write_scan_results(w); }
+        "list" | "ls" => {
+            mgr.write_scan_results(w);
+        }
         "send" | "tx" => {
             if args.is_empty() {
                 let _ = writeln!(w, "  usage: zigbee send <data>");
                 return;
             }
             match mgr.send(args.as_bytes()) {
-                Ok(()) => { let _ = writeln!(w, "  Frame sent ({} bytes)", args.len()); }
-                Err(e) => { let _ = writeln!(w, "  TX failed: {}", e); }
+                Ok(()) => {
+                    let _ = writeln!(w, "  Frame sent ({} bytes)", args.len());
+                }
+                Err(e) => {
+                    let _ = writeln!(w, "  TX failed: {}", e);
+                }
             }
         }
-        "status" | "info" | "" => { mgr.write_status(w); }
+        "status" | "info" | "" => {
+            mgr.write_status(w);
+        }
         _ => {
             let _ = writeln!(w, "  zigbee subcommands:");
             let _ = writeln!(w, "    zigbee init                Init 802.15.4 radio");
@@ -1604,7 +1873,9 @@ fn sensor_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
     let sensors = unsafe { &mut *SENSORS.0.get() };
 
     match sub {
-        "list" | "ls" | "" => { sensors.write_list(w); }
+        "list" | "ls" | "" => {
+            sensors.write_list(w);
+        }
         "read" => {
             if args.is_empty() {
                 let _ = writeln!(w, "  usage: sensor read <name>");
@@ -1617,7 +1888,9 @@ fn sensor_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     let val = core::str::from_utf8(&buf[..len]).unwrap_or("?");
                     let _ = write!(w, "  {}", val);
                 }
-                None => { let _ = writeln!(w, "  sensor '{}' not found", args); }
+                None => {
+                    let _ = writeln!(w, "  sensor '{}' not found", args);
+                }
             }
         }
         "set" => {
@@ -1633,9 +1906,17 @@ fn sensor_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                 Some(idx) => {
                     let val = parse_i32(val_str);
                     sensors.sensors[idx].value_centi = val;
-                    let _ = writeln!(w, "  sensor '{}' set to {}.{:02}", name, val / 100, (val % 100).unsigned_abs());
+                    let _ = writeln!(
+                        w,
+                        "  sensor '{}' set to {}.{:02}",
+                        name,
+                        val / 100,
+                        (val % 100).unsigned_abs()
+                    );
                 }
-                None => { let _ = writeln!(w, "  sensor '{}' not found", name); }
+                None => {
+                    let _ = writeln!(w, "  sensor '{}' not found", name);
+                }
             }
         }
         "status" => {
@@ -1668,12 +1949,17 @@ fn gpio_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
     let gpios = unsafe { &mut *GPIOS.0.get() };
 
     match sub {
-        "" | "list" | "ls" => { gpios.write_list(w); }
+        "" | "list" | "ls" => {
+            gpios.write_list(w);
+        }
 
         "read" => {
             let pin = match GpioArray::parse_pin(args) {
                 Some(p) => p,
-                None => { let _ = writeln!(w, "  usage: gpio read <pin>"); return; }
+                None => {
+                    let _ = writeln!(w, "  usage: gpio read <pin>");
+                    return;
+                }
             };
             let _ = writeln!(w, "  gpio{} = {}", pin, gpios.pins[pin].level);
         }
@@ -1682,19 +1968,32 @@ fn gpio_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             // gpio write <pin> <0|1>
             let (pin_s, val_s) = match args.find(' ') {
                 Some(i) => (&args[..i], args[i + 1..].trim()),
-                None => { let _ = writeln!(w, "  usage: gpio write <pin> <0|1>"); return; }
+                None => {
+                    let _ = writeln!(w, "  usage: gpio write <pin> <0|1>");
+                    return;
+                }
             };
             let pin = match GpioArray::parse_pin(pin_s) {
                 Some(p) => p,
-                None => { let _ = writeln!(w, "  invalid pin '{}'", pin_s); return; }
+                None => {
+                    let _ = writeln!(w, "  invalid pin '{}'", pin_s);
+                    return;
+                }
             };
             let val: u8 = match val_s {
-                "0" | "low" | "LOW"   => 0,
+                "0" | "low" | "LOW" => 0,
                 "1" | "high" | "HIGH" => 1,
-                _ => { let _ = writeln!(w, "  invalid level '{}' (expected 0 or 1)", val_s); return; }
+                _ => {
+                    let _ = writeln!(w, "  invalid level '{}' (expected 0 or 1)", val_s);
+                    return;
+                }
             };
             if gpios.pins[pin].mode != GpioMode::Output {
-                let _ = writeln!(w, "  warning: gpio{} is not in output mode (auto-switching)", pin);
+                let _ = writeln!(
+                    w,
+                    "  warning: gpio{} is not in output mode (auto-switching)",
+                    pin
+                );
                 gpios.pins[pin].mode = GpioMode::Output;
             }
             gpios.pins[pin].level = val;
@@ -1707,16 +2006,25 @@ fn gpio_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             // gpio mode <pin> <in|out>
             let (pin_s, mode_s) = match args.find(' ') {
                 Some(i) => (&args[..i], args[i + 1..].trim()),
-                None => { let _ = writeln!(w, "  usage: gpio mode <pin> <in|out>"); return; }
+                None => {
+                    let _ = writeln!(w, "  usage: gpio mode <pin> <in|out>");
+                    return;
+                }
             };
             let pin = match GpioArray::parse_pin(pin_s) {
                 Some(p) => p,
-                None => { let _ = writeln!(w, "  invalid pin '{}'", pin_s); return; }
+                None => {
+                    let _ = writeln!(w, "  invalid pin '{}'", pin_s);
+                    return;
+                }
             };
             let mode = match mode_s {
-                "in"  | "input"  => GpioMode::Input,
+                "in" | "input" => GpioMode::Input,
                 "out" | "output" => GpioMode::Output,
-                _ => { let _ = writeln!(w, "  invalid mode '{}' (expected in|out)", mode_s); return; }
+                _ => {
+                    let _ = writeln!(w, "  invalid mode '{}' (expected in|out)", mode_s);
+                    return;
+                }
             };
             gpios.pins[pin].mode = mode;
             let _ = writeln!(w, "  gpio{} mode={}", pin, mode_s);
@@ -1725,17 +2033,26 @@ fn gpio_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
         "pull" => {
             let (pin_s, pull_s) = match args.find(' ') {
                 Some(i) => (&args[..i], args[i + 1..].trim()),
-                None => { let _ = writeln!(w, "  usage: gpio pull <pin> <none|up|down>"); return; }
+                None => {
+                    let _ = writeln!(w, "  usage: gpio pull <pin> <none|up|down>");
+                    return;
+                }
             };
             let pin = match GpioArray::parse_pin(pin_s) {
                 Some(p) => p,
-                None => { let _ = writeln!(w, "  invalid pin '{}'", pin_s); return; }
+                None => {
+                    let _ = writeln!(w, "  invalid pin '{}'", pin_s);
+                    return;
+                }
             };
             let pull = match pull_s {
                 "none" => GpioPull::None,
-                "up"   => GpioPull::Up,
+                "up" => GpioPull::Up,
                 "down" => GpioPull::Down,
-                _ => { let _ = writeln!(w, "  invalid pull '{}' (expected none|up|down)", pull_s); return; }
+                _ => {
+                    let _ = writeln!(w, "  invalid pull '{}' (expected none|up|down)", pull_s);
+                    return;
+                }
             };
             gpios.pins[pin].pull = pull;
             let _ = writeln!(w, "  gpio{} pull={}", pin, pull_s);
@@ -1744,7 +2061,10 @@ fn gpio_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
         "toggle" => {
             let pin = match GpioArray::parse_pin(args) {
                 Some(p) => p,
-                None => { let _ = writeln!(w, "  usage: gpio toggle <pin>"); return; }
+                None => {
+                    let _ = writeln!(w, "  usage: gpio toggle <pin>");
+                    return;
+                }
             };
             if gpios.pins[pin].mode != GpioMode::Output {
                 gpios.pins[pin].mode = GpioMode::Output;
@@ -1777,7 +2097,9 @@ const SLEEP_CLINT_FREQ_HZ: u64 = 10_000_000;
 /// Blocking sleep by spinning on mtime. Caps at 60 s to avoid kernel hang.
 fn sleep_ms_impl(ms: u64) {
     let ms = ms.min(60_000);
-    if ms == 0 { return; }
+    if ms == 0 {
+        return;
+    }
     let timer = unsafe { &*TIMER.0.get() };
     let ticks_per_ms = SLEEP_CLINT_FREQ_HZ / 1000;
     let target = timer.mtime().wrapping_add(ms.saturating_mul(ticks_per_ms));
@@ -1809,7 +2131,12 @@ struct I2cDev {
 
 impl I2cDev {
     const fn empty() -> Self {
-        Self { addr: 0, present: false, regs: [0u8; I2C_N_REGS], name: "" }
+        Self {
+            addr: 0,
+            present: false,
+            regs: [0u8; I2C_N_REGS],
+            name: "",
+        }
     }
 }
 
@@ -1821,7 +2148,10 @@ struct I2cBus {
 impl I2cBus {
     const fn empty() -> Self {
         const E: I2cDev = I2cDev::empty();
-        Self { freq_hz: 100_000, devs: [E; I2C_N_DEVS] }
+        Self {
+            freq_hz: 100_000,
+            devs: [E; I2C_N_DEVS],
+        }
     }
 }
 
@@ -1833,20 +2163,27 @@ struct I2cSim {
 impl I2cSim {
     const fn new() -> Self {
         const B: I2cBus = I2cBus::empty();
-        Self { buses: [B; I2C_N_BUSES], initialised: false }
+        Self {
+            buses: [B; I2C_N_BUSES],
+            initialised: false,
+        }
     }
 
     fn init_defaults(&mut self) {
-        if self.initialised { return; }
+        if self.initialised {
+            return;
+        }
         // Bus 0: populate typical sensor suite.
         let defaults: &[(u8, &str)] = &[
-            (0x48, "tmp102"),   // temperature
-            (0x68, "mpu6050"),  // IMU
-            (0x76, "bme280"),   // env sensor
-            (0x3c, "ssd1306"),  // OLED
+            (0x48, "tmp102"),  // temperature
+            (0x68, "mpu6050"), // IMU
+            (0x76, "bme280"),  // env sensor
+            (0x3c, "ssd1306"), // OLED
         ];
         for (i, (addr, name)) in defaults.iter().enumerate() {
-            if i >= I2C_N_DEVS { break; }
+            if i >= I2C_N_DEVS {
+                break;
+            }
             let d = &mut self.buses[0].devs[i];
             d.addr = *addr;
             d.present = true;
@@ -1860,13 +2197,23 @@ impl I2cSim {
     }
 
     fn find<'a>(&'a self, bus: usize, addr: u8) -> Option<&'a I2cDev> {
-        if bus >= I2C_N_BUSES { return None; }
-        self.buses[bus].devs.iter().find(|d| d.present && d.addr == addr)
+        if bus >= I2C_N_BUSES {
+            return None;
+        }
+        self.buses[bus]
+            .devs
+            .iter()
+            .find(|d| d.present && d.addr == addr)
     }
 
     fn find_mut<'a>(&'a mut self, bus: usize, addr: u8) -> Option<&'a mut I2cDev> {
-        if bus >= I2C_N_BUSES { return None; }
-        self.buses[bus].devs.iter_mut().find(|d| d.present && d.addr == addr)
+        if bus >= I2C_N_BUSES {
+            return None;
+        }
+        self.buses[bus]
+            .devs
+            .iter_mut()
+            .find(|d| d.present && d.addr == addr)
     }
 }
 
@@ -1899,11 +2246,20 @@ fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
     match sub {
         "" | "help" => {
             let _ = writeln!(w, "i2c commands:");
-            let _ = writeln!(w, "  i2c scan [bus]                 List devices on bus (default 0)");
+            let _ = writeln!(
+                w,
+                "  i2c scan [bus]                 List devices on bus (default 0)"
+            );
             let _ = writeln!(w, "  i2c list                       Same as scan (bus 0)");
-            let _ = writeln!(w, "  i2c read <bus> <addr> <reg>    Read one register (addr/reg hex OK)");
+            let _ = writeln!(
+                w,
+                "  i2c read <bus> <addr> <reg>    Read one register (addr/reg hex OK)"
+            );
             let _ = writeln!(w, "  i2c write <bus> <addr> <reg> <val>   Write register");
-            let _ = writeln!(w, "  i2c probe <bus> <addr>         Check if a device answers");
+            let _ = writeln!(
+                w,
+                "  i2c probe <bus> <addr>         Check if a device answers"
+            );
             let _ = writeln!(w, "  i2c freq <bus> <hz>            Set bus clock");
             let _ = writeln!(w, "  i2c status                     Show bus summary");
         }
@@ -1936,7 +2292,9 @@ fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                 Some(a) => {
                     let _ = writeln!(w, "i2c bus {}: 0x{:02x} NAK", bus, a);
                 }
-                None => { let _ = writeln!(w, "i2c probe: need <bus> <addr>"); }
+                None => {
+                    let _ = writeln!(w, "i2c probe: need <bus> <addr>");
+                }
             }
         }
         "read" => {
@@ -1954,10 +2312,15 @@ fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                         Some(d) => {
                             let _ = writeln!(w, "0x{:02x}", d.regs[r]);
                         }
-                        None => { let _ = writeln!(w, "i2c read: no device at bus {} addr 0x{:02x}", b, a); }
+                        None => {
+                            let _ =
+                                writeln!(w, "i2c read: no device at bus {} addr 0x{:02x}", b, a);
+                        }
                     }
                 }
-                _ => { let _ = writeln!(w, "i2c read: usage: i2c read <bus> <addr> <reg>"); }
+                _ => {
+                    let _ = writeln!(w, "i2c read: usage: i2c read <bus> <addr> <reg>");
+                }
             }
         }
         "write" => {
@@ -1975,12 +2338,21 @@ fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     match sim.find_mut(b, a) {
                         Some(d) => {
                             d.regs[r] = v;
-                            let _ = writeln!(w, "[actuator] i2c.{}.0x{:02x}.0x{:02x}=0x{:02x}", b, a, r, v);
+                            let _ = writeln!(
+                                w,
+                                "[actuator] i2c.{}.0x{:02x}.0x{:02x}=0x{:02x}",
+                                b, a, r, v
+                            );
                         }
-                        None => { let _ = writeln!(w, "i2c write: no device at bus {} addr 0x{:02x}", b, a); }
+                        None => {
+                            let _ =
+                                writeln!(w, "i2c write: no device at bus {} addr 0x{:02x}", b, a);
+                        }
                     }
                 }
-                _ => { let _ = writeln!(w, "i2c write: usage: i2c write <bus> <addr> <reg> <val>"); }
+                _ => {
+                    let _ = writeln!(w, "i2c write: usage: i2c write <bus> <addr> <reg> <val>");
+                }
             }
         }
         "freq" => {
@@ -1992,7 +2364,9 @@ fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     sim.buses[bus].freq_hz = h;
                     let _ = writeln!(w, "i2c bus {} freq = {} Hz", bus, h);
                 }
-                _ => { let _ = writeln!(w, "i2c freq: usage: i2c freq <bus> <hz>"); }
+                _ => {
+                    let _ = writeln!(w, "i2c freq: usage: i2c freq <bus> <hz>");
+                }
             }
         }
         "status" => {
@@ -2001,7 +2375,9 @@ fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                 let _ = writeln!(w, "  bus {}: {} Hz, {} device(s)", i, b.freq_hz, present);
             }
         }
-        _ => { let _ = writeln!(w, "i2c: unknown subcommand '{}'", sub); }
+        _ => {
+            let _ = writeln!(w, "i2c: unknown subcommand '{}'", sub);
+        }
     }
 }
 
@@ -2012,9 +2388,9 @@ fn i2c_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
 const SPI_N_BUSES: usize = 2;
 
 struct SpiBus {
-    mode: u8,      // 0..=3
+    mode: u8, // 0..=3
     freq_hz: u32,
-    bits: u8,      // 8 or 16
+    bits: u8, // 8 or 16
     /// Loopback MISO pattern: what the "slave" returns on xfer.
     /// Default: echo the outgoing byte XOR 0xAA.
     echo_xor: u8,
@@ -2022,7 +2398,12 @@ struct SpiBus {
 
 impl SpiBus {
     const fn empty() -> Self {
-        Self { mode: 0, freq_hz: 1_000_000, bits: 8, echo_xor: 0xAA }
+        Self {
+            mode: 0,
+            freq_hz: 1_000_000,
+            bits: 8,
+            echo_xor: 0xAA,
+        }
     }
 }
 
@@ -2033,7 +2414,9 @@ struct SpiSim {
 impl SpiSim {
     const fn new() -> Self {
         const B: SpiBus = SpiBus::empty();
-        Self { buses: [B; SPI_N_BUSES] }
+        Self {
+            buses: [B; SPI_N_BUSES],
+        }
     }
 }
 
@@ -2048,13 +2431,22 @@ fn spi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "spi commands:");
             let _ = writeln!(w, "  spi status                            Show buses");
             let _ = writeln!(w, "  spi cfg <bus> <mode> <freq> [bits]    Configure bus");
-            let _ = writeln!(w, "  spi xfer <bus> <hex-bytes>            Full-duplex transfer");
-            let _ = writeln!(w, "  spi echo <bus> <xor>                  Loopback XOR mask (hex)");
+            let _ = writeln!(
+                w,
+                "  spi xfer <bus> <hex-bytes>            Full-duplex transfer"
+            );
+            let _ = writeln!(
+                w,
+                "  spi echo <bus> <xor>                  Loopback XOR mask (hex)"
+            );
         }
         "status" => {
             for (i, b) in sim.buses.iter().enumerate() {
-                let _ = writeln!(w, "  bus {}: mode={} freq={} Hz bits={} echo_xor=0x{:02x}",
-                    i, b.mode, b.freq_hz, b.bits, b.echo_xor);
+                let _ = writeln!(
+                    w,
+                    "  bus {}: mode={} freq={} Hz bits={} echo_xor=0x{:02x}",
+                    i, b.mode, b.freq_hz, b.bits, b.echo_xor
+                );
             }
         }
         "cfg" => {
@@ -2064,13 +2456,20 @@ fn spi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             let freq = it.next().and_then(|s| s.parse::<u32>().ok());
             let bits = it.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(8);
             match (bus, mode, freq) {
-                (Some(b), Some(m), Some(f)) if b < SPI_N_BUSES && m <= 3 && (bits == 8 || bits == 16) => {
+                (Some(b), Some(m), Some(f))
+                    if b < SPI_N_BUSES && m <= 3 && (bits == 8 || bits == 16) =>
+                {
                     sim.buses[b].mode = m;
                     sim.buses[b].freq_hz = f;
                     sim.buses[b].bits = bits;
                     let _ = writeln!(w, "spi bus {}: mode {} freq {} bits {}", b, m, f, bits);
                 }
-                _ => { let _ = writeln!(w, "spi cfg: usage: spi cfg <bus> <mode 0..3> <freq> [bits 8|16]"); }
+                _ => {
+                    let _ = writeln!(
+                        w,
+                        "spi cfg: usage: spi cfg <bus> <mode 0..3> <freq> [bits 8|16]"
+                    );
+                }
             }
         }
         "echo" => {
@@ -2085,14 +2484,19 @@ fn spi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     sim.buses[b].echo_xor = x;
                     let _ = writeln!(w, "spi bus {} echo_xor = 0x{:02x}", b, x);
                 }
-                _ => { let _ = writeln!(w, "spi echo: usage: spi echo <bus> <hex-mask>"); }
+                _ => {
+                    let _ = writeln!(w, "spi echo: usage: spi echo <bus> <hex-mask>");
+                }
             }
         }
         "xfer" => {
             let mut it = args.split_whitespace();
             let bus = match it.next().and_then(|s| s.parse::<usize>().ok()) {
                 Some(b) if b < SPI_N_BUSES => b,
-                _ => { let _ = writeln!(w, "spi xfer: need valid bus"); return; }
+                _ => {
+                    let _ = writeln!(w, "spi xfer: need valid bus");
+                    return;
+                }
             };
             let hex = it.next().unwrap_or("");
             if hex.is_empty() || hex.len() % 2 != 0 {
@@ -2119,7 +2523,9 @@ fn spi_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "");
             let _ = writeln!(w, "[actuator] spi.{}.xfer={}B", bus, bytes);
         }
-        _ => { let _ = writeln!(w, "spi: unknown subcommand '{}'", sub); }
+        _ => {
+            let _ = writeln!(w, "spi: unknown subcommand '{}'", sub);
+        }
     }
 }
 
@@ -2134,7 +2540,11 @@ fn parse_i32(s: &str) -> i32 {
             break;
         }
     }
-    if neg { -n } else { n }
+    if neg {
+        -n
+    } else {
+        n
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2147,7 +2557,13 @@ fn hw_info(w: &mut dyn core::fmt::Write) {
     let _ = writeln!(w, "  SoC     : ESP32-C6 (emulated on RISC-V QEMU virt)");
     let _ = writeln!(w, "  CPU     : RV32IMC @ emulated");
     let _ = writeln!(w, "  SRAM    : 512 KiB (QEMU mapped)");
-    let _ = writeln!(w, "  Heap    : {} KiB (small {} KiB + large {} KiB)", HEAP_SIZE / 1024, HEAP_SMALL_BYTES / 1024, (HEAP_SIZE - HEAP_SMALL_BYTES) / 1024);
+    let _ = writeln!(
+        w,
+        "  Heap    : {} KiB (small {} KiB + large {} KiB)",
+        HEAP_SIZE / 1024,
+        HEAP_SMALL_BYTES / 1024,
+        (HEAP_SIZE - HEAP_SMALL_BYTES) / 1024
+    );
     let _ = writeln!(w, "  Radios  : WiFi (sim), BLE (sim), 802.15.4 (sim)");
     let _ = writeln!(w, "  Sensors : virtual (EdgeFabric injectable)");
 }
@@ -2163,11 +2579,24 @@ fn get_temp_millic() -> i32 {
 // ---------------------------------------------------------------------------
 
 const CAP_NAMES: &[(u32, &str)] = &[
-    (0, "task_basic"), (1, "mem"), (2, "time"), (3, "sync"),
-    (4, "ipc"), (5, "channel"), (6, "poll"), (7, "console_io"),
-    (8, "fs"), (9, "net"), (10, "spawn_thread"), (11, "spawn_process"),
-    (12, "user_admin"), (13, "driver"), (14, "mount"), (15, "hw"),
-    (16, "crypto"), (17, "cap_admin"),
+    (0, "task_basic"),
+    (1, "mem"),
+    (2, "time"),
+    (3, "sync"),
+    (4, "ipc"),
+    (5, "channel"),
+    (6, "poll"),
+    (7, "console_io"),
+    (8, "fs"),
+    (9, "net"),
+    (10, "spawn_thread"),
+    (11, "spawn_process"),
+    (12, "user_admin"),
+    (13, "driver"),
+    (14, "mount"),
+    (15, "hw"),
+    (16, "crypto"),
+    (17, "cap_admin"),
 ];
 
 #[cfg(feature = "shell")]
@@ -2181,13 +2610,18 @@ fn caps_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "  PID  NAME             CAPS");
             let _ = writeln!(w, "  \u{2500}\u{2500}\u{2500}  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
             for (pid, p) in pt.processes.iter().enumerate() {
-                if p.state == ProcessState::Free { continue; }
+                if p.state == ProcessState::Free {
+                    continue;
+                }
                 let bits = p.caps.bits();
                 let mut buf = [0u8; 128];
                 let mut pos = 0;
                 for &(bit, name) in CAP_NAMES {
                     if bits & (1 << bit) != 0 {
-                        if pos > 0 && pos + 1 < buf.len() { buf[pos] = b','; pos += 1; }
+                        if pos > 0 && pos + 1 < buf.len() {
+                            buf[pos] = b',';
+                            pos += 1;
+                        }
                         let nb = name.as_bytes();
                         let end = (pos + nb.len()).min(buf.len());
                         buf[pos..end].copy_from_slice(&nb[..end - pos]);
@@ -2242,9 +2676,19 @@ fn caps_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     let remaining = pt.processes[pid].caps.bits();
                     let tick = unsafe { (*SCHEDULER.0.get()).ticks } as u32;
                     let audit = unsafe { &mut *AUDIT.0.get() };
-                    audit.log(tick, pid as u8, 0, AuditEvent::CapDropped, 1 << b, remaining);
-                    let _ = writeln!(w, "  dropped '{}' from pid {} \u{2014} caps now 0x{:05X}",
-                        name, pid, remaining);
+                    audit.log(
+                        tick,
+                        pid as u8,
+                        0,
+                        AuditEvent::CapDropped,
+                        1 << b,
+                        remaining,
+                    );
+                    let _ = writeln!(
+                        w,
+                        "  dropped '{}' from pid {} \u{2014} caps now 0x{:05X}",
+                        name, pid, remaining
+                    );
                 }
                 None => {
                     let _ = writeln!(w, "  unknown capability: '{}'", cap_name);
@@ -2253,8 +2697,14 @@ fn caps_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
         }
         _ => {
             let _ = writeln!(w, "  usage: caps              \u{2014} list all processes");
-            let _ = writeln!(w, "         caps <pid>        \u{2014} show process capabilities");
-            let _ = writeln!(w, "         caps drop <pid> <cap>  \u{2014} drop a capability");
+            let _ = writeln!(
+                w,
+                "         caps <pid>        \u{2014} show process capabilities"
+            );
+            let _ = writeln!(
+                w,
+                "         caps drop <pid> <cap>  \u{2014} drop a capability"
+            );
         }
     }
 }
@@ -2274,9 +2724,15 @@ fn parse_usize(s: &str) -> usize {
 #[cfg(feature = "shell")]
 fn auditlog_command(args: &str, w: &mut dyn core::fmt::Write) {
     let audit = unsafe { &*AUDIT.0.get() };
-    let max = if args.is_empty() { 32 } else {
+    let max = if args.is_empty() {
+        32
+    } else {
         let n = parse_usize(args);
-        if n == usize::MAX { 32 } else { n }
+        if n == usize::MAX {
+            32
+        } else {
+            n
+        }
     };
     if audit.total() == 0 {
         let _ = writeln!(w, "  (no audit events recorded)");
@@ -2295,7 +2751,11 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
     unsafe {
         let inodes = &*INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        let dir_id = if path == "." { Some(cwd) } else { inodes.resolve(cwd, path) };
+        let dir_id = if path == "." {
+            Some(cwd)
+        } else {
+            inodes.resolve(cwd, path)
+        };
         match dir_id {
             Some(id) if id != NO_INODE => {
                 let inode = &inodes.inodes[id as usize];
@@ -2316,7 +2776,9 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
                     child = c.next_sibling;
                 }
             }
-            _ => { let _ = writeln!(w, "ls: '{}': no such directory", path); }
+            _ => {
+                let _ = writeln!(w, "ls: '{}': no such directory", path);
+            }
         }
     }
 }
@@ -2329,9 +2791,13 @@ fn vfs_read_file(path: &str, buf: &mut [u8]) -> usize {
         let ramfs = &*RAMFS.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return 0; }
+        if id == NO_INODE {
+            return 0;
+        }
         let inode = &inodes.inodes[id as usize];
-        if inode.kind != InodeKind::File { return 0; }
+        if inode.kind != InodeKind::File {
+            return 0;
+        }
         ramfs.read(inodes, id, 0, buf)
     }
 }
@@ -2349,7 +2815,9 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
                 let parent_path = if slash == 0 { "/" } else { &path[..slash] };
                 let name = &path[slash + 1..];
                 let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-                if parent == NO_INODE || name.is_empty() { return false; }
+                if parent == NO_INODE || name.is_empty() {
+                    return false;
+                }
                 id = match inodes.create_file_in(parent, name) {
                     Some(i) => i,
                     None => return false,
@@ -2362,9 +2830,13 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
             }
         }
         let inode = &inodes.inodes[id as usize];
-        if inode.kind != InodeKind::File { return false; }
+        if inode.kind != InodeKind::File {
+            return false;
+        }
         let offset = if append { inode.size } else { 0 };
-        if !append { ramfs.truncate(inodes, id, 0); }
+        if !append {
+            ramfs.truncate(inodes, id, 0);
+        }
         ramfs.write(inodes, id, offset, data) > 0
     }
 }
@@ -2379,7 +2851,9 @@ fn vfs_mkdir(path: &str) -> bool {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.mkdir_in(parent, name).is_some()
         } else {
             inodes.mkdir_in(cwd, path).is_some()
@@ -2423,7 +2897,9 @@ fn vfs_unlink(path: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         inodes.unlink(id)
     }
 }
@@ -2435,12 +2911,16 @@ fn vfs_rename(old: &str, new: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, old).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         if let Some(slash) = new.rfind('/') {
             let parent_path = if slash == 0 { "/" } else { &new[..slash] };
             let name = &new[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.rename(id, parent, name)
         } else {
             inodes.rename(id, cwd, new)
@@ -2465,8 +2945,12 @@ fn vfs_chdir(path: &str) -> bool {
         let procs = &mut *PROCESSES.0.get();
         let cwd = procs.processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
-        if inodes.inodes[id as usize].kind != InodeKind::Directory { return false; }
+        if id == NO_INODE {
+            return false;
+        }
+        if inodes.inodes[id as usize].kind != InodeKind::Directory {
+            return false;
+        }
         procs.processes[0].cwd = id;
         true
     }
@@ -2474,11 +2958,13 @@ fn vfs_chdir(path: &str) -> bool {
 
 #[cfg(feature = "shell")]
 fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
-    use microkernel::vfs::{InodeKind, ROOT_INODE, NO_INODE};
+    use microkernel::vfs::{InodeKind, NO_INODE, ROOT_INODE};
     unsafe {
         let inodes = &*INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        let start = if path == "/" { ROOT_INODE } else {
+        let start = if path == "/" {
+            ROOT_INODE
+        } else {
             inodes.resolve(cwd, path).unwrap_or(NO_INODE)
         };
         if start == NO_INODE {
@@ -2490,7 +2976,15 @@ fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "tree: '{}': not a directory", path);
             return;
         }
-        let _ = writeln!(w, "{}", if path == "/" || path == "." { "/" } else { path });
+        let _ = writeln!(
+            w,
+            "{}",
+            if path == "/" || path == "." {
+                "/"
+            } else {
+                path
+            }
+        );
         let mut stack: [(u16, u8); 64] = [(NO_INODE, 0); 64];
         let mut sp = 0usize;
         let mut kids: [u16; 64] = [NO_INODE; 64];
@@ -2502,12 +2996,20 @@ fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
             ch = inodes.inodes[ch as usize].next_sibling;
         }
         let mut i = nk;
-        while i > 0 { i -= 1; if sp < 64 { stack[sp] = (kids[i], 1); sp += 1; } }
+        while i > 0 {
+            i -= 1;
+            if sp < 64 {
+                stack[sp] = (kids[i], 1);
+                sp += 1;
+            }
+        }
         while sp > 0 {
             sp -= 1;
             let (id, depth) = stack[sp];
             let node = &inodes.inodes[id as usize];
-            for _ in 0..depth { w.write_str("  ").ok(); }
+            for _ in 0..depth {
+                w.write_str("  ").ok();
+            }
             let kind_ch = match node.kind {
                 InodeKind::Directory => '/',
                 InodeKind::Device => '*',
@@ -2524,7 +3026,13 @@ fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
                     c = inodes.inodes[c as usize].next_sibling;
                 }
                 let mut j = cn;
-                while j > 0 { j -= 1; if sp < 64 { stack[sp] = (ck[j], depth + 1); sp += 1; } }
+                while j > 0 {
+                    j -= 1;
+                    if sp < 64 {
+                        stack[sp] = (ck[j], depth + 1);
+                        sp += 1;
+                    }
+                }
             }
         }
     }
@@ -2536,12 +3044,16 @@ fn vfs_touch(path: &str) -> bool {
     unsafe {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        if inodes.resolve(cwd, path).unwrap_or(NO_INODE) != NO_INODE { return true; }
+        if inodes.resolve(cwd, path).unwrap_or(NO_INODE) != NO_INODE {
+            return true;
+        }
         if let Some(slash) = path.rfind('/') {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.create_file_in(parent, name).is_some()
         } else {
             inodes.create_file_in(cwd, path).is_some()
@@ -2565,7 +3077,14 @@ fn mount_list(w: &mut dyn core::fmt::Write) {
                     microkernel::vfs::FsType::RamFs => "ramfs",
                     _ => "none",
                 };
-                let _ = writeln!(w, "  {} on {} type {} (slot {})", m.label_str(), path, fstype, i + 1);
+                let _ = writeln!(
+                    w,
+                    "  {} on {} type {} (slot {})",
+                    m.label_str(),
+                    path,
+                    fstype,
+                    i + 1
+                );
                 found = true;
             }
         }
@@ -2605,7 +3124,9 @@ fn qemu_poweroff() -> ! {
     }
     loop {
         #[cfg(target_arch = "riscv32")]
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
         #[cfg(not(target_arch = "riscv32"))]
         core::hint::spin_loop();
     }
@@ -2690,56 +3211,92 @@ pub extern "C" fn _rust_start() -> ! {
         let reg = &mut *DRIVERS.0.get();
 
         // NS16550a UART (QEMU virt)
-        let uart = reg.register("uart0", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
-        reg.grant_mmio(uart, MemRegion::new(0x1000_0000, 0x100)).ok();
+        let uart = reg
+            .register(
+                "uart0",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
+        reg.grant_mmio(uart, MemRegion::new(0x1000_0000, 0x100))
+            .ok();
         reg.grant_irq(uart, 10);
 
         // CLINT timer (QEMU virt)
-        let clint = reg.register("clint", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
-        reg.grant_mmio(clint, MemRegion::new(0x0200_0000, 0x10000)).ok();
+        let clint = reg
+            .register(
+                "clint",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
+        reg.grant_mmio(clint, MemRegion::new(0x0200_0000, 0x10000))
+            .ok();
         reg.grant_irq(clint, 7);
 
         // VIRTIO-NET (for simulated WiFi uplink)
         #[cfg(feature = "net")]
         {
-            let vnet = reg.register("virtio-net", DriverCaps {
-                mmio_regions: 1,
-                uses_interrupts: true,
-                uses_dma: true,
-                uses_network: true,
-            }).unwrap();
-            reg.grant_mmio(vnet, MemRegion::new(0x1000_1000, 0x1000)).ok();
+            let vnet = reg
+                .register(
+                    "virtio-net",
+                    DriverCaps {
+                        mmio_regions: 1,
+                        uses_interrupts: true,
+                        uses_dma: true,
+                        uses_network: true,
+                    },
+                )
+                .unwrap();
+            reg.grant_mmio(vnet, MemRegion::new(0x1000_1000, 0x1000))
+                .ok();
             reg.grant_irq(vnet, 1);
         }
 
         // Simulated radio peripherals (no real MMIO)
         #[cfg(feature = "wifi")]
         {
-            let _ = reg.register("wifi-sim", DriverCaps {
-                mmio_regions: 0, uses_interrupts: false, uses_dma: false, uses_network: true,
-            });
+            let _ = reg.register(
+                "wifi-sim",
+                DriverCaps {
+                    mmio_regions: 0,
+                    uses_interrupts: false,
+                    uses_dma: false,
+                    uses_network: true,
+                },
+            );
         }
         #[cfg(feature = "ble")]
         {
-            let _ = reg.register("ble-sim", DriverCaps {
-                mmio_regions: 0, uses_interrupts: false, uses_dma: false, uses_network: false,
-            });
+            let _ = reg.register(
+                "ble-sim",
+                DriverCaps {
+                    mmio_regions: 0,
+                    uses_interrupts: false,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            );
         }
         #[cfg(feature = "ieee802154")]
         {
-            let _ = reg.register("802154-sim", DriverCaps {
-                mmio_regions: 0, uses_interrupts: false, uses_dma: false, uses_network: true,
-            });
+            let _ = reg.register(
+                "802154-sim",
+                DriverCaps {
+                    mmio_regions: 0,
+                    uses_interrupts: false,
+                    uses_dma: false,
+                    uses_network: true,
+                },
+            );
         }
     }
     let _ = writeln!(con, "[boot] driver registry initialised");
@@ -2747,7 +3304,9 @@ pub extern "C" fn _rust_start() -> ! {
     // ── install trap vector ──────────────────────────────────
     #[cfg(target_arch = "riscv32")]
     {
-        extern "C" { fn _veer_trap_entry(); }
+        extern "C" {
+            fn _veer_trap_entry();
+        }
         unsafe {
             let addr = _veer_trap_entry as *const () as usize;
             core::arch::asm!("csrw mtvec, {0}", in(reg) addr, options(nomem, nostack));
@@ -2762,7 +3321,9 @@ pub extern "C" fn _rust_start() -> ! {
     // ── CLINT timer ──────────────────────────────────────────
     let timer = system_timer();
     timer.configure_tick(TICK_PERIOD_US);
-    unsafe { *TIMER.0.get() = timer; }
+    unsafe {
+        *TIMER.0.get() = timer;
+    }
     let _ = writeln!(con, "[boot] CLINT timer tick @ {} us", TICK_PERIOD_US);
 
     // ── enable machine timer interrupt ───────────────────────
@@ -2779,7 +3340,9 @@ pub extern "C" fn _rust_start() -> ! {
         inodes.init_root();
 
         // Standard device nodes
-        let dev_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/dev").unwrap_or(microkernel::vfs::NO_INODE);
+        let dev_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/dev")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if dev_id != microkernel::vfs::NO_INODE {
             inodes.create_device_in(dev_id, "null", 0, 0);
             inodes.create_device_in(dev_id, "zero", 0, 1);
@@ -2790,10 +3353,10 @@ pub extern "C" fn _rust_start() -> ! {
             if let Some(sensor_dir) = inodes.mkdir_in(dev_id, "sensor") {
                 // Pre-create default IoT sensors
                 let sensors = &mut *SENSORS.0.get();
-                sensors.add("temperature", "C", 2250);     // 22.50 C
-                sensors.add("humidity", "%RH", 5500);       // 55.00 %RH
-                sensors.add("pressure", "hPa", 101325);     // 1013.25 hPa
-                sensors.add("light", "lux", 45000);          // 450.00 lux
+                sensors.add("temperature", "C", 2250); // 22.50 C
+                sensors.add("humidity", "%RH", 5500); // 55.00 %RH
+                sensors.add("pressure", "hPa", 101325); // 1013.25 hPa
+                sensors.add("light", "lux", 45000); // 450.00 lux
 
                 // Create device files for each sensor
                 for s in sensors.sensors.iter() {
@@ -2815,20 +3378,34 @@ pub extern "C" fn _rust_start() -> ! {
         }
 
         // /etc contents
-        let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc").unwrap_or(microkernel::vfs::NO_INODE);
+        let etc_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/etc")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if etc_id != microkernel::vfs::NO_INODE {
-            ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS ESP32-C6 Virtual IoT Node!\n");
+            ramfs.create_with_content(
+                inodes,
+                etc_id,
+                "motd",
+                b"Welcome to VeerOS ESP32-C6 Virtual IoT Node!\n",
+            );
             ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-esp32c6-vm\n");
 
             // /etc/net/wifi — default WiFi config
             if let Some(net_id) = inodes.mkdir_in(etc_id, "net") {
-                ramfs.create_with_content(inodes, net_id, "wifi",
-                    b"# VeerOS WiFi configuration (simulated)\nssid=veeros-sim-ap\npassword=\n");
+                ramfs.create_with_content(
+                    inodes,
+                    net_id,
+                    "wifi",
+                    b"# VeerOS WiFi configuration (simulated)\nssid=veeros-sim-ap\npassword=\n",
+                );
             }
         }
     }
     let _ = writeln!(con, "[boot] VFS initialised (ESP32-C6 layout)");
-    let _ = writeln!(con, "[boot] virtual sensors: temperature, humidity, pressure, light");
+    let _ = writeln!(
+        con,
+        "[boot] virtual sensors: temperature, humidity, pressure, light"
+    );
 
     // ── scheduler + tasks ────────────────────────────────────
     unsafe {
@@ -2843,7 +3420,8 @@ pub extern "C" fn _rust_start() -> ! {
         // Idle task (priority 0)
         let sb = IDLE_STACK.0.as_ptr() as usize;
         let st = sb + IDLE_STACK.0.len();
-        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
+        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0)
+        {
             sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
         }
 
@@ -2852,7 +3430,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = SHELL_STACK.0.as_ptr() as usize;
             let st = sb + SHELL_STACK.0.len();
-            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -2862,7 +3442,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = NET_TASK_STACK.0.as_ptr() as usize;
             let st = sb + NET_TASK_STACK.0.len();
-            if let Some(idx) = sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -2871,7 +3453,11 @@ pub extern "C" fn _rust_start() -> ! {
     unsafe {
         let sched = &*SCHEDULER.0.get();
         let procs = &mut *PROCESSES.0.get();
-        let count = sched.tasks.iter().filter(|t| t.state != TaskState::Free).count();
+        let count = sched
+            .tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Free)
+            .count();
         procs.processes[0].thread_count = count;
     }
 
@@ -2879,10 +3465,17 @@ pub extern "C" fn _rust_start() -> ! {
     #[cfg(feature = "shell")]
     let _ = writeln!(con, "[boot] shell task registered");
     #[cfg(feature = "net")]
-    let _ = writeln!(con, "[boot] net listener task registered (port {})", REMOTE_SHELL_PORT);
+    let _ = writeln!(
+        con,
+        "[boot] net listener task registered (port {})",
+        REMOTE_SHELL_PORT
+    );
 
     // ── start the first task (never returns) ─────────────────
-    let _ = writeln!(con, "[boot] starting scheduler \u{2014} virtual IoT node ready");
+    let _ = writeln!(
+        con,
+        "[boot] starting scheduler \u{2014} virtual IoT node ready"
+    );
     let _ = writeln!(con, "");
 
     unsafe {
@@ -2917,9 +3510,7 @@ pub extern "C" fn _rust_start() -> ! {
 pub(crate) fn console_write_byte(b: u8) {
     let serial = default_serial();
     let mut con = Console::new(serial);
-    let _ = con.write_str(unsafe {
-        core::str::from_utf8_unchecked(core::slice::from_ref(&b))
-    });
+    let _ = con.write_str(unsafe { core::str::from_utf8_unchecked(core::slice::from_ref(&b)) });
 }
 
 #[allow(dead_code)]

@@ -12,7 +12,7 @@ const IOAPIC_BASE: usize = 0xFEC0_0000;
 
 // I/O APIC registers (accessed indirectly via IOREGSEL + IOWIN).
 const IOREGSEL: usize = 0x00; // register select (write index here)
-const IOWIN: usize = 0x10;    // data window (read/write register value)
+const IOWIN: usize = 0x10; // data window (read/write register value)
 
 // Register indices.
 const REG_ID: u8 = 0x00;
@@ -97,11 +97,7 @@ pub fn mask_all() {
 /// `vector` — interrupt vector to deliver (32–255).
 /// `dest_apic_id` — target Local APIC ID (usually 0 for BSP).
 pub fn route_irq(irq: u8, vector: u8, dest_apic_id: u8) {
-    let lo = (vector as u32)
-        | DELIV_FIXED
-        | DEST_PHYSICAL
-        | POLARITY_HIGH
-        | TRIGGER_EDGE;
+    let lo = (vector as u32) | DELIV_FIXED | DEST_PHYSICAL | POLARITY_HIGH | TRIGGER_EDGE;
     let hi = (dest_apic_id as u32) << 24;
     let entry = (lo as u64) | ((hi as u64) << 32);
     write_redir(irq, entry);
@@ -130,8 +126,8 @@ pub fn init(bsp_apic_id: u8) {
     // Route standard ISA IRQs to the BSP.
     // NOTE: ACPI MADT on QEMU q35 remaps ISA IRQ 0 (PIT) → GSI 2.
     // So the PIT signal arrives on I/O APIC pin 2, not pin 0.
-    route_irq(2, 32, bsp_apic_id);  // PIT timer (GSI 2) → vector 32
-    // IRQ 1  → keyboard   → vector 33
+    route_irq(2, 32, bsp_apic_id); // PIT timer (GSI 2) → vector 32
+                                   // IRQ 1  → keyboard   → vector 33
     route_irq(1, 33, bsp_apic_id);
     // IRQ 4  → COM1       → vector 36
     route_irq(4, 36, bsp_apic_id);

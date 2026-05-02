@@ -45,9 +45,16 @@ fn cmd_list() -> Result<()> {
         println!("no folds");
         return Ok(());
     }
-    println!("{:<20} {:>8} {:<10} {:<25} CMD", "NAME", "PID", "STATUS", "STARTED");
+    println!(
+        "{:<20} {:>8} {:<10} {:<25} CMD",
+        "NAME", "PID", "STATUS", "STARTED"
+    );
     for rec in recs {
-        let status = if engine.is_alive(&rec) { "running" } else { "stopped" };
+        let status = if engine.is_alive(&rec) {
+            "running"
+        } else {
+            "stopped"
+        };
         let argv = std::iter::once(rec.manifest.cmd.as_str())
             .chain(rec.manifest.args.iter().map(|s| s.as_str()))
             .collect::<Vec<_>>()
@@ -66,7 +73,9 @@ fn cmd_list() -> Result<()> {
 
 fn cmd_logs(name: &str, follow: bool) -> Result<()> {
     let state = StateDir::open()?;
-    let rec = state.load(name).with_context(|| format!("no such fold: {name}"))?;
+    let rec = state
+        .load(name)
+        .with_context(|| format!("no such fold: {name}"))?;
     let mut file = std::fs::File::open(&rec.log_path)
         .with_context(|| format!("opening {}", rec.log_path.display()))?;
     use std::io::{copy, stdout, Read, Seek, SeekFrom, Write};
@@ -92,7 +101,9 @@ fn cmd_logs(name: &str, follow: bool) -> Result<()> {
 
 fn cmd_stop(name: &str) -> Result<()> {
     let state = StateDir::open()?;
-    let rec = state.load(name).with_context(|| format!("no such fold: {name}"))?;
+    let rec = state
+        .load(name)
+        .with_context(|| format!("no such fold: {name}"))?;
     let engine = PlatformEngine::new();
     engine.stop(&rec)?;
     println!("sent SIGTERM to fold {} (pid {})", rec.name, rec.pid);
@@ -101,11 +112,16 @@ fn cmd_stop(name: &str) -> Result<()> {
 
 fn cmd_rm(name: &str, force: bool) -> Result<()> {
     let state = StateDir::open()?;
-    let rec = state.load(name).with_context(|| format!("no such fold: {name}"))?;
+    let rec = state
+        .load(name)
+        .with_context(|| format!("no such fold: {name}"))?;
     let engine = PlatformEngine::new();
     if engine.is_alive(&rec) {
         if !force {
-            anyhow::bail!("fold {} is still running — use `fold stop` first, or pass --force", name);
+            anyhow::bail!(
+                "fold {} is still running — use `fold stop` first, or pass --force",
+                name
+            );
         }
         // Best-effort SIGKILL.
         let _ = engine.stop(&rec);
@@ -118,9 +134,31 @@ fn cmd_rm(name: &str, force: bool) -> Result<()> {
 
 fn cmd_vm(cmd: VmCmd) -> Result<()> {
     match cmd {
-        VmCmd::Spawn { kernel, memory, arch, tap, name, vmm, user_ns, memory_cap, pids_max } => {
+        VmCmd::Spawn {
+            kernel,
+            memory,
+            disk,
+            arch,
+            tap,
+            vmnet,
+            name,
+            vmm,
+            user_ns,
+            memory_cap,
+            pids_max,
+        } => {
             let manifest = vm::build_manifest(vm::VmSpawnOpts {
-                kernel, memory, arch, tap, name, vmm, user_ns, memory_cap, pids_max,
+                kernel,
+                memory,
+                disk,
+                arch,
+                tap,
+                vmnet,
+                name,
+                vmm,
+                user_ns,
+                memory_cap,
+                pids_max,
             })?;
             let engine = PlatformEngine::new();
             let rec = engine.spawn(manifest)?;
@@ -130,6 +168,12 @@ fn cmd_vm(cmd: VmCmd) -> Result<()> {
             println!("  memory : {} MiB", memory_arg(&rec));
             if let Some(tap) = tap_arg(&rec) {
                 println!("  tap    : {}", tap);
+            }
+            if let Some(vmnet) = vmnet_arg(&rec) {
+                println!("  vmnet  : {}", vmnet);
+            }
+            if let Some(disk) = disk_arg(&rec) {
+                println!("  disk   : {}", disk);
             }
             println!("  log    : {}", rec.log_path.display());
             println!();
@@ -215,7 +259,9 @@ fn arch_arg(rec: &state::FoldRecord) -> String {
     let mut it = rec.manifest.args.iter();
     while let Some(a) = it.next() {
         if a == "--arch" {
-            if let Some(v) = it.next() { return v.clone(); }
+            if let Some(v) = it.next() {
+                return v.clone();
+            }
         }
     }
     "x86_64".into()
@@ -226,7 +272,9 @@ fn kernel_arg(rec: &state::FoldRecord) -> String {
     let mut it = rec.manifest.args.iter();
     while let Some(a) = it.next() {
         if a == "--kernel" {
-            if let Some(v) = it.next() { return v.clone(); }
+            if let Some(v) = it.next() {
+                return v.clone();
+            }
         }
     }
     "<unknown>".into()
@@ -236,16 +284,30 @@ fn memory_arg(rec: &state::FoldRecord) -> String {
     let mut it = rec.manifest.args.iter();
     while let Some(a) = it.next() {
         if a == "--memory" {
-            if let Some(v) = it.next() { return v.clone(); }
+            if let Some(v) = it.next() {
+                return v.clone();
+            }
         }
     }
     "<unknown>".into()
 }
 
 fn tap_arg(rec: &state::FoldRecord) -> Option<String> {
+    value_arg(rec, "--tap")
+}
+
+fn vmnet_arg(rec: &state::FoldRecord) -> Option<String> {
+    value_arg(rec, "--vmnet")
+}
+
+fn disk_arg(rec: &state::FoldRecord) -> Option<String> {
+    value_arg(rec, "--disk")
+}
+
+fn value_arg(rec: &state::FoldRecord, key: &str) -> Option<String> {
     let mut it = rec.manifest.args.iter();
     while let Some(a) = it.next() {
-        if a == "--tap" {
+        if a == key {
             return it.next().cloned();
         }
     }

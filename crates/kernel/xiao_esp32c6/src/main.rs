@@ -58,19 +58,14 @@ static ESP_APP_DESC: EspAppDesc = EspAppDesc {
     app_elf_sha256: [0; 32],
     min_efuse_blk_rev_full: 0,
     max_efuse_blk_rev_full: 0xFFFF,
-    mmu_page_size: 16,  // log2(64KB)
+    mmu_page_size: 16, // log2(64KB)
     reserv3: [0; 3],
     reserv2: [0; 18],
 };
 
-use arch::{Console, InterruptController, SavedContext, Serial, TickTimer};
 #[cfg(any(feature = "wifi", feature = "ieee802154"))]
 use arch::NetworkDevice;
-use soc_esp32::{
-    usb_serial, interrupt_controller, system_timer,
-    systimer::SysTimer, Esp32Riscv,
-};
-use microkernel::Kernel;
+use arch::{Console, InterruptController, SavedContext, Serial, TickTimer};
 use microkernel::alloc::Heap;
 use microkernel::channel::Channels;
 use microkernel::driver::{DriverCaps, DriverRegistry, MemRegion};
@@ -79,16 +74,17 @@ use microkernel::ipc::Ipc;
 use microkernel::task::Scheduler;
 #[cfg(feature = "shell")]
 use microkernel::task::TaskState;
+use microkernel::Kernel;
 #[cfg(feature = "shell")]
-
 // Net imports (WiFi TCP/IP stack).
 #[cfg(any(feature = "wifi", feature = "ieee802154"))]
 use net::{NetStack, NetStorage, TcpSerial};
+use shell::{Shell, ShellEnv};
 #[cfg(any(feature = "wifi", feature = "ieee802154"))]
 use smoltcp::iface::SocketSet;
 #[cfg(any(feature = "wifi", feature = "ieee802154"))]
 use smoltcp::wire::{IpCidr, Ipv4Address};
-use shell::{Shell, ShellEnv};
+use soc_esp32::{interrupt_controller, system_timer, systimer::SysTimer, usb_serial, Esp32Riscv};
 
 // Custom panic handler that prints the panic message via USB serial.
 #[panic_handler]
@@ -98,14 +94,18 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
     const EP1_CONF: usize = USB_BASE + 0x04;
 
     fn usb_putc(byte: u8) {
-        unsafe { core::ptr::write_volatile(EP1_REG as *mut u32, byte as u32); }
+        unsafe {
+            core::ptr::write_volatile(EP1_REG as *mut u32, byte as u32);
+        }
     }
     fn usb_flush() {
         unsafe {
             core::ptr::write_volatile(EP1_CONF as *mut u32, 1);
             for _ in 0..200_000u32 {
                 let conf = core::ptr::read_volatile(EP1_CONF as *const u32);
-                if conf & 2 != 0 { break; }
+                if conf & 2 != 0 {
+                    break;
+                }
                 core::hint::spin_loop();
             }
         }
@@ -113,7 +113,9 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
     fn usb_puts(s: &[u8]) {
         for (i, &b) in s.iter().enumerate() {
             usb_putc(b);
-            if (i + 1) % 60 == 0 { usb_flush(); }
+            if (i + 1) % 60 == 0 {
+                usb_flush();
+            }
         }
         usb_flush();
     }
@@ -146,7 +148,9 @@ fn panic_handler(info: &core::panic::PanicInfo) -> ! {
     }
     usb_puts(b"\r\n");
 
-    loop { core::hint::spin_loop(); }
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -224,8 +228,8 @@ pub(crate) static POLL: PollCell = PollCell(UnsafeCell::new(PollTable::new()));
 // Process table
 // ---------------------------------------------------------------------------
 
-use microkernel::process::ProcessTable;
 use microkernel::process::ProcessCaps;
+use microkernel::process::ProcessTable;
 
 pub(crate) struct ProcessCell(pub UnsafeCell<ProcessTable>);
 unsafe impl Sync for ProcessCell {}
@@ -235,7 +239,7 @@ pub(crate) static PROCESSES: ProcessCell = ProcessCell(UnsafeCell::new(ProcessTa
 // Audit log
 // ---------------------------------------------------------------------------
 
-use microkernel::audit::{AuditLog, AuditEvent};
+use microkernel::audit::{AuditEvent, AuditLog};
 
 pub(crate) struct AuditCell(pub UnsafeCell<AuditLog>);
 unsafe impl Sync for AuditCell {}
@@ -246,10 +250,10 @@ pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()))
 // ---------------------------------------------------------------------------
 
 use microkernel::agent::AgentTable;
-use microkernel::intent::IntentEngine;
-use microkernel::memory_engine::MemoryEngine;
 use microkernel::fabric::ExecutionFabric;
+use microkernel::intent::IntentEngine;
 use microkernel::intent_sched::IntentScheduler;
+use microkernel::memory_engine::MemoryEngine;
 
 pub(crate) struct AgentCell(pub UnsafeCell<AgentTable>);
 unsafe impl Sync for AgentCell {}
@@ -261,7 +265,8 @@ pub(crate) static INTENTS: IntentCell = IntentCell(UnsafeCell::new(IntentEngine:
 
 pub(crate) struct MemoryEngineCell(pub UnsafeCell<MemoryEngine>);
 unsafe impl Sync for MemoryEngineCell {}
-pub(crate) static MEMORY_ENGINE: MemoryEngineCell = MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
+pub(crate) static MEMORY_ENGINE: MemoryEngineCell =
+    MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
 
 pub(crate) struct FabricCell(pub UnsafeCell<ExecutionFabric>);
 unsafe impl Sync for FabricCell {}
@@ -269,7 +274,8 @@ pub(crate) static FABRIC: FabricCell = FabricCell(UnsafeCell::new(ExecutionFabri
 
 pub(crate) struct IntentSchedCell(pub UnsafeCell<IntentScheduler>);
 unsafe impl Sync for IntentSchedCell {}
-pub(crate) static INTENT_SCHED: IntentSchedCell = IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
+pub(crate) static INTENT_SCHED: IntentSchedCell =
+    IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
 
 // ---------------------------------------------------------------------------
 // Socket table
@@ -319,9 +325,12 @@ use microkernel::fat32::Fat32;
 
 pub(crate) struct Fat32Cell(pub UnsafeCell<[Fat32; microkernel::fat32::MAX_FAT32]>);
 unsafe impl Sync for Fat32Cell {}
-pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(
-    [Fat32::new(), Fat32::new(), Fat32::new(), Fat32::new()]
-));
+pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new([
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+]));
 
 // ---------------------------------------------------------------------------
 // Mount table
@@ -450,7 +459,9 @@ struct WifiNetProxy;
 
 #[cfg(feature = "wifi")]
 impl arch::NetworkDevice for WifiNetProxy {
-    fn mtu(&self) -> usize { 1514 }
+    fn mtu(&self) -> usize {
+        1514
+    }
     fn has_rx(&self) -> bool {
         unsafe { (*WIFI.0.get()).driver().has_rx() }
     }
@@ -491,8 +502,7 @@ const MESH_UDP_PORT: u16 = 5683; // CoAP default
 /// Static IPv6 link-local address for the 802.15.4 interface.
 /// Derived from the EUI-64 in practice; here a fixed default.
 const MESH_IPV6: [u8; 16] = [
-    0xfe, 0x80, 0, 0, 0, 0, 0, 0,
-    0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+    0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
 ];
 
 #[cfg(feature = "ieee802154")]
@@ -514,7 +524,9 @@ struct MeshNetProxy;
 
 #[cfg(feature = "ieee802154")]
 impl arch::NetworkDevice for MeshNetProxy {
-    fn mtu(&self) -> usize { 127 }
+    fn mtu(&self) -> usize {
+        127
+    }
     fn has_rx(&self) -> bool {
         unsafe { (*RADIO_802154.0.get()).driver().has_rx() }
     }
@@ -531,15 +543,13 @@ impl arch::NetworkDevice for MeshNetProxy {
         }
     }
     fn mac_address(&self) -> [u8; 6] {
-        unsafe {
-            (*RADIO_802154.0.get()).driver().mac_address()
-        }
+        unsafe { (*RADIO_802154.0.get()).driver().mac_address() }
     }
-    fn medium(&self) -> arch::NetMedium { arch::NetMedium::Ieee802154 }
+    fn medium(&self) -> arch::NetMedium {
+        arch::NetMedium::Ieee802154
+    }
     fn mac_address_ext(&self) -> [u8; 8] {
-        unsafe {
-            (*RADIO_802154.0.get()).driver().mac_address_ext()
-        }
+        unsafe { (*RADIO_802154.0.get()).driver().mac_address_ext() }
     }
 }
 
@@ -703,9 +713,7 @@ fn net_poll() -> bool {
         (*WIFI.0.get()).driver_mut().poll_rx();
     }
     unsafe {
-        if let (Some(stack), Some(sockets)) =
-            (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
-        {
+        if let (Some(stack), Some(sockets)) = (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get()) {
             let ticks = (*SCHEDULER.0.get()).ticks;
             stack.poll(sockets, ticks);
         }
@@ -728,7 +736,9 @@ fn net_poll_unlock() {
 #[cfg(feature = "wifi")]
 fn net_task() -> ! {
     // Let the shell task print its banner first.
-    for _ in 0..2_000_000u32 { core::hint::spin_loop(); }
+    for _ in 0..2_000_000u32 {
+        core::hint::spin_loop();
+    }
     let serial = usb_serial();
     let mut con = Console::new(serial);
 
@@ -741,7 +751,9 @@ fn net_task() -> ! {
         if connected {
             break;
         }
-        for _ in 0..10_000 { core::hint::spin_loop(); }
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
     }
 
     let mac = unsafe { (*WIFI.0.get()).driver().mac_address() };
@@ -757,7 +769,10 @@ fn net_task() -> ! {
         24,
     );
     let gw = Ipv4Address::new(
-        WIFI_GATEWAY[0], WIFI_GATEWAY[1], WIFI_GATEWAY[2], WIFI_GATEWAY[3],
+        WIFI_GATEWAY[0],
+        WIFI_GATEWAY[1],
+        WIFI_GATEWAY[2],
+        WIFI_GATEWAY[3],
     );
 
     unsafe {
@@ -782,9 +797,7 @@ fn net_task() -> ! {
     loop {
         // Start listening.
         unsafe {
-            if let (Some(stack), Some(sockets)) =
-                (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
-            {
+            if let (Some(stack), Some(sockets)) = (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get()) {
                 stack.listen(sockets, REMOTE_SHELL_PORT);
             }
         }
@@ -794,9 +807,7 @@ fn net_task() -> ! {
         loop {
             net_poll();
             let connected = unsafe {
-                if let (Some(stack), Some(sockets)) =
-                    (&*NET.0.get(), &*NET_SOCKETS.0.get())
-                {
+                if let (Some(stack), Some(sockets)) = (&*NET.0.get(), &*NET_SOCKETS.0.get()) {
                     stack.is_connected(sockets)
                 } else {
                     false
@@ -905,7 +916,11 @@ fn net_task() -> ! {
                     queue_send,
                     queue_recv,
                 );
-                let _ = writeln!(con, "[net] wait sem_block={} q_block={}", sem_take_block, queue_block);
+                let _ = writeln!(
+                    con,
+                    "[net] wait sem_block={} q_block={}",
+                    sem_take_block, queue_block
+                );
             }
             // Yield to scheduler so blob tasks (ppTask) can process WiFi frames.
             drv_yield();
@@ -916,8 +931,8 @@ fn net_task() -> ! {
         // Authenticate, then run the shell over TCP.
         unsafe {
             let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
-            let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap()
-                as *mut SocketSet<'static>;
+            let socket_set_ptr =
+                (*NET_SOCKETS.0.get()).as_mut().unwrap() as *mut SocketSet<'static>;
             let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll, net_poll_unlock);
             let mut tcp_con = Console::new(tcp_serial);
 
@@ -945,8 +960,8 @@ fn net_task() -> ! {
                         zigbee_cmd: Some(zigbee_command),
                         #[cfg(not(feature = "ieee802154"))]
                         zigbee_cmd: None,
-        sensor_cmd: None,
-        sensor_cmd: None,
+                        sensor_cmd: None,
+                        sensor_cmd: None,
                         get_current_user: Some(get_current_user),
                         get_user_list: Some(write_user_list),
                         vfs_list_dir: Some(vfs_list_dir),
@@ -1034,9 +1049,7 @@ fn mesh_poll() {
         (*RADIO_802154.0.get()).driver_mut().poll_rx();
     }
     unsafe {
-        if let (Some(stack), Some(sockets)) =
-            (&mut *MESH_NET.0.get(), &mut *MESH_SOCKETS.0.get())
-        {
+        if let (Some(stack), Some(sockets)) = (&mut *MESH_NET.0.get(), &mut *MESH_SOCKETS.0.get()) {
             let ticks = (*SCHEDULER.0.get()).ticks;
             stack.poll(sockets, ticks);
         }
@@ -1052,7 +1065,9 @@ fn mesh_poll() {
 #[cfg(feature = "ieee802154")]
 fn mesh_task() -> ! {
     // Let the shell task print its banner first.
-    for _ in 0..3_000_000u32 { core::hint::spin_loop(); }
+    for _ in 0..3_000_000u32 {
+        core::hint::spin_loop();
+    }
     let serial = usb_serial();
     let mut con = Console::new(serial);
 
@@ -1064,12 +1079,12 @@ fn mesh_task() -> ! {
         if ready {
             break;
         }
-        for _ in 0..10_000 { core::hint::spin_loop(); }
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
     }
 
-    let ext = unsafe {
-        (*RADIO_802154.0.get()).driver().mac_address_ext()
-    };
+    let ext = unsafe { (*RADIO_802154.0.get()).driver().mac_address_ext() };
     let _ = writeln!(
         con,
         "[mesh] 802.15.4 ready  EUI-64={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -1089,10 +1104,7 @@ fn mesh_task() -> ! {
     ipv6_addr[15] = ext[7];
 
     // Use the IPv6 link-local as our address (gateway = link-local doesn't apply for mesh).
-    let ip = IpCidr::new(
-        smoltcp::wire::Ipv6Address(ipv6_addr).into(),
-        64,
-    );
+    let ip = IpCidr::new(smoltcp::wire::Ipv6Address(ipv6_addr).into(), 64);
     // For mesh, use a dummy IPv4 gateway — smoltcp requires one.
     let gw = Ipv4Address::new(0, 0, 0, 0);
 
@@ -1111,8 +1123,15 @@ fn mesh_task() -> ! {
     let _ = writeln!(
         con,
         "[mesh] 6LoWPAN ready — IPv6 fe80::{}:{:02x}ff:fe{:02x}:{:02x}{:02x}/64  UDP port {}",
-        if ext[0] & 0x02 == 0 { ext[0] | 0x02 } else { ext[0] & !0x02 },
-        ext[1], ext[5], ext[6], ext[7],
+        if ext[0] & 0x02 == 0 {
+            ext[0] | 0x02
+        } else {
+            ext[0] & !0x02
+        },
+        ext[1],
+        ext[5],
+        ext[6],
+        ext[7],
         MESH_UDP_PORT
     );
 
@@ -1120,7 +1139,9 @@ fn mesh_task() -> ! {
     loop {
         mesh_poll();
         // Yield to other tasks.
-        for _ in 0..1000 { core::hint::spin_loop(); }
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
     }
 }
 
@@ -1303,8 +1324,10 @@ fn ble_driver_task() -> ! {
     drv_mmio_write32(modem::BLE_BB_BASE + modem::BLE_INT_CLR, 0xFFFF_FFFF);
     drv_mmio_write32(
         modem::BLE_BB_BASE + modem::BLE_INT_ENA,
-        modem::BLE_INT_SCAN_DONE | modem::BLE_INT_ADV_DONE
-            | modem::BLE_INT_RX_DONE | modem::BLE_INT_CONN_DONE
+        modem::BLE_INT_SCAN_DONE
+            | modem::BLE_INT_ADV_DONE
+            | modem::BLE_INT_RX_DONE
+            | modem::BLE_INT_CONN_DONE
             | modem::BLE_INT_TX_DONE,
     );
 
@@ -1393,14 +1416,13 @@ fn ieee802154_driver_task() -> ! {
     }
 
     // Clear and enable interrupts (RX, TX, TX fail, ED, ACK).
-    drv_mmio_write32(
-        modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-        0xFFFF_FFFF,
-    );
+    drv_mmio_write32(modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR, 0xFFFF_FFFF);
     drv_mmio_write32(
         modem::IEEE802154_MAC_BASE + modem::ZB_INT_ENA,
-        modem::ZB_INT_TX_DONE | modem::ZB_INT_RX_DONE
-            | modem::ZB_INT_TX_FAIL | modem::ZB_INT_ED_DONE
+        modem::ZB_INT_TX_DONE
+            | modem::ZB_INT_RX_DONE
+            | modem::ZB_INT_TX_FAIL
+            | modem::ZB_INT_ED_DONE
             | modem::ZB_INT_ACK_RCVD,
     );
 
@@ -1526,10 +1548,12 @@ pub extern "C" fn _early_trap_rust(mcause: usize, mepc: usize, mtval: usize) -> 
     fn usb_flush() {
         unsafe {
             core::ptr::write_volatile(EP1_CONF as *mut u32, 1); // WR_DONE
-            // Brief spin wait for host to consume
+                                                                // Brief spin wait for host to consume
             for _ in 0..200_000u32 {
                 let conf = core::ptr::read_volatile(EP1_CONF as *const u32);
-                if conf & 2 != 0 { break; } // SERIAL_IN_EP_DATA_FREE
+                if conf & 2 != 0 {
+                    break;
+                } // SERIAL_IN_EP_DATA_FREE
                 core::hint::spin_loop();
             }
         }
@@ -1559,7 +1583,9 @@ pub extern "C" fn _early_trap_rust(mcause: usize, mepc: usize, mtval: usize) -> 
     usb_hex(mtval);
     usb_puts(b"\r\n");
 
-    loop { core::hint::spin_loop(); }
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1585,7 +1611,9 @@ pub extern "C" fn _rust_start() -> ! {
 
     // ── install EARLY trap handler to diagnose crashes ──────────
     {
-        extern "C" { fn _early_trap_handler(); }
+        extern "C" {
+            fn _early_trap_handler();
+        }
         unsafe {
             let addr = _early_trap_handler as *const () as usize;
             core::arch::asm!("csrw mtvec, {0}", in(reg) addr, options(nomem, nostack));
@@ -1619,11 +1647,7 @@ pub extern "C" fn _rust_start() -> ! {
         let region = &mut *core::ptr::addr_of_mut!(HEAP_REGION);
         (*HEAP.0.get()).init(&mut region.0, HEAP_SMALL_BYTES);
     }
-    let _ = writeln!(
-        con,
-        "[boot] heap initialised ({} KiB)",
-        HEAP_SIZE / 1024,
-    );
+    let _ = writeln!(con, "[boot] heap initialised ({} KiB)", HEAP_SIZE / 1024,);
 
     // ── seed system CSPRNG from hardware RNG ─────────────────
     {
@@ -1633,7 +1657,9 @@ pub extern "C" fn _rust_start() -> ! {
             let val = unsafe { core::ptr::read_volatile(RNG_DATA_REG) };
             chunk.copy_from_slice(&val.to_le_bytes());
         }
-        unsafe { microkernel::seed_system_rng(seed); }
+        unsafe {
+            microkernel::seed_system_rng(seed);
+        }
         let _ = writeln!(con, "[boot] system CSPRNG seeded from hardware RNG");
         // Record in audit log.
         unsafe {
@@ -1645,28 +1671,45 @@ pub extern "C" fn _rust_start() -> ! {
     unsafe {
         let reg = &mut *DRIVERS.0.get();
 
-        let uart = reg.register("uart0", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: false,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
-        reg.grant_mmio(uart, MemRegion::new(0x6000_0000, 0x100)).ok();
+        let uart = reg
+            .register(
+                "uart0",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: false,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
+        reg.grant_mmio(uart, MemRegion::new(0x6000_0000, 0x100))
+            .ok();
 
-        let intc_id = reg.register("intc", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
-        reg.grant_mmio(intc_id, MemRegion::new(0x600C_2000, 0x200)).ok();
+        let intc_id = reg
+            .register(
+                "intc",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
+        reg.grant_mmio(intc_id, MemRegion::new(0x600C_2000, 0x200))
+            .ok();
 
-        let st = reg.register("systimer", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
+        let st = reg
+            .register(
+                "systimer",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
         reg.grant_mmio(st, MemRegion::new(0x6002_3000, 0x80)).ok();
         reg.grant_irq(st, SYSTIMER_CPU_INT as u16);
     }
@@ -1677,12 +1720,15 @@ pub extern "C" fn _rust_start() -> ! {
     {
         unsafe {
             let reg = &mut *DRIVERS.0.get();
-            let _ = reg.register("ble", DriverCaps {
-                mmio_regions: 1,
-                uses_interrupts: true,
-                uses_dma: false,
-                uses_network: false,
-            });
+            let _ = reg.register(
+                "ble",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            );
         }
         let _ = writeln!(con, "[boot] BLE 5.0 driver registered");
     }
@@ -1692,17 +1738,23 @@ pub extern "C" fn _rust_start() -> ! {
     {
         unsafe {
             let reg = &mut *DRIVERS.0.get();
-            let drv = reg.register("ieee802154", DriverCaps {
-                mmio_regions: 1,
-                uses_interrupts: true,
-                uses_dma: false,
-                uses_network: true,
-            });
+            let drv = reg.register(
+                "ieee802154",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: true,
+                },
+            );
             if let Ok(id) = drv {
                 reg.grant_mmio(id, MemRegion::new(0x600A_3000, 0x1000)).ok();
             }
         }
-        let _ = writeln!(con, "[boot] IEEE 802.15.4 (ZigBee/Thread) driver registered");
+        let _ = writeln!(
+            con,
+            "[boot] IEEE 802.15.4 (ZigBee/Thread) driver registered"
+        );
     }
 
     // ── install trap vector (RISC-V only) ────────────────────
@@ -1734,7 +1786,9 @@ pub extern "C" fn _rust_start() -> ! {
     // ── system timer tick ────────────────────────────────────
     let timer = system_timer();
     timer.configure_tick(TICK_PERIOD_US);
-    unsafe { *TIMER.0.get() = timer; }
+    unsafe {
+        *TIMER.0.get() = timer;
+    }
     let _ = writeln!(con, "[boot] systimer tick @ {} us", TICK_PERIOD_US);
 
     // ── VFS initialisation ───────────────────────────────────
@@ -1742,7 +1796,9 @@ pub extern "C" fn _rust_start() -> ! {
         let inodes = &mut *INODES.0.get();
         let ramfs = &mut *RAMFS.0.get();
         inodes.init_root();
-        let dev_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/dev").unwrap_or(microkernel::vfs::NO_INODE);
+        let dev_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/dev")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if dev_id != microkernel::vfs::NO_INODE {
             inodes.create_device_in(dev_id, "null", 0, 0);
             inodes.create_device_in(dev_id, "zero", 0, 1);
@@ -1751,7 +1807,9 @@ pub extern "C" fn _rust_start() -> ! {
             inodes.create_device_in(dev_id, "keyboard", 1, 0);
             inodes.create_device_in(dev_id, "mouse", 1, 1);
         }
-        let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc").unwrap_or(microkernel::vfs::NO_INODE);
+        let etc_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/etc")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if etc_id != microkernel::vfs::NO_INODE {
             ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS!\n");
             ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-esp32c6\n");
@@ -1770,23 +1828,42 @@ pub extern "C" fn _rust_start() -> ! {
                 let mut buf = [0u8; 256];
                 let mut pos = 0usize;
                 for &b in b"# VeerOS WiFi configuration\nssid=" {
-                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                    if pos < buf.len() {
+                        buf[pos] = b;
+                        pos += 1;
+                    }
                 }
                 for &b in WIFI_SSID.as_bytes() {
-                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                    if pos < buf.len() {
+                        buf[pos] = b;
+                        pos += 1;
+                    }
                 }
                 for &b in b"\npassword=" {
-                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                    if pos < buf.len() {
+                        buf[pos] = b;
+                        pos += 1;
+                    }
                 }
                 for &b in WIFI_PASS.as_bytes() {
-                    if pos < buf.len() { buf[pos] = b; pos += 1; }
+                    if pos < buf.len() {
+                        buf[pos] = b;
+                        pos += 1;
+                    }
                 }
-                if pos < buf.len() { buf[pos] = b'\n'; pos += 1; }
+                if pos < buf.len() {
+                    buf[pos] = b'\n';
+                    pos += 1;
+                }
                 ramfs.create_with_content(inodes, net_id, "wifi", &buf[..pos]);
             }
         }
     }
-    let _ = writeln!(con, "[boot] VFS initialised (ramfs {} KiB)", microkernel::ramfs::RAMFS_POOL_SIZE / 1024);
+    let _ = writeln!(
+        con,
+        "[boot] VFS initialised (ramfs {} KiB)",
+        microkernel::ramfs::RAMFS_POOL_SIZE / 1024
+    );
 
     // ── scheduler + tasks ────────────────────────────────────
     unsafe {
@@ -1803,7 +1880,8 @@ pub extern "C" fn _rust_start() -> ! {
         // Idle task (priority 0).
         let sb = (&raw const IDLE_STACK) as usize;
         let st = sb + core::mem::size_of::<IdleStack>();
-        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
+        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0)
+        {
             sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
         }
 
@@ -1812,7 +1890,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = (&raw const SHELL_STACK) as usize;
             let st = sb + core::mem::size_of::<ShellStack>();
-            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -1824,21 +1904,34 @@ pub extern "C" fn _rust_start() -> ! {
             use soc_esp32::modem;
             let sb = (&raw const WIFI_DRV_STACK) as usize;
             let st = sb + core::mem::size_of::<DrvStack4K>();
-            if let Some(idx) = sched.create_task("wifi-drv", wifi_driver_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "wifi-drv",
+                wifi_driver_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
                 // Grant MMIO: modem clock/reset registers.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::MODEM_LPCON_BASE,
-                    size: 0x1000,
-                    perms: arch::MemPerms::RW,
-                });
+                sched.grant_region(
+                    idx,
+                    arch::TaskMemRegion {
+                        base: modem::MODEM_LPCON_BASE,
+                        size: 0x1000,
+                        perms: arch::MemPerms::RW,
+                    },
+                );
                 // Grant MMIO: WiFi MAC + baseband.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::WIFI_MMIO_BASE,
-                    size: modem::WIFI_MMIO_SIZE,
-                    perms: arch::MemPerms::RW,
-                });
+                sched.grant_region(
+                    idx,
+                    arch::TaskMemRegion {
+                        base: modem::WIFI_MMIO_BASE,
+                        size: modem::WIFI_MMIO_SIZE,
+                        perms: arch::MemPerms::RW,
+                    },
+                );
             }
         }
 
@@ -1847,21 +1940,34 @@ pub extern "C" fn _rust_start() -> ! {
             use soc_esp32::modem;
             let sb = (&raw const BLE_DRV_STACK) as usize;
             let st = sb + core::mem::size_of::<DrvStack2K>();
-            if let Some(idx) = sched.create_task("ble-drv", ble_driver_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "ble-drv",
+                ble_driver_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
                 // Grant MMIO: modem clock/reset.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::MODEM_LPCON_BASE,
-                    size: 0x1000,
-                    perms: arch::MemPerms::RW,
-                });
+                sched.grant_region(
+                    idx,
+                    arch::TaskMemRegion {
+                        base: modem::MODEM_LPCON_BASE,
+                        size: 0x1000,
+                        perms: arch::MemPerms::RW,
+                    },
+                );
                 // Grant MMIO: BLE baseband.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::BLE_MMIO_BASE,
-                    size: modem::BLE_MMIO_SIZE,
-                    perms: arch::MemPerms::RW,
-                });
+                sched.grant_region(
+                    idx,
+                    arch::TaskMemRegion {
+                        base: modem::BLE_MMIO_BASE,
+                        size: modem::BLE_MMIO_SIZE,
+                        perms: arch::MemPerms::RW,
+                    },
+                );
             }
         }
 
@@ -1870,21 +1976,34 @@ pub extern "C" fn _rust_start() -> ! {
             use soc_esp32::modem;
             let sb = (&raw const IEEE802154_DRV_STACK) as usize;
             let st = sb + core::mem::size_of::<DrvStack2K>();
-            if let Some(idx) = sched.create_task("802154-drv", ieee802154_driver_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "802154-drv",
+                ieee802154_driver_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
                 // Grant MMIO: modem clock/reset.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::MODEM_LPCON_BASE,
-                    size: 0x1000,
-                    perms: arch::MemPerms::RW,
-                });
+                sched.grant_region(
+                    idx,
+                    arch::TaskMemRegion {
+                        base: modem::MODEM_LPCON_BASE,
+                        size: 0x1000,
+                        perms: arch::MemPerms::RW,
+                    },
+                );
                 // Grant MMIO: 802.15.4 MAC.
-                sched.grant_region(idx, arch::TaskMemRegion {
-                    base: modem::IEEE802154_MMIO_BASE,
-                    size: modem::IEEE802154_MMIO_SIZE,
-                    perms: arch::MemPerms::RW,
-                });
+                sched.grant_region(
+                    idx,
+                    arch::TaskMemRegion {
+                        base: modem::IEEE802154_MMIO_BASE,
+                        size: modem::IEEE802154_MMIO_SIZE,
+                        perms: arch::MemPerms::RW,
+                    },
+                );
             }
         }
 
@@ -1893,7 +2012,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = (&raw const NET_TASK_STACK) as usize;
             let st = sb + core::mem::size_of::<NetTaskStack>();
-            if let Some(idx) = sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -1903,7 +2024,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = (&raw const MESH_TASK_STACK) as usize;
             let st = sb + core::mem::size_of::<MeshTaskStack>();
-            if let Some(idx) = sched.create_task("mesh", mesh_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("mesh", mesh_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -1913,7 +2036,11 @@ pub extern "C" fn _rust_start() -> ! {
         use microkernel::task::TaskState;
         let sched = &*SCHEDULER.0.get();
         let procs = &mut *PROCESSES.0.get();
-        let count = sched.tasks.iter().filter(|t| t.state != TaskState::Free).count();
+        let count = sched
+            .tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Free)
+            .count();
         procs.processes[0].thread_count = count;
     }
     let _ = writeln!(con, "[boot] idle task registered");
@@ -1926,14 +2053,25 @@ pub extern "C" fn _rust_start() -> ! {
     #[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
     let _ = writeln!(con, "[boot] 802154-drv task registered (M-mode)");
     #[cfg(feature = "wifi")]
-    let _ = writeln!(con, "[boot] net listener task registered (port {})", REMOTE_SHELL_PORT);
+    let _ = writeln!(
+        con,
+        "[boot] net listener task registered (port {})",
+        REMOTE_SHELL_PORT
+    );
     #[cfg(feature = "ieee802154")]
-    let _ = writeln!(con, "[boot] mesh task registered (6LoWPAN UDP port {})", MESH_UDP_PORT);
+    let _ = writeln!(
+        con,
+        "[boot] mesh task registered (6LoWPAN UDP port {})",
+        MESH_UDP_PORT
+    );
 
     // ── WiFi auto-connect (credentials loaded from /etc/net/wifi by driver) ──
     #[cfg(feature = "wifi")]
     {
-        let _ = writeln!(con, "[boot] wifi: credentials in /etc/net/wifi (driver will load)");
+        let _ = writeln!(
+            con,
+            "[boot] wifi: credentials in /etc/net/wifi (driver will load)"
+        );
         let _ = writeln!(con, "[boot] wifi: connect deferred (driver will handle)");
     }
 
@@ -1943,9 +2081,10 @@ pub extern "C" fn _rust_start() -> ! {
     unsafe {
         let sched = &mut *SCHEDULER.0.get();
         let ctx_ptr = sched.start().expect("no runnable task");
-        let _ = writeln!(con, "[boot] first task: idx={} name={}",
-            sched.current,
-            sched.tasks[sched.current].name,
+        let _ = writeln!(
+            con,
+            "[boot] first task: idx={} name={}",
+            sched.current, sched.tasks[sched.current].name,
         );
         let _ = writeln!(con, "");
 
@@ -2102,7 +2241,11 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
     unsafe {
         let inodes = &*INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        let dir_id = if path == "." { Some(cwd) } else { inodes.resolve(cwd, path) };
+        let dir_id = if path == "." {
+            Some(cwd)
+        } else {
+            inodes.resolve(cwd, path)
+        };
         match dir_id {
             Some(id) if id != NO_INODE => {
                 let inode = &inodes.inodes[id as usize];
@@ -2123,7 +2266,9 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
                     child = c.next_sibling;
                 }
             }
-            _ => { let _ = writeln!(w, "ls: '{}': no such directory", path); }
+            _ => {
+                let _ = writeln!(w, "ls: '{}': no such directory", path);
+            }
         }
     }
 }
@@ -2136,8 +2281,12 @@ fn vfs_read_file(path: &str, buf: &mut [u8]) -> usize {
         let ramfs = &*RAMFS.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return 0; }
-        if inodes.inodes[id as usize].kind != InodeKind::File { return 0; }
+        if id == NO_INODE {
+            return 0;
+        }
+        if inodes.inodes[id as usize].kind != InodeKind::File {
+            return 0;
+        }
         ramfs.read(inodes, id, 0, buf)
     }
 }
@@ -2155,15 +2304,31 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
                 let parent_path = if slash == 0 { "/" } else { &path[..slash] };
                 let name = &path[slash + 1..];
                 let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-                if parent == NO_INODE || name.is_empty() { return false; }
-                id = match inodes.create_file_in(parent, name) { Some(i) => i, None => return false };
+                if parent == NO_INODE || name.is_empty() {
+                    return false;
+                }
+                id = match inodes.create_file_in(parent, name) {
+                    Some(i) => i,
+                    None => return false,
+                };
             } else {
-                id = match inodes.create_file_in(cwd, path) { Some(i) => i, None => return false };
+                id = match inodes.create_file_in(cwd, path) {
+                    Some(i) => i,
+                    None => return false,
+                };
             }
         }
-        if inodes.inodes[id as usize].kind != InodeKind::File { return false; }
-        let offset = if append { inodes.inodes[id as usize].size } else { 0 };
-        if !append { ramfs.truncate(inodes, id, 0); }
+        if inodes.inodes[id as usize].kind != InodeKind::File {
+            return false;
+        }
+        let offset = if append {
+            inodes.inodes[id as usize].size
+        } else {
+            0
+        };
+        if !append {
+            ramfs.truncate(inodes, id, 0);
+        }
         ramfs.write(inodes, id, offset, data) > 0
     }
 }
@@ -2178,7 +2343,9 @@ fn vfs_mkdir(path: &str) -> bool {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.mkdir_in(parent, name).is_some()
         } else {
             inodes.mkdir_in(cwd, path).is_some()
@@ -2198,7 +2365,12 @@ fn vfs_stat(path: &str, w: &mut dyn core::fmt::Write) {
             return;
         }
         let inode = &inodes.inodes[id as usize];
-        let kind = match inode.kind { InodeKind::File => "file", InodeKind::Directory => "directory", InodeKind::Device => "device", _ => "unknown" };
+        let kind = match inode.kind {
+            InodeKind::File => "file",
+            InodeKind::Directory => "directory",
+            InodeKind::Device => "device",
+            _ => "unknown",
+        };
         let _ = writeln!(w, "  File: {}", inode.name_str());
         let _ = writeln!(w, "  Type: {}", kind);
         let _ = writeln!(w, "  Size: {}", inode.size);
@@ -2217,7 +2389,9 @@ fn vfs_unlink(path: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         inodes.unlink(id)
     }
 }
@@ -2229,12 +2403,16 @@ fn vfs_rename(old: &str, new: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, old).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         if let Some(slash) = new.rfind('/') {
             let parent_path = if slash == 0 { "/" } else { &new[..slash] };
             let name = &new[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.rename(id, parent, name)
         } else {
             inodes.rename(id, cwd, new)
@@ -2259,8 +2437,12 @@ fn vfs_chdir(path: &str) -> bool {
         let procs = &mut *PROCESSES.0.get();
         let cwd = procs.processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
-        if inodes.inodes[id as usize].kind != InodeKind::Directory { return false; }
+        if id == NO_INODE {
+            return false;
+        }
+        if inodes.inodes[id as usize].kind != InodeKind::Directory {
+            return false;
+        }
         procs.processes[0].cwd = id;
         true
     }
@@ -2268,37 +2450,81 @@ fn vfs_chdir(path: &str) -> bool {
 
 #[cfg(feature = "shell")]
 fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
-    use microkernel::vfs::{InodeKind, ROOT_INODE, NO_INODE};
+    use microkernel::vfs::{InodeKind, NO_INODE, ROOT_INODE};
     unsafe {
         let inodes = &*INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        let start = if path == "/" { ROOT_INODE } else { inodes.resolve(cwd, path).unwrap_or(NO_INODE) };
-        if start == NO_INODE { let _ = writeln!(w, "tree: '{}': no such directory", path); return; }
+        let start = if path == "/" {
+            ROOT_INODE
+        } else {
+            inodes.resolve(cwd, path).unwrap_or(NO_INODE)
+        };
+        if start == NO_INODE {
+            let _ = writeln!(w, "tree: '{}': no such directory", path);
+            return;
+        }
         let root = &inodes.inodes[start as usize];
-        if root.kind != InodeKind::Directory { let _ = writeln!(w, "tree: '{}': not a directory", path); return; }
-        let _ = writeln!(w, "{}", if path == "/" || path == "." { "/" } else { path });
+        if root.kind != InodeKind::Directory {
+            let _ = writeln!(w, "tree: '{}': not a directory", path);
+            return;
+        }
+        let _ = writeln!(
+            w,
+            "{}",
+            if path == "/" || path == "." {
+                "/"
+            } else {
+                path
+            }
+        );
         let mut stack: [(u16, u8); 64] = [(NO_INODE, 0); 64];
         let mut sp = 0usize;
         let mut kids: [u16; 64] = [NO_INODE; 64];
         let mut nk = 0usize;
         let mut ch = root.children_head;
-        while ch != NO_INODE && nk < 64 { kids[nk] = ch; nk += 1; ch = inodes.inodes[ch as usize].next_sibling; }
+        while ch != NO_INODE && nk < 64 {
+            kids[nk] = ch;
+            nk += 1;
+            ch = inodes.inodes[ch as usize].next_sibling;
+        }
         let mut i = nk;
-        while i > 0 { i -= 1; if sp < 64 { stack[sp] = (kids[i], 1); sp += 1; } }
+        while i > 0 {
+            i -= 1;
+            if sp < 64 {
+                stack[sp] = (kids[i], 1);
+                sp += 1;
+            }
+        }
         while sp > 0 {
             sp -= 1;
             let (id, depth) = stack[sp];
             let node = &inodes.inodes[id as usize];
-            for _ in 0..depth { w.write_str("  ").ok(); }
-            let kind_ch = match node.kind { InodeKind::Directory => '/', InodeKind::Device => '*', _ => ' ' };
+            for _ in 0..depth {
+                w.write_str("  ").ok();
+            }
+            let kind_ch = match node.kind {
+                InodeKind::Directory => '/',
+                InodeKind::Device => '*',
+                _ => ' ',
+            };
             let _ = writeln!(w, "{}{}", node.name_str(), kind_ch);
             if node.kind == InodeKind::Directory {
                 let mut ck: [u16; 64] = [NO_INODE; 64];
                 let mut cn = 0usize;
                 let mut c = node.children_head;
-                while c != NO_INODE && cn < 64 { ck[cn] = c; cn += 1; c = inodes.inodes[c as usize].next_sibling; }
+                while c != NO_INODE && cn < 64 {
+                    ck[cn] = c;
+                    cn += 1;
+                    c = inodes.inodes[c as usize].next_sibling;
+                }
                 let mut j = cn;
-                while j > 0 { j -= 1; if sp < 64 { stack[sp] = (ck[j], depth + 1); sp += 1; } }
+                while j > 0 {
+                    j -= 1;
+                    if sp < 64 {
+                        stack[sp] = (ck[j], depth + 1);
+                        sp += 1;
+                    }
+                }
             }
         }
     }
@@ -2310,12 +2536,16 @@ fn vfs_touch(path: &str) -> bool {
     unsafe {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        if inodes.resolve(cwd, path).unwrap_or(NO_INODE) != NO_INODE { return true; }
+        if inodes.resolve(cwd, path).unwrap_or(NO_INODE) != NO_INODE {
+            return true;
+        }
         if let Some(slash) = path.rfind('/') {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.create_file_in(parent, name).is_some()
         } else {
             inodes.create_file_in(cwd, path).is_some()
@@ -2338,7 +2568,14 @@ fn mount_list(w: &mut dyn core::fmt::Write) {
                     microkernel::vfs::FsType::RamFs => "ramfs",
                     _ => "none",
                 };
-                let _ = writeln!(w, "  {} on {} type {} (slot {})", m.label_str(), path, fstype, i + 1);
+                let _ = writeln!(
+                    w,
+                    "  {} on {} type {} (slot {})",
+                    m.label_str(),
+                    path,
+                    fstype,
+                    i + 1
+                );
                 found = true;
             }
         }
@@ -2372,11 +2609,24 @@ fn dmesg_info(w: &mut dyn core::fmt::Write) {
 
 // ── Capability names table ───────────────────────────────────────────────
 const CAP_NAMES: &[(u32, &str)] = &[
-    (0, "task_basic"), (1, "mem"), (2, "time"), (3, "sync"),
-    (4, "ipc"), (5, "channel"), (6, "poll"), (7, "console_io"),
-    (8, "fs"), (9, "net"), (10, "spawn_thread"), (11, "spawn_process"),
-    (12, "user_admin"), (13, "driver"), (14, "mount"), (15, "hw"),
-    (16, "crypto"), (17, "cap_admin"),
+    (0, "task_basic"),
+    (1, "mem"),
+    (2, "time"),
+    (3, "sync"),
+    (4, "ipc"),
+    (5, "channel"),
+    (6, "poll"),
+    (7, "console_io"),
+    (8, "fs"),
+    (9, "net"),
+    (10, "spawn_thread"),
+    (11, "spawn_process"),
+    (12, "user_admin"),
+    (13, "driver"),
+    (14, "mount"),
+    (15, "hw"),
+    (16, "crypto"),
+    (17, "cap_admin"),
 ];
 
 /// Shell callback for `caps <sub> <args>`.
@@ -2462,14 +2712,30 @@ fn caps_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                     // Log to audit trail
                     let tick = unsafe { (*SCHEDULER.0.get()).ticks } as u32;
                     let audit = unsafe { &mut *AUDIT.0.get() };
-                    audit.log(tick, pid as u8, 0, AuditEvent::CapDropped, 1 << b, remaining);
-                    let _ = writeln!(w, "  dropped '{}' from pid {} — caps now 0x{:05X}",
-                        name, pid, remaining);
+                    audit.log(
+                        tick,
+                        pid as u8,
+                        0,
+                        AuditEvent::CapDropped,
+                        1 << b,
+                        remaining,
+                    );
+                    let _ = writeln!(
+                        w,
+                        "  dropped '{}' from pid {} — caps now 0x{:05X}",
+                        name, pid, remaining
+                    );
                 }
                 None => {
                     let _ = writeln!(w, "  unknown capability: '{}'", cap_name);
-                    let _ = writeln!(w, "  valid caps: task_basic, mem, time, sync, ipc, channel, poll,");
-                    let _ = writeln!(w, "    console_io, fs, net, spawn_thread, spawn_process, user_admin,");
+                    let _ = writeln!(
+                        w,
+                        "  valid caps: task_basic, mem, time, sync, ipc, channel, poll,"
+                    );
+                    let _ = writeln!(
+                        w,
+                        "    console_io, fs, net, spawn_thread, spawn_process, user_admin,"
+                    );
                     let _ = writeln!(w, "    driver, mount, hw, crypto, cap_admin");
                 }
             }
@@ -2501,7 +2767,11 @@ fn auditlog_command(args: &str, w: &mut dyn core::fmt::Write) {
         32 // default: show last 32 entries
     } else {
         let n = parse_usize(args);
-        if n == usize::MAX { 32 } else { n }
+        if n == usize::MAX {
+            32
+        } else {
+            n
+        }
     };
     if audit.total() == 0 {
         let _ = writeln!(w, "  (no audit events recorded)");
@@ -2691,7 +2961,10 @@ fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
                 return;
             }
             // Parse hex with optional 0x prefix
-            let hex_str = args.strip_prefix("0x").or_else(|| args.strip_prefix("0X")).unwrap_or(args);
+            let hex_str = args
+                .strip_prefix("0x")
+                .or_else(|| args.strip_prefix("0X"))
+                .unwrap_or(args);
             match u16::from_str_radix(hex_str, 16) {
                 Ok(pan_id) => {
                     mgr.set_pan_id(pan_id);
@@ -2755,9 +3028,7 @@ fn zigbee_command(sub: &str, args: &str, w: &mut dyn core::fmt::Write) {
 pub(crate) fn console_write_byte(b: u8) {
     let serial = usb_serial();
     let mut con = Console::new(serial);
-    let _ = con.write_str(unsafe {
-        core::str::from_utf8_unchecked(core::slice::from_ref(&b))
-    });
+    let _ = con.write_str(unsafe { core::str::from_utf8_unchecked(core::slice::from_ref(&b)) });
 }
 
 #[allow(dead_code)]

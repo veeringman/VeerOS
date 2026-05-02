@@ -70,7 +70,9 @@ impl Config {
         let mut start = 0;
         while start < data.len() && cfg.count < MAX_ENTRIES {
             // Find end of line.
-            let end = data[start..].iter().position(|&b| b == b'\n')
+            let end = data[start..]
+                .iter()
+                .position(|&b| b == b'\n')
                 .map(|p| start + p)
                 .unwrap_or(data.len());
             let line = &data[start..end];
@@ -129,7 +131,14 @@ impl Config {
 
 /// Trim leading and trailing ASCII whitespace from a byte slice.
 fn trim(b: &[u8]) -> &[u8] {
-    let start = b.iter().position(|&c| c != b' ' && c != b'\t' && c != b'\r').unwrap_or(b.len());
-    let end = b.iter().rposition(|&c| c != b' ' && c != b'\t' && c != b'\r').map(|p| p + 1).unwrap_or(start);
+    let start = b
+        .iter()
+        .position(|&c| c != b' ' && c != b'\t' && c != b'\r')
+        .unwrap_or(b.len());
+    let end = b
+        .iter()
+        .rposition(|&c| c != b' ' && c != b'\t' && c != b'\r')
+        .map(|p| p + 1)
+        .unwrap_or(start);
     &b[start..end]
 }

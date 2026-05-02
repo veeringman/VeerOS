@@ -15,8 +15,10 @@ use crate::manifest::{Limits, Manifest, Namespaces, Seccomp};
 pub struct VmSpawnOpts {
     pub kernel: PathBuf,
     pub memory: usize,
+    pub disk: Option<PathBuf>,
     pub arch: VmArchArg,
     pub tap: Option<String>,
+    pub vmnet: Option<String>,
     pub name: Option<String>,
     pub vmm: Option<PathBuf>,
     pub user_ns: bool,
@@ -26,12 +28,15 @@ pub struct VmSpawnOpts {
 
 pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
     // ── 1. Resolve absolute boot image path ──────────────────
-    let kernel = opts.kernel.canonicalize()
+    let kernel = opts
+        .kernel
+        .canonicalize()
         .with_context(|| format!("boot image path not found: {}", opts.kernel.display()))?;
 
     // ── 2. Locate `veer-vm` binary ───────────────────────────
     let vmm = match opts.vmm {
-        Some(p) => p.canonicalize()
+        Some(p) => p
+            .canonicalize()
             .with_context(|| format!("--vmm path not found: {}", p.display()))?,
         None => locate_veer_vm().context("could not locate `veer-vm` binary")?,
     };
@@ -70,7 +75,10 @@ pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
 
     // ── 6. Namespaces ────────────────────────────────────────
     let namespaces = Namespaces {
-        pid: true, mount: true, uts: true, ipc: true,
+        pid: true,
+        mount: true,
+        uts: true,
+        ipc: true,
         // NET namespace on = guest is unreachable from host network and
         // vice versa (intentional — this is a VeerOS microVM, isolation
         // first). Once we add virtio-net, we'll open a tap/veth into it.
@@ -81,17 +89,38 @@ pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
     // ── 7. Environment — minimal passthrough ─────────────────
     let mut env = BTreeMap::new();
     env.insert("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into());
-    env.insert("TERM".into(), std::env::var("TERM").unwrap_or_else(|_| "dumb".into()));
+    env.insert(
+        "TERM".into(),
+        std::env::var("TERM").unwrap_or_else(|_| "dumb".into()),
+    );
 
     // ── 8. Arguments to veer-vm ──────────────────────────────
     let mut args = vec![
-        "--arch".into(), opts.arch.as_cli_value().into(),
-        "--kernel".into(), kernel.to_string_lossy().into_owned(),
-        "--memory".into(), opts.memory.to_string(),
+        "--arch".into(),
+        opts.arch.as_cli_value().into(),
+        "--kernel".into(),
+        kernel.to_string_lossy().into_owned(),
+        "--memory".into(),
+        opts.memory.to_string(),
     ];
+    if let Some(disk) = opts.disk {
+        let disk = disk
+            .canonicalize()
+            .with_context(|| format!("disk image path not found: {}", disk.display()))?;
+        args.push("--disk".into());
+        args.push(disk.to_string_lossy().into_owned());
+    }
+    if opts.tap.is_some() && opts.vmnet.is_some() {
+        bail!("--tap and --vmnet are mutually exclusive");
+    }
+
     if let Some(tap) = opts.tap {
         args.push("--tap".into());
         args.push(tap);
+    }
+    if let Some(vmnet) = opts.vmnet {
+        args.push("--vmnet".into());
+        args.push(vmnet);
     }
 
     Ok(Manifest {
@@ -133,7 +162,8 @@ fn locate_veer_vm() -> Result<PathBuf> {
             for sub in candidates {
                 let p = ancestor.join(sub);
                 if p.is_file() {
-                    return p.canonicalize()
+                    return p
+                        .canonicalize()
                         .with_context(|| format!("canonicalizing {}", p.display()));
                 }
             }
@@ -191,7 +221,9 @@ fn random_vm_name() -> String {
 #[allow(dead_code)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    p.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -223,8 +255,10 @@ mod tests {
         let manifest = build_manifest(VmSpawnOpts {
             kernel,
             memory: 128,
+            disk: None,
             arch: VmArchArg::Riscv32,
             tap: Some("tap0".to_string()),
+            vmnet: None,
             name: Some("vm-test".to_string()),
             vmm: Some(vmm),
             user_ns: true,
@@ -247,8 +281,10 @@ mod tests {
         let manifest = build_manifest(VmSpawnOpts {
             kernel,
             memory: 128,
+            disk: None,
             arch: VmArchArg::Riscv32,
             tap: None,
+            vmnet: None,
             name: Some("vm-test".to_string()),
             vmm: Some(vmm),
             user_ns: true,

@@ -34,7 +34,9 @@ impl VgaText {
         let buf = VGA_BASE as *mut u16;
         let blank = (DEFAULT_ATTR as u16) << 8 | b' ' as u16;
         for i in 0..(COLS * ROWS) {
-            unsafe { buf.add(i).write_volatile(blank); }
+            unsafe {
+                buf.add(i).write_volatile(blank);
+            }
         }
         unsafe {
             CURSOR_ROW = 0;
@@ -51,7 +53,9 @@ impl VgaText {
         let buf = VGA_BASE as *mut u16;
         let offset = row * COLS + col;
         let val = (attr as u16) << 8 | ch as u16;
-        unsafe { buf.add(offset).write_volatile(val); }
+        unsafe {
+            buf.add(offset).write_volatile(val);
+        }
     }
 
     /// Scroll the screen up by one line.
@@ -116,7 +120,9 @@ impl VgaText {
     fn putchar(&self, ch: u8) {
         match ch {
             b'\n' => self.newline(),
-            b'\r' => unsafe { CURSOR_COL = 0; },
+            b'\r' => unsafe {
+                CURSOR_COL = 0;
+            },
             0x08 => {
                 // Backspace: move cursor back and blank the cell.
                 unsafe {

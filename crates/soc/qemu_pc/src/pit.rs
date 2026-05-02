@@ -4,10 +4,10 @@
 //! The PIT oscillates at 1.193182 MHz. We program channel 0 in
 //! rate-generator mode (mode 2) for periodic timer interrupts (IRQ 0).
 
+use crate::outb;
+use arch::TickTimer;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU64, Ordering};
-use arch::TickTimer;
-use crate::outb;
 
 /// PIT base frequency in Hz.
 const PIT_FREQ_HZ: u32 = 1_193_182;
@@ -52,7 +52,7 @@ impl TickTimer for Pit8254 {
 
         unsafe {
             outb(PIT_CMD, CMD_CH0_MODE2);
-            outb(PIT_CH0_DATA, (divisor & 0xFF) as u8);       // low byte
+            outb(PIT_CH0_DATA, (divisor & 0xFF) as u8); // low byte
             outb(PIT_CH0_DATA, ((divisor >> 8) & 0xFF) as u8); // high byte
         }
     }

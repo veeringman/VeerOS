@@ -202,10 +202,12 @@ impl GovernorPolicy {
     }
 
     fn normalize(&mut self) -> Result<(), GovernorError> {
-        self.governor = canonicalize(&self.governor)
-            .map_err(|_| GovernorError::InvalidPolicy("governor must be valid VAS address".into()))?;
-        self.managed_aura = canonicalize(&self.managed_aura)
-            .map_err(|_| GovernorError::InvalidPolicy("managed_aura must be valid VAS address".into()))?;
+        self.governor = canonicalize(&self.governor).map_err(|_| {
+            GovernorError::InvalidPolicy("governor must be valid VAS address".into())
+        })?;
+        self.managed_aura = canonicalize(&self.managed_aura).map_err(|_| {
+            GovernorError::InvalidPolicy("managed_aura must be valid VAS address".into())
+        })?;
 
         let managed = VasAddress::parse(&self.managed_aura)
             .map_err(|_| GovernorError::InvalidPolicy("managed_aura must be parseable".into()))?;
@@ -219,7 +221,8 @@ impl GovernorPolicy {
         self.inherited_admins = normalize_address_list(&self.inherited_admins, "inherited admin")?;
 
         self.allow_member_types = normalize_member_types(&self.allow_member_types)?;
-        self.inherited_allow_member_types = normalize_member_types(&self.inherited_allow_member_types)?;
+        self.inherited_allow_member_types =
+            normalize_member_types(&self.inherited_allow_member_types)?;
 
         if self.policy_version == 0 {
             self.policy_version = 1;
@@ -236,7 +239,8 @@ impl GovernorPolicy {
 
     fn member_type_allowed(&self, member: &str) -> Result<bool, GovernorError> {
         let canonical_member = canonicalize(member).map_err(|_| GovernorError::InvalidAddress)?;
-        let addr = VasAddress::parse(&canonical_member).map_err(|_| GovernorError::InvalidAddress)?;
+        let addr =
+            VasAddress::parse(&canonical_member).map_err(|_| GovernorError::InvalidAddress)?;
         Ok(self
             .effective_member_types()
             .iter()
@@ -491,7 +495,12 @@ impl Governor {
         Ok(trace)
     }
 
-    pub fn add_member(&mut self, aura: &mut Aura, actor: &str, member: &str) -> Result<bool, GovernorError> {
+    pub fn add_member(
+        &mut self,
+        aura: &mut Aura,
+        actor: &str,
+        member: &str,
+    ) -> Result<bool, GovernorError> {
         let mut trace = DecisionTrace {
             policy_version: self.policy.policy_version,
             action: "add_member".to_string(),
@@ -510,8 +519,17 @@ impl Governor {
             },
         });
         if !managed_ok {
-            self.record(actor, AuditAction::AddMember, member, AuditOutcome::Denied, "aura not managed", Some(&trace))?;
-            return Err(GovernorError::Denied("governor policy does not manage this aura".into()));
+            self.record(
+                actor,
+                AuditAction::AddMember,
+                member,
+                AuditOutcome::Denied,
+                "aura not managed",
+                Some(&trace),
+            )?;
+            return Err(GovernorError::Denied(
+                "governor policy does not manage this aura".into(),
+            ));
         }
 
         let is_admin = self.policy.is_admin(actor)?;
@@ -525,7 +543,14 @@ impl Governor {
             },
         });
         if !is_admin {
-            self.record(actor, AuditAction::AddMember, member, AuditOutcome::Denied, "actor not in admins", Some(&trace))?;
+            self.record(
+                actor,
+                AuditAction::AddMember,
+                member,
+                AuditOutcome::Denied,
+                "actor not in admins",
+                Some(&trace),
+            )?;
             return Err(GovernorError::Denied("actor not in admins".into()));
         }
 
@@ -540,7 +565,14 @@ impl Governor {
             },
         });
         if !type_allowed {
-            self.record(actor, AuditAction::AddMember, member, AuditOutcome::Denied, "member type not allowed", Some(&trace))?;
+            self.record(
+                actor,
+                AuditAction::AddMember,
+                member,
+                AuditOutcome::Denied,
+                "member type not allowed",
+                Some(&trace),
+            )?;
             return Err(GovernorError::Denied("member type not allowed".into()));
         }
 
@@ -555,8 +587,19 @@ impl Governor {
                 "member already present".to_string()
             },
         });
-        let reason = if changed { "member added" } else { "already a member" };
-        self.record(actor, AuditAction::AddMember, member, AuditOutcome::Allowed, reason, Some(&trace))?;
+        let reason = if changed {
+            "member added"
+        } else {
+            "already a member"
+        };
+        self.record(
+            actor,
+            AuditAction::AddMember,
+            member,
+            AuditOutcome::Allowed,
+            reason,
+            Some(&trace),
+        )?;
         Ok(changed)
     }
 
@@ -595,7 +638,9 @@ impl Governor {
                 "aura not managed",
                 Some(&trace),
             )?;
-            return Err(GovernorError::Denied("governor policy does not manage this aura".into()));
+            return Err(GovernorError::Denied(
+                "governor policy does not manage this aura".into(),
+            ));
         }
 
         let is_admin = self.policy.is_admin(actor)?;
@@ -697,8 +742,17 @@ impl Governor {
             },
         });
         if !managed_ok {
-            self.record(actor, AuditAction::RemoveMember, member, AuditOutcome::Denied, "aura not managed", Some(&trace))?;
-            return Err(GovernorError::Denied("governor policy does not manage this aura".into()));
+            self.record(
+                actor,
+                AuditAction::RemoveMember,
+                member,
+                AuditOutcome::Denied,
+                "aura not managed",
+                Some(&trace),
+            )?;
+            return Err(GovernorError::Denied(
+                "governor policy does not manage this aura".into(),
+            ));
         }
 
         let removal_allowed = self.policy.effective_allow_removal();
@@ -712,7 +766,14 @@ impl Governor {
             },
         });
         if !removal_allowed {
-            self.record(actor, AuditAction::RemoveMember, member, AuditOutcome::Denied, "removal disabled by policy", Some(&trace))?;
+            self.record(
+                actor,
+                AuditAction::RemoveMember,
+                member,
+                AuditOutcome::Denied,
+                "removal disabled by policy",
+                Some(&trace),
+            )?;
             return Err(GovernorError::Denied("removal disabled by policy".into()));
         }
 
@@ -727,7 +788,14 @@ impl Governor {
             },
         });
         if !is_admin {
-            self.record(actor, AuditAction::RemoveMember, member, AuditOutcome::Denied, "actor not in admins", Some(&trace))?;
+            self.record(
+                actor,
+                AuditAction::RemoveMember,
+                member,
+                AuditOutcome::Denied,
+                "actor not in admins",
+                Some(&trace),
+            )?;
             return Err(GovernorError::Denied("actor not in admins".into()));
         }
 
@@ -742,8 +810,19 @@ impl Governor {
                 "member not present".to_string()
             },
         });
-        let reason = if changed { "member removed" } else { "member not present" };
-        self.record(actor, AuditAction::RemoveMember, member, AuditOutcome::Allowed, reason, Some(&trace))?;
+        let reason = if changed {
+            "member removed"
+        } else {
+            "member not present"
+        };
+        self.record(
+            actor,
+            AuditAction::RemoveMember,
+            member,
+            AuditOutcome::Allowed,
+            reason,
+            Some(&trace),
+        )?;
         Ok(changed)
     }
 
@@ -807,7 +886,8 @@ impl FederatedGovernor {
             ));
         }
 
-        if !self.policies.contains_key(&link.parent_aura) || !self.policies.contains_key(&link.child_aura)
+        if !self.policies.contains_key(&link.parent_aura)
+            || !self.policies.contains_key(&link.child_aura)
         {
             return Err(GovernorError::InvalidPolicy(
                 "federation link requires both parent and child policies to be registered".into(),
@@ -869,12 +949,8 @@ impl FederatedGovernor {
 
             if link.inherit_allow_removal {
                 let inherited_gate = parent.effective_allow_removal();
-                effective.inherited_allow_removal = Some(
-                    effective
-                        .inherited_allow_removal
-                        .unwrap_or(true)
-                        && inherited_gate,
-                );
+                effective.inherited_allow_removal =
+                    Some(effective.inherited_allow_removal.unwrap_or(true) && inherited_gate);
             }
 
             cur = link.parent_aura.clone();
@@ -894,10 +970,14 @@ impl FederatedGovernor {
         now_unix_ms: u128,
     ) -> Result<(), GovernorError> {
         if capabilities.is_empty() {
-            return Err(GovernorError::Denied("delegation requires at least one capability".into()));
+            return Err(GovernorError::Denied(
+                "delegation requires at least one capability".into(),
+            ));
         }
         if expires_unix_ms <= now_unix_ms {
-            return Err(GovernorError::Denied("delegation expiry must be in the future".into()));
+            return Err(GovernorError::Denied(
+                "delegation expiry must be in the future".into(),
+            ));
         }
 
         let aura = canonical_aura_addr(aura)?;
@@ -906,12 +986,13 @@ impl FederatedGovernor {
         let effective = self.effective_policy(&aura)?;
 
         if !effective.is_admin(&grantor)? {
-            return Err(GovernorError::Denied("grantor is not an effective admin for aura".into()));
+            return Err(GovernorError::Denied(
+                "grantor is not an effective admin for aura".into(),
+            ));
         }
 
-        self.delegations.retain(|d| {
-            !(d.aura == aura && d.grantor == grantor && d.delegate == delegate)
-        });
+        self.delegations
+            .retain(|d| !(d.aura == aura && d.grantor == grantor && d.delegate == delegate));
         self.delegations.push(DelegationGrant {
             aura,
             grantor,
@@ -984,7 +1065,12 @@ impl FederatedGovernor {
         for p in self.policies.keys() {
             let mut seen = BTreeSet::new();
             let mut cur = p.clone();
-            while let Some(next) = self.links.iter().find(|l| l.child_aura == cur).map(|l| l.parent_aura.clone()) {
+            while let Some(next) = self
+                .links
+                .iter()
+                .find(|l| l.child_aura == cur)
+                .map(|l| l.parent_aura.clone())
+            {
                 if !seen.insert(cur.clone()) {
                     return true;
                 }
@@ -1023,7 +1109,8 @@ fn eval_permission_rule(rule: &PermissionRule, ctx: &PermissionEvalContext<'_>) 
         return false;
     }
 
-    if !rule.allowed_capabilities.is_empty() && !rule.allowed_capabilities.contains(&ctx.capability) {
+    if !rule.allowed_capabilities.is_empty() && !rule.allowed_capabilities.contains(&ctx.capability)
+    {
         return false;
     }
 
@@ -1228,8 +1315,9 @@ fn append_jsonl(path: &Path, rec: &AuditRecord) -> Result<(), GovernorError> {
 fn normalize_address_list(input: &[String], what: &str) -> Result<Vec<String>, GovernorError> {
     let mut out = BTreeSet::new();
     for item in input {
-        let c = canonicalize(item)
-            .map_err(|_| GovernorError::InvalidPolicy(format!("{what} must be valid VAS address")))?;
+        let c = canonicalize(item).map_err(|_| {
+            GovernorError::InvalidPolicy(format!("{what} must be valid VAS address"))
+        })?;
         out.insert(c);
     }
     Ok(out.into_iter().collect())
@@ -1331,7 +1419,10 @@ mod tests {
         assert_eq!(p.governor, "svc{governor,company,live}");
         assert_eq!(p.managed_aura, "aur{finance,private,open}");
         assert_eq!(p.admins, vec!["usr{alice,corp,active}".to_string()]);
-        assert_eq!(p.allow_member_types, vec!["fld".to_string(), "usr".to_string()]);
+        assert_eq!(
+            p.allow_member_types,
+            vec!["fld".to_string(), "usr".to_string()]
+        );
     }
 
     #[test]
@@ -1339,7 +1430,11 @@ mod tests {
         let mut g = Governor::new(sample_policy());
         let mut aura = Aura::new(AuraId::parse("aur{finance,private,open}").unwrap());
 
-        let denied = g.add_member(&mut aura, "usr{mallory,corp,active}", "usr{jane,corp,active}");
+        let denied = g.add_member(
+            &mut aura,
+            "usr{mallory,corp,active}",
+            "usr{jane,corp,active}",
+        );
         assert!(matches!(denied, Err(GovernorError::Denied(_))));
 
         let denied_type = g.add_member(
@@ -1350,11 +1445,7 @@ mod tests {
         assert!(matches!(denied_type, Err(GovernorError::Denied(_))));
 
         let ok = g
-            .add_member(
-                &mut aura,
-                "usr{alice,corp,active}",
-                "usr{jane,corp,active}",
-            )
+            .add_member(&mut aura, "usr{alice,corp,active}", "usr{jane,corp,active}")
             .unwrap();
         assert!(ok);
         assert!(aura.contains_member("usr{jane,corp,active}"));
@@ -1372,11 +1463,7 @@ mod tests {
         aura.add_member("usr{jane,corp,active}").unwrap();
 
         let changed = g
-            .remove_member(
-                &mut aura,
-                "usr{alice,corp,active}",
-                "usr{jane,corp,active}",
-            )
+            .remove_member(&mut aura, "usr{alice,corp,active}", "usr{jane,corp,active}")
             .unwrap();
         assert!(changed);
         assert!(!aura.contains_member("usr{jane,corp,active}"));
@@ -1393,18 +1480,15 @@ mod tests {
 
     #[test]
     fn appends_jsonl_audit_log() {
-        let mut g = Governor::new(sample_policy()).with_audit_file(std::env::temp_dir().join(format!(
-            "veer-governor-audit-{}-{}.jsonl",
-            std::process::id(),
-            now_ms()
-        )));
+        let mut g =
+            Governor::new(sample_policy()).with_audit_file(std::env::temp_dir().join(format!(
+                "veer-governor-audit-{}-{}.jsonl",
+                std::process::id(),
+                now_ms()
+            )));
 
         let mut aura = Aura::new(AuraId::parse("aur{finance,private,open}").unwrap());
-        let _ = g.add_member(
-            &mut aura,
-            "usr{alice,corp,active}",
-            "usr{jane,corp,active}",
-        );
+        let _ = g.add_member(&mut aura, "usr{alice,corp,active}", "usr{jane,corp,active}");
 
         let path = g.audit_path.clone().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1425,11 +1509,7 @@ mod tests {
         let mut g = Governor::new(p);
         let mut aura = Aura::new(AuraId::parse("aur{finance,private,open}").unwrap());
         let ok = g
-            .add_member(
-                &mut aura,
-                "usr{carol,corp,active}",
-                "usr{jane,corp,active}",
-            )
+            .add_member(&mut aura, "usr{carol,corp,active}", "usr{jane,corp,active}")
             .unwrap();
         assert!(ok);
     }
@@ -1475,7 +1555,10 @@ mod tests {
         assert_eq!(rec.outcome, AuditOutcome::Denied);
         let trace = rec.trace.as_ref().unwrap();
         assert!(!trace.allowed);
-        assert!(trace.steps.iter().any(|s| s.check == "actor_is_admin" && !s.passed));
+        assert!(trace
+            .steps
+            .iter()
+            .any(|s| s.check == "actor_is_admin" && !s.passed));
     }
 
     #[test]
@@ -1544,10 +1627,22 @@ mod tests {
         assert_eq!(report.denied_events, 2);
         assert_eq!(report.unique_actors, 2);
         assert!(report.findings.iter().any(|f| f.code == "deny_spike"));
-        assert!(report.findings.iter().any(|f| f.code == "member_type_rejections"));
-        assert!(report.findings.iter().any(|f| f.code == "policy_update_churn"));
-        assert!(report.findings.iter().any(|f| f.code == "unknown_actor_denials"));
-        assert!(report.suggestions.iter().any(|s| s.id == "delegate_scoped_admin"));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "member_type_rejections"));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "policy_update_churn"));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "unknown_actor_denials"));
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.id == "delegate_scoped_admin"));
     }
 
     #[test]

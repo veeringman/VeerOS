@@ -20,11 +20,11 @@ use net::{NetStack, NetStorage};
 // Re-export TcpSerial from the net crate so main.rs can use it via `net::TcpSerial`.
 pub use net::TcpSerial;
 use smoltcp::iface::SocketSet;
-use smoltcp::socket::tcp::Socket as TcpSocket;
-use smoltcp::socket::udp::{Socket as UdpSocket, PacketBuffer, PacketMetadata};
-use smoltcp::wire::{IpCidr, Ipv4Address, IpAddress, IpEndpoint};
 #[cfg(feature = "dhcp")]
 use smoltcp::socket::dhcpv4;
+use smoltcp::socket::tcp::Socket as TcpSocket;
+use smoltcp::socket::udp::{PacketBuffer, PacketMetadata, Socket as UdpSocket};
+use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NetworkDevice adapter for VirtioNet
@@ -41,7 +41,9 @@ pub struct VirtioNetDev;
 impl NetworkDevice for VirtioNetDev {
     fn has_rx(&self) -> bool {
         let net = unsafe { &mut *crate::VIRTIO_NET.0.get() };
-        if !net.active { return false; }
+        if !net.active {
+            return false;
+        }
         // Peek at the RX used ring without consuming.
         let rxq = match net.rxq.as_mut() {
             Some(q) => q,
@@ -233,9 +235,11 @@ const SSH_CLIENT_TCP_RX_BUF_SIZE: usize = 4096;
 const SSH_CLIENT_TCP_TX_BUF_SIZE: usize = 4096;
 
 #[cfg(feature = "ssh")]
-static mut SSH_CLIENT_TCP_RX_BUF: [u8; SSH_CLIENT_TCP_RX_BUF_SIZE] = [0u8; SSH_CLIENT_TCP_RX_BUF_SIZE];
+static mut SSH_CLIENT_TCP_RX_BUF: [u8; SSH_CLIENT_TCP_RX_BUF_SIZE] =
+    [0u8; SSH_CLIENT_TCP_RX_BUF_SIZE];
 #[cfg(feature = "ssh")]
-static mut SSH_CLIENT_TCP_TX_BUF: [u8; SSH_CLIENT_TCP_TX_BUF_SIZE] = [0u8; SSH_CLIENT_TCP_TX_BUF_SIZE];
+static mut SSH_CLIENT_TCP_TX_BUF: [u8; SSH_CLIENT_TCP_TX_BUF_SIZE] =
+    [0u8; SSH_CLIENT_TCP_TX_BUF_SIZE];
 
 /// SSH client (outbound) TCP socket handle.
 #[cfg(feature = "ssh")]
@@ -285,19 +289,22 @@ pub fn init() {
     {
         let serial = soc_qemu_pc::default_serial();
         let mut con = arch::Console::new(serial);
-        let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
-            "[net] SocketStorage size={}, buf at {:p}, NET_IF at {:p}\n",
-            core::mem::size_of::<smoltcp::iface::SocketStorage>(),
-            unsafe { &SOCKET_SET_BUF as *const _ },
-            unsafe { &*NET_IF.0.get() as *const _ },
-        ));
+        let _ = core::fmt::Write::write_fmt(
+            &mut con,
+            format_args!(
+                "[net] SocketStorage size={}, buf at {:p}, NET_IF at {:p}\n",
+                core::mem::size_of::<smoltcp::iface::SocketStorage>(),
+                unsafe { &SOCKET_SET_BUF as *const _ },
+                unsafe { &*NET_IF.0.get() as *const _ },
+            ),
+        );
     }
 
     // Create the smoltcp socket set.
-    let socket_set = unsafe {
-        SocketSet::new(&mut SOCKET_SET_BUF.0[..])
-    };
-    unsafe { *SMOL_SOCKETS.0.get() = Some(socket_set); }
+    let socket_set = unsafe { SocketSet::new(&mut SOCKET_SET_BUF.0[..]) };
+    unsafe {
+        *SMOL_SOCKETS.0.get() = Some(socket_set);
+    }
 
     // Create the NetStack (smoltcp Interface + primary TCP socket).
     // Always start with the static IP so TCP is usable immediately.
@@ -309,14 +316,19 @@ pub fn init() {
         24,
     );
     let gw = Ipv4Address::new(
-        DEFAULT_GATEWAY[0], DEFAULT_GATEWAY[1], DEFAULT_GATEWAY[2], DEFAULT_GATEWAY[3],
+        DEFAULT_GATEWAY[0],
+        DEFAULT_GATEWAY[1],
+        DEFAULT_GATEWAY[2],
+        DEFAULT_GATEWAY[3],
     );
 
     let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(NET_STORAGE) };
 
     let stack = NetStack::new(dev, ip, gw, sockets, storage);
-    unsafe { *NET_STACK.0.get() = Some(stack); }
+    unsafe {
+        *NET_STACK.0.get() = Some(stack);
+    }
 
     // Add a UDP socket for ping/DNS.
     let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
@@ -365,8 +377,10 @@ pub fn init() {
         let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
         unsafe {
             use smoltcp::socket::tcp::SocketBuffer;
-            let rx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_CLIENT_TCP_RX_BUF))[..]);
-            let tx_buf = SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_CLIENT_TCP_TX_BUF))[..]);
+            let rx_buf =
+                SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_CLIENT_TCP_RX_BUF))[..]);
+            let tx_buf =
+                SocketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(SSH_CLIENT_TCP_TX_BUF))[..]);
             let mut client_socket = TcpSocket::new(rx_buf, tx_buf);
             client_socket.set_nagle_enabled(false);
             let handle = sockets.add(client_socket);
@@ -380,18 +394,23 @@ pub fn init() {
         let sockets = unsafe { (*SMOL_SOCKETS.0.get()).as_mut().unwrap() };
         let dhcp_socket = dhcpv4::Socket::new();
         let handle = sockets.add(dhcp_socket);
-        unsafe { DHCP_HANDLE = Some(handle); }
+        unsafe {
+            DHCP_HANDLE = Some(handle);
+        }
 
         let serial = soc_qemu_pc::default_serial();
         let mut con = arch::Console::new(serial);
-        let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
-            "[net] DHCP: client started, awaiting lease...\n"
-        ));
+        let _ = core::fmt::Write::write_fmt(
+            &mut con,
+            format_args!("[net] DHCP: client started, awaiting lease...\n"),
+        );
     }
 
     // Mark interface up.
     iface.link = LinkState::Up;
-    unsafe { NET_INIT = true; }
+    unsafe {
+        NET_INIT = true;
+    }
 }
 
 /// Returns true if the network stack is initialised.
@@ -438,7 +457,11 @@ pub fn poll(now_ms: u64) {
                     // Update NetInterface.
                     let iface = &mut *NET_IF.0.get();
                     iface.ip = addr;
-                    let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+                    let mask = if prefix == 0 {
+                        0u32
+                    } else {
+                        !0u32 << (32 - prefix)
+                    };
                     iface.netmask = mask.to_be_bytes();
                     if let Some(gw) = router {
                         iface.gateway = gw.0;
@@ -448,16 +471,22 @@ pub fn poll(now_ms: u64) {
 
                     let serial = soc_qemu_pc::default_serial();
                     let mut con = arch::Console::new(serial);
-                    let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
-                        "[net] DHCP: acquired {}.{}.{}.{}/{}\n",
-                        addr[0], addr[1], addr[2], addr[3], prefix,
-                    ));
+                    let _ = core::fmt::Write::write_fmt(
+                        &mut con,
+                        format_args!(
+                            "[net] DHCP: acquired {}.{}.{}.{}/{}\n",
+                            addr[0], addr[1], addr[2], addr[3], prefix,
+                        ),
+                    );
                     if let Some(gw) = router {
                         let g = gw.0;
-                        let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
-                            "[net] DHCP: gateway {}.{}.{}.{}\n",
-                            g[0], g[1], g[2], g[3],
-                        ));
+                        let _ = core::fmt::Write::write_fmt(
+                            &mut con,
+                            format_args!(
+                                "[net] DHCP: gateway {}.{}.{}.{}\n",
+                                g[0], g[1], g[2], g[3],
+                            ),
+                        );
                     }
                 }
                 Some(dhcpv4::Event::Deconfigured) => {
@@ -468,9 +497,10 @@ pub fn poll(now_ms: u64) {
 
                     let serial = soc_qemu_pc::default_serial();
                     let mut con = arch::Console::new(serial);
-                    let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
-                        "[net] DHCP: lease expired, waiting for renewal\n"
-                    ));
+                    let _ = core::fmt::Write::write_fmt(
+                        &mut con,
+                        format_args!("[net] DHCP: lease expired, waiting for renewal\n"),
+                    );
                 }
                 None => {}
             }
@@ -625,10 +655,10 @@ pub fn ssh_debug_socket_states() {
             if let Some(handle) = SSH_SESSION_HANDLES[i] {
                 let socket = sockets.get::<TcpSocket>(handle);
                 let state = socket.state();
-                let _ = core::fmt::Write::write_fmt(&mut con, format_args!(
-                    "[ssh-dbg] slot {} active={} state={}\n",
-                    i, active, state,
-                ));
+                let _ = core::fmt::Write::write_fmt(
+                    &mut con,
+                    format_args!("[ssh-dbg] slot {} active={} state={}\n", i, active, state,),
+                );
             }
         }
     }
@@ -747,9 +777,8 @@ pub fn ssh_client_connect(ip: [u8; 4], port: u16) -> bool {
         );
         // Use our IP + ephemeral port as local endpoint.
         let iface = &*NET_IF.0.get();
-        let local_ip = smoltcp::wire::IpAddress::v4(
-            iface.ip[0], iface.ip[1], iface.ip[2], iface.ip[3],
-        );
+        let local_ip =
+            smoltcp::wire::IpAddress::v4(iface.ip[0], iface.ip[1], iface.ip[2], iface.ip[3]);
         let local = (local_ip, 44222u16); // ephemeral port
 
         match socket.connect(cx, remote, local) {
@@ -877,31 +906,56 @@ pub fn ifconfig_cmd(w: &mut dyn core::fmt::Write) {
     };
 
     let _ = writeln!(w, "  {} — {}", iface.name, link);
-    let _ = writeln!(w, "    MAC:     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        iface.mac[0], iface.mac[1], iface.mac[2],
-        iface.mac[3], iface.mac[4], iface.mac[5]);
-    let _ = writeln!(w, "    IPv4:    {}.{}.{}.{}",
-        iface.ip[0], iface.ip[1], iface.ip[2], iface.ip[3]);
+    let _ = writeln!(
+        w,
+        "    MAC:     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        iface.mac[0], iface.mac[1], iface.mac[2], iface.mac[3], iface.mac[4], iface.mac[5]
+    );
+    let _ = writeln!(
+        w,
+        "    IPv4:    {}.{}.{}.{}",
+        iface.ip[0], iface.ip[1], iface.ip[2], iface.ip[3]
+    );
     #[cfg(feature = "dhcp")]
     {
-        let src = if unsafe { DHCP_CONFIGURED } { "dhcp" } else { "pending" };
+        let src = if unsafe { DHCP_CONFIGURED } {
+            "dhcp"
+        } else {
+            "pending"
+        };
         let _ = writeln!(w, "    Source:  {}", src);
     }
     #[cfg(not(feature = "dhcp"))]
     {
         let _ = writeln!(w, "    Source:  static");
     }
-    let _ = writeln!(w, "    Netmask: {}.{}.{}.{}",
-        iface.netmask[0], iface.netmask[1], iface.netmask[2], iface.netmask[3]);
-    let _ = writeln!(w, "    Gateway: {}.{}.{}.{}",
-        iface.gateway[0], iface.gateway[1], iface.gateway[2], iface.gateway[3]);
+    let _ = writeln!(
+        w,
+        "    Netmask: {}.{}.{}.{}",
+        iface.netmask[0], iface.netmask[1], iface.netmask[2], iface.netmask[3]
+    );
+    let _ = writeln!(
+        w,
+        "    Gateway: {}.{}.{}.{}",
+        iface.gateway[0], iface.gateway[1], iface.gateway[2], iface.gateway[3]
+    );
     let _ = writeln!(w, "    MTU:     {}", iface.mtu);
-    let _ = writeln!(w, "    RX:      {} packets, {} bytes",
-        iface.rx_packets, iface.rx_bytes);
-    let _ = writeln!(w, "    TX:      {} packets, {} bytes",
-        iface.tx_packets, iface.tx_bytes);
+    let _ = writeln!(
+        w,
+        "    RX:      {} packets, {} bytes",
+        iface.rx_packets, iface.rx_bytes
+    );
+    let _ = writeln!(
+        w,
+        "    TX:      {} packets, {} bytes",
+        iface.tx_packets, iface.tx_bytes
+    );
     if iface.rx_errors > 0 || iface.tx_errors > 0 {
-        let _ = writeln!(w, "    Errors:  RX={} TX={}", iface.rx_errors, iface.tx_errors);
+        let _ = writeln!(
+            w,
+            "    Errors:  RX={} TX={}",
+            iface.rx_errors, iface.tx_errors
+        );
     }
 
     // Show smoltcp socket status.
@@ -950,25 +1004,38 @@ pub fn netstat_cmd(w: &mut dyn core::fmt::Write) {
     let local = tcp.local_endpoint();
     let remote = tcp.remote_endpoint();
     match (local, remote) {
-        (Some(l), Some(r)) => { let _ = writeln!(w, "  TCP    {:11}  {:?}  {:?}", state, l, r); }
-        (Some(l), None)    => { let _ = writeln!(w, "  TCP    {:11}  {:?}  *:*", state, l); }
-        (None, Some(r))    => { let _ = writeln!(w, "  TCP    {:11}  *:*    {:?}", state, r); }
-        (None, None)       => { let _ = writeln!(w, "  TCP    {:11}  *:*    *:*", state); }
+        (Some(l), Some(r)) => {
+            let _ = writeln!(w, "  TCP    {:11}  {:?}  {:?}", state, l, r);
+        }
+        (Some(l), None) => {
+            let _ = writeln!(w, "  TCP    {:11}  {:?}  *:*", state, l);
+        }
+        (None, Some(r)) => {
+            let _ = writeln!(w, "  TCP    {:11}  *:*    {:?}", state, r);
+        }
+        (None, None) => {
+            let _ = writeln!(w, "  TCP    {:11}  *:*    *:*", state);
+        }
     }
 
     // UDP socket.
     if let Some(handle) = unsafe { UDP_HANDLE } {
         let udp = sockets.get::<UdpSocket>(handle);
         let ep = udp.endpoint();
-        let _ = writeln!(w, "  UDP    {:11}  {:?}", 
+        let _ = writeln!(
+            w,
+            "  UDP    {:11}  {:?}",
             if ep.port != 0 { "BOUND" } else { "closed" },
-            ep);
+            ep
+        );
     }
 
     // Local (in-kernel) sockets.
     let sock_table = unsafe { &*crate::SOCKETS.0.get() };
     for (i, s) in sock_table.socks_ref().iter().enumerate() {
-        if s.state == microkernel::socket::SockState::Free { continue; }
+        if s.state == microkernel::socket::SockState::Free {
+            continue;
+        }
         let dom = match s.domain {
             microkernel::socket::Domain::Local => "local",
             microkernel::socket::Domain::Inet => "inet",
@@ -981,7 +1048,11 @@ pub fn netstat_cmd(w: &mut dyn core::fmt::Write) {
             microkernel::socket::SockState::Closed => "closed",
             microkernel::socket::SockState::Free => "free",
         };
-        let _ = writeln!(w, "  {:5}  {:11}  sock={}  addr={}", dom, st, i, s.bound_addr);
+        let _ = writeln!(
+            w,
+            "  {:5}  {:11}  sock={}  addr={}",
+            dom, st, i, s.bound_addr
+        );
     }
 }
 
@@ -994,8 +1065,12 @@ pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
 
     for b in s.bytes() {
         if b == b'.' {
-            if !has_digit || parts >= 3 { return None; }
-            if val > 255 { return None; }
+            if !has_digit || parts >= 3 {
+                return None;
+            }
+            if val > 255 {
+                return None;
+            }
             octets[parts] = val as u8;
             parts += 1;
             val = 0;
@@ -1007,7 +1082,9 @@ pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
             return None;
         }
     }
-    if !has_digit || parts != 3 || val > 255 { return None; }
+    if !has_digit || parts != 3 || val > 255 {
+        return None;
+    }
     octets[3] = val as u8;
     Some(octets)
 }
@@ -1037,8 +1114,11 @@ pub fn ping_cmd(args: &str, w: &mut dyn core::fmt::Write) {
         return;
     }
 
-    let _ = writeln!(w, "  PING {}.{}.{}.{} — sending 3 probes...",
-        target[0], target[1], target[2], target[3]);
+    let _ = writeln!(
+        w,
+        "  PING {}.{}.{}.{} — sending 3 probes...",
+        target[0], target[1], target[2], target[3]
+    );
 
     // We use the UDP socket to probe — send a tiny UDP packet to a
     // well-known port. This triggers ARP resolution and we can observe
@@ -1066,11 +1146,7 @@ pub fn ping_cmd(args: &str, w: &mut dyn core::fmt::Write) {
     );
 
     for seq in 0..3u16 {
-        let payload: [u8; 8] = [
-            b'V', b'e', b'e', b'r',
-            (seq >> 8) as u8, seq as u8,
-            0, 0,
-        ];
+        let payload: [u8; 8] = [b'V', b'e', b'e', b'r', (seq >> 8) as u8, seq as u8, 0, 0];
 
         {
             let udp = sockets.get_mut::<UdpSocket>(udp_handle);
@@ -1088,10 +1164,16 @@ pub fn ping_cmd(args: &str, w: &mut dyn core::fmt::Write) {
             poll(ticks + i);
         }
 
-        let _ = writeln!(w, "  seq={}: probe sent to {}.{}.{}.{}:7",
-            seq, target[0], target[1], target[2], target[3]);
+        let _ = writeln!(
+            w,
+            "  seq={}: probe sent to {}.{}.{}.{}:7",
+            seq, target[0], target[1], target[2], target[3]
+        );
     }
 
     let _ = writeln!(w, "  (ARP resolution + UDP probes complete)");
-    let _ = writeln!(w, "  Note: smoltcp responds to inbound ICMP echo automatically.");
+    let _ = writeln!(
+        w,
+        "  Note: smoltcp responds to inbound ICMP echo automatically."
+    );
 }

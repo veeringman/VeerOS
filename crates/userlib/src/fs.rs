@@ -7,20 +7,20 @@
 use crate::sys::{syscall1, syscall2, syscall3, syscall4};
 
 // Syscall numbers (must match microkernel::syscall).
-const SYS_OPEN: usize     = 0xA0;
-const SYS_CLOSE: usize    = 0xA1;
-const SYS_READ: usize     = 0xA2;
-const SYS_WRITE: usize    = 0xA3;
-const SYS_SEEK: usize     = 0xA4;
-const SYS_STAT: usize     = 0xA5;
-const SYS_FSTAT: usize    = 0xA6;
-const SYS_MKDIR: usize    = 0xA7;
-const SYS_UNLINK: usize   = 0xA8;
-const SYS_READDIR: usize  = 0xA9;
+const SYS_OPEN: usize = 0xA0;
+const SYS_CLOSE: usize = 0xA1;
+const SYS_READ: usize = 0xA2;
+const SYS_WRITE: usize = 0xA3;
+const SYS_SEEK: usize = 0xA4;
+const SYS_STAT: usize = 0xA5;
+const SYS_FSTAT: usize = 0xA6;
+const SYS_MKDIR: usize = 0xA7;
+const SYS_UNLINK: usize = 0xA8;
+const SYS_READDIR: usize = 0xA9;
 const SYS_TRUNCATE: usize = 0xAA;
-const SYS_RENAME: usize   = 0xAB;
-const SYS_GETCWD: usize   = 0xAC;
-const SYS_CHDIR: usize    = 0xAD;
+const SYS_RENAME: usize = 0xAB;
+const SYS_GETCWD: usize = 0xAC;
+const SYS_CHDIR: usize = 0xAD;
 
 /// Open flags (mirrors kernel `OpenFlags`).
 pub const O_RDONLY: usize = 0;
@@ -101,51 +101,56 @@ impl StatBuf {
 /// Open a file or directory. Returns a file descriptor, or `usize::MAX` on error.
 #[inline]
 pub fn open(path: &str, flags: usize) -> Result<usize, ()> {
-    let fd = syscall3(
-        SYS_OPEN,
-        path.as_ptr() as usize,
-        path.len(),
-        flags,
-    );
-    if fd == usize::MAX { Err(()) } else { Ok(fd) }
+    let fd = syscall3(SYS_OPEN, path.as_ptr() as usize, path.len(), flags);
+    if fd == usize::MAX {
+        Err(())
+    } else {
+        Ok(fd)
+    }
 }
 
 /// Close a file descriptor.
 #[inline]
 pub fn close(fd: usize) -> Result<(), ()> {
     let ret = syscall1(SYS_CLOSE, fd);
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Read from a file descriptor into `buf`. Returns bytes read.
 #[inline]
 pub fn read(fd: usize, buf: &mut [u8]) -> Result<usize, ()> {
-    let ret = syscall3(
-        SYS_READ,
-        fd,
-        buf.as_mut_ptr() as usize,
-        buf.len(),
-    );
-    if ret == usize::MAX { Err(()) } else { Ok(ret) }
+    let ret = syscall3(SYS_READ, fd, buf.as_mut_ptr() as usize, buf.len());
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(ret)
+    }
 }
 
 /// Write to a file descriptor from `buf`. Returns bytes written.
 #[inline]
 pub fn write(fd: usize, buf: &[u8]) -> Result<usize, ()> {
-    let ret = syscall3(
-        SYS_WRITE,
-        fd,
-        buf.as_ptr() as usize,
-        buf.len(),
-    );
-    if ret == usize::MAX { Err(()) } else { Ok(ret) }
+    let ret = syscall3(SYS_WRITE, fd, buf.as_ptr() as usize, buf.len());
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(ret)
+    }
 }
 
 /// Seek within a file. Returns the new position.
 #[inline]
 pub fn seek(fd: usize, offset: usize, whence: usize) -> Result<usize, ()> {
     let ret = syscall3(SYS_SEEK, fd, offset, whence);
-    if ret == usize::MAX { Err(()) } else { Ok(ret) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(ret)
+    }
 }
 
 /// Get file metadata by path.
@@ -157,28 +162,44 @@ pub fn stat(path: &str, buf: &mut StatBuf) -> Result<(), ()> {
         path.len(),
         buf as *mut StatBuf as usize,
     );
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Get file metadata by open file descriptor.
 #[inline]
 pub fn fstat(fd: usize, buf: &mut StatBuf) -> Result<(), ()> {
     let (ret, _) = syscall2(SYS_FSTAT, fd, buf as *mut StatBuf as usize);
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Create a directory.
 #[inline]
 pub fn mkdir(path: &str) -> Result<(), ()> {
     let (ret, _) = syscall2(SYS_MKDIR, path.as_ptr() as usize, path.len());
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Remove a file or empty directory.
 #[inline]
 pub fn unlink(path: &str) -> Result<(), ()> {
     let (ret, _) = syscall2(SYS_UNLINK, path.as_ptr() as usize, path.len());
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Read directory entries from an open directory fd.
@@ -191,14 +212,22 @@ pub fn readdir(fd: usize, entries: &mut [DirEntry]) -> Result<usize, ()> {
         entries.as_mut_ptr() as usize,
         entries.len(),
     );
-    if ret == usize::MAX { Err(()) } else { Ok(ret) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(ret)
+    }
 }
 
 /// Truncate an open file to `new_size` bytes.
 #[inline]
 pub fn truncate(fd: usize, new_size: usize) -> Result<(), ()> {
     let (ret, _) = syscall2(SYS_TRUNCATE, fd, new_size);
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Rename / move a file or directory.
@@ -211,19 +240,31 @@ pub fn rename(old_path: &str, new_path: &str) -> Result<(), ()> {
         new_path.as_ptr() as usize,
         new_path.len(),
     );
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Get the current working directory.
 #[inline]
 pub fn getcwd(buf: &mut [u8]) -> Result<usize, ()> {
     let (ret, _) = syscall2(SYS_GETCWD, buf.as_mut_ptr() as usize, buf.len());
-    if ret == usize::MAX { Err(()) } else { Ok(ret) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(ret)
+    }
 }
 
 /// Change the current working directory.
 #[inline]
 pub fn chdir(path: &str) -> Result<(), ()> {
     let (ret, _) = syscall2(SYS_CHDIR, path.as_ptr() as usize, path.len());
-    if ret == usize::MAX { Err(()) } else { Ok(()) }
+    if ret == usize::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
 }

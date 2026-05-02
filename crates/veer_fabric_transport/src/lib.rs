@@ -150,17 +150,26 @@ impl FabricSession {
     }
 
     pub fn pop_stream_frame(&mut self, stream_id: u32) -> Result<Option<Frame>, TransportError> {
-        let state = self.streams.get_mut(&stream_id).ok_or(TransportError::StreamNotFound)?;
+        let state = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(TransportError::StreamNotFound)?;
         Ok(state.recv_queue.pop_front())
     }
 
     pub fn is_stream_closed(&self, stream_id: u32) -> Result<bool, TransportError> {
-        let state = self.streams.get(&stream_id).ok_or(TransportError::StreamNotFound)?;
+        let state = self
+            .streams
+            .get(&stream_id)
+            .ok_or(TransportError::StreamNotFound)?;
         Ok(state.closed)
     }
 
     fn ensure_stream_open(&self, stream_id: u32) -> Result<(), TransportError> {
-        let state = self.streams.get(&stream_id).ok_or(TransportError::StreamNotFound)?;
+        let state = self
+            .streams
+            .get(&stream_id)
+            .ok_or(TransportError::StreamNotFound)?;
         if state.closed {
             return Err(TransportError::StreamClosed);
         }
@@ -246,7 +255,10 @@ pub mod quic_backend {
     impl QuicFabricRuntime {
         pub fn new(connection: Connection, key: &[u8]) -> Result<Self, TransportError> {
             let session = FabricSession::new(key)?;
-            Ok(Self { connection, session })
+            Ok(Self {
+                connection,
+                session,
+            })
         }
 
         pub fn from_snapshot(
@@ -255,7 +267,10 @@ pub mod quic_backend {
             snapshot: SessionSnapshot,
         ) -> Result<Self, TransportError> {
             let session = FabricSession::from_snapshot(key, snapshot)?;
-            Ok(Self { connection, session })
+            Ok(Self {
+                connection,
+                session,
+            })
         }
 
         pub fn snapshot(&self) -> SessionSnapshot {
@@ -305,7 +320,10 @@ pub mod quic_backend {
             self.session.close_stream(stream_id)
         }
 
-        pub fn pop_stream_frame(&mut self, stream_id: u32) -> Result<Option<Frame>, TransportError> {
+        pub fn pop_stream_frame(
+            &mut self,
+            stream_id: u32,
+        ) -> Result<Option<Frame>, TransportError> {
             self.session.pop_stream_frame(stream_id)
         }
 
@@ -315,7 +333,12 @@ pub mod quic_backend {
     }
 }
 
-fn encode_header(stream_id: u32, seq: u64, flags: FrameFlags, payload_len: u16) -> [u8; HEADER_LEN] {
+fn encode_header(
+    stream_id: u32,
+    seq: u64,
+    flags: FrameFlags,
+    payload_len: u16,
+) -> [u8; HEADER_LEN] {
     let mut h = [0u8; HEADER_LEN];
     h[0..4].copy_from_slice(&MAGIC);
     h[4..8].copy_from_slice(&stream_id.to_le_bytes());
@@ -325,7 +348,9 @@ fn encode_header(stream_id: u32, seq: u64, flags: FrameFlags, payload_len: u16) 
     h
 }
 
-fn decode_header(packet: &[u8]) -> Result<(u32, u64, FrameFlags, u16, [u8; HEADER_LEN]), TransportError> {
+fn decode_header(
+    packet: &[u8],
+) -> Result<(u32, u64, FrameFlags, u16, [u8; HEADER_LEN]), TransportError> {
     let mut header = [0u8; HEADER_LEN];
     header.copy_from_slice(&packet[..HEADER_LEN]);
 
@@ -335,8 +360,8 @@ fn decode_header(packet: &[u8]) -> Result<(u32, u64, FrameFlags, u16, [u8; HEADE
 
     let stream_id = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
     let seq = u64::from_le_bytes([
-        header[8], header[9], header[10], header[11],
-        header[12], header[13], header[14], header[15],
+        header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+        header[15],
     ]);
     let flags = FrameFlags::from_u8(header[16])?;
     let payload_len = u16::from_le_bytes([header[17], header[18]]);
@@ -408,7 +433,13 @@ mod tests {
 
         let snap = tx.snapshot();
         let mut tx2 = FabricSession::from_snapshot(&key(), snap).unwrap();
-        tx2.streams.insert(s, StreamState { recv_queue: VecDeque::new(), closed: false });
+        tx2.streams.insert(
+            s,
+            StreamState {
+                recv_queue: VecDeque::new(),
+                closed: false,
+            },
+        );
         let pkt = tx2.send(s, b"c").unwrap();
 
         let (_, seq, _, _, _) = decode_header(&pkt).unwrap();

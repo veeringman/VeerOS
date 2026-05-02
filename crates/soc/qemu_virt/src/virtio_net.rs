@@ -419,13 +419,15 @@ impl NetworkDevice for VirtioNet {
             let frame_start = VIRTIO_NET_HDR_SIZE;
             let frame_len = total_len.saturating_sub(frame_start);
             let copy_len = frame_len.min(buf.len());
-            buf[..copy_len]
-                .copy_from_slice(&bufs[desc_id][frame_start..frame_start + copy_len]);
+            buf[..copy_len].copy_from_slice(&bufs[desc_id][frame_start..frame_start + copy_len]);
 
             // Re-post this buffer to the available ring.
             let avail_idx = RX_REGION.avail_idx_ptr().read_volatile();
             let ring_slot = avail_idx as usize % QUEUE_SIZE as usize;
-            RX_REGION.avail_ring_ptr().add(ring_slot).write_volatile(desc_id as u16);
+            RX_REGION
+                .avail_ring_ptr()
+                .add(ring_slot)
+                .write_volatile(desc_id as u16);
             fence(Ordering::Release);
             RX_REGION
                 .avail_idx_ptr()
@@ -464,7 +466,10 @@ impl NetworkDevice for VirtioNet {
             (*d).flags = 0;
             (*d).next = 0;
 
-            TX_REGION.avail_ring_ptr().add(slot).write_volatile(slot as u16);
+            TX_REGION
+                .avail_ring_ptr()
+                .add(slot)
+                .write_volatile(slot as u16);
             fence(Ordering::Release);
             TX_REGION
                 .avail_idx_ptr()

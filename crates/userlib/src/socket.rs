@@ -25,13 +25,13 @@
 
 use crate::sys;
 
-const SYS_SOCKET: usize     = 0x70;
-const SYS_BIND: usize       = 0x71;
-const SYS_LISTEN: usize     = 0x72;
-const SYS_ACCEPT: usize     = 0x73;
-const SYS_CONNECT: usize    = 0x74;
-const SYS_SOCK_SEND: usize  = 0x75;
-const SYS_SOCK_RECV: usize  = 0x76;
+const SYS_SOCKET: usize = 0x70;
+const SYS_BIND: usize = 0x71;
+const SYS_LISTEN: usize = 0x72;
+const SYS_ACCEPT: usize = 0x73;
+const SYS_CONNECT: usize = 0x74;
+const SYS_SOCK_SEND: usize = 0x75;
+const SYS_SOCK_RECV: usize = 0x76;
 const SYS_SOCK_CLOSE: usize = 0x77;
 
 /// Socket address family.
@@ -56,7 +56,11 @@ pub enum SockType {
 #[inline]
 pub fn socket(domain: Domain, sock_type: SockType) -> Option<usize> {
     let h = sys::syscall2(SYS_SOCKET, domain as usize, sock_type as usize).0;
-    if h == usize::MAX { None } else { Some(h) }
+    if h == usize::MAX {
+        None
+    } else {
+        Some(h)
+    }
 }
 
 /// Bind a socket to an address (port number for local sockets).
@@ -77,7 +81,11 @@ pub fn listen(handle: usize, backlog: usize) -> bool {
 #[inline]
 pub fn accept(handle: usize) -> Option<usize> {
     let h = sys::syscall1(SYS_ACCEPT, handle);
-    if h == usize::MAX { None } else { Some(h) }
+    if h == usize::MAX {
+        None
+    } else {
+        Some(h)
+    }
 }
 
 /// Connect to a listening socket at the given address.

@@ -131,7 +131,11 @@ impl HvfLapic {
         };
 
         let vec = self.timer_vector();
-        if vec == 0 { None } else { Some(vec) }
+        if vec == 0 {
+            None
+        } else {
+            Some(vec)
+        }
     }
 
     fn read_u32(&mut self, addr: u64) -> u32 {
@@ -277,7 +281,6 @@ impl HvfIoapic {
     }
 }
 
-
 const HV_SUCCESS: i32 = 0;
 const HV_BUSY: i32 = -85377017;
 // Observed on hosts where x86 VMX vCPU creation is unavailable for this backend.
@@ -410,7 +413,10 @@ fn hv_vcpu_create_compat(vcpu: *mut HvVcpuId, exit: *mut *mut c_void) -> (i32, S
 
     // First try legacy path (works on older SDK/runtime combinations).
     let legacy_rc = unsafe { hv_vcpu_create(vcpu, exit, 0) };
-    diag.push_str(&format!("legacy(flags=0)={legacy_rc}({})", hv_return_name(legacy_rc)));
+    diag.push_str(&format!(
+        "legacy(flags=0)={legacy_rc}({})",
+        hv_return_name(legacy_rc)
+    ));
     if legacy_rc != HV_VCPU_CREATE_UNAVAILABLE {
         return (legacy_rc, diag);
     }
@@ -445,18 +451,25 @@ fn hv_vcpu_create_compat(vcpu: *mut HvVcpuId, exit: *mut *mut c_void) -> (i32, S
 
     let mut cfg: *mut c_void = ptr::null_mut();
     let cfg_rc = unsafe { create_cfg(&mut cfg as *mut *mut c_void) };
-    diag.push_str(&format!("; config_create={cfg_rc}({})", hv_return_name(cfg_rc)));
+    diag.push_str(&format!(
+        "; config_create={cfg_rc}({})",
+        hv_return_name(cfg_rc)
+    ));
     if cfg_rc != HV_SUCCESS || cfg.is_null() {
         return (legacy_no_exit_rc, diag);
     }
 
     let create_rc_cfg = unsafe { hv_vcpu_create(vcpu, exit, cfg as usize as u64) };
-    diag.push_str(&format!("; create(cfg,exit)={create_rc_cfg}({})", hv_return_name(create_rc_cfg)));
+    diag.push_str(&format!(
+        "; create(cfg,exit)={create_rc_cfg}({})",
+        hv_return_name(create_rc_cfg)
+    ));
     if create_rc_cfg == HV_SUCCESS {
         if let Ok(sym) = std::ffi::CString::new("hv_vcpu_config_destroy") {
             let destroy_ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym.as_ptr()) };
             if !destroy_ptr.is_null() {
-                let destroy_cfg: HvVcpuConfigDestroyFn = unsafe { std::mem::transmute(destroy_ptr) };
+                let destroy_cfg: HvVcpuConfigDestroyFn =
+                    unsafe { std::mem::transmute(destroy_ptr) };
                 let _ = unsafe { destroy_cfg(cfg) };
             }
         }
@@ -464,7 +477,8 @@ fn hv_vcpu_create_compat(vcpu: *mut HvVcpuId, exit: *mut *mut c_void) -> (i32, S
     }
 
     // Some runtimes may not require/return an explicit exit context pointer.
-    let create_rc_cfg_no_exit = unsafe { hv_vcpu_create(vcpu, ptr::null_mut(), cfg as usize as u64) };
+    let create_rc_cfg_no_exit =
+        unsafe { hv_vcpu_create(vcpu, ptr::null_mut(), cfg as usize as u64) };
     diag.push_str(&format!(
         "; create(cfg,no-exit)={create_rc_cfg_no_exit}({})",
         hv_return_name(create_rc_cfg_no_exit)
@@ -486,7 +500,7 @@ fn hv_vcpu_create_compat(vcpu: *mut HvVcpuId, exit: *mut *mut c_void) -> (i32, S
 struct VcpuState {
     id: HvVcpuId,
     halted: bool,
-    pending_interrupt: Option<u8>,  // Vector number if interrupt pending
+    pending_interrupt: Option<u8>, // Vector number if interrupt pending
 }
 
 struct HvfGuestMemoryRegion {
@@ -568,10 +582,7 @@ impl Drop for HvfVm {
 }
 
 fn write_reg(vcpu: HvVcpuId, reg: u32, value: u64, name: &str) -> Result<()> {
-    hv_check(
-        unsafe { hv_vcpu_write_register(vcpu, reg, value) },
-        name,
-    )
+    hv_check(unsafe { hv_vcpu_write_register(vcpu, reg, value) }, name)
 }
 
 fn setup_vcpu_initial_state(vcpu: HvVcpuId, entry: u64, mbinfo_gpa: u64) -> Result<()> {
@@ -704,7 +715,12 @@ fn load_one_segment(
     Ok(())
 }
 
-fn load_elf64(image: &[u8], elf: &ElfFile64<'_>, host_mem: *mut c_void, mem_size: usize) -> Result<LoadedKernel> {
+fn load_elf64(
+    image: &[u8],
+    elf: &ElfFile64<'_>,
+    host_mem: *mut c_void,
+    mem_size: usize,
+) -> Result<LoadedKernel> {
     match elf.kind() {
         ObjectKind::Executable => {}
         other => bail!("expected executable ELF, got {other:?}"),
@@ -739,7 +755,12 @@ fn load_elf64(image: &[u8], elf: &ElfFile64<'_>, host_mem: *mut c_void, mem_size
     })
 }
 
-fn load_elf32(image: &[u8], elf: &ElfFile32<'_>, host_mem: *mut c_void, mem_size: usize) -> Result<LoadedKernel> {
+fn load_elf32(
+    image: &[u8],
+    elf: &ElfFile32<'_>,
+    host_mem: *mut c_void,
+    mem_size: usize,
+) -> Result<LoadedKernel> {
     match elf.kind() {
         ObjectKind::Executable => {}
         other => bail!("expected executable ELF, got {other:?}"),
@@ -778,8 +799,7 @@ fn load_kernel(path: &Path, host_mem: *mut c_void, mem_size: usize) -> Result<Lo
     if is_iso_path(path) {
         bail!("ISO kernel boot is not implemented for the macOS HVF backend yet");
     }
-    let image = fs::read(path)
-        .with_context(|| format!("reading kernel ELF {}", path.display()))?;
+    let image = fs::read(path).with_context(|| format!("reading kernel ELF {}", path.display()))?;
     if let Ok(elf) = ElfFile64::parse(image.as_slice()) {
         return load_elf64(&image, &elf, host_mem, mem_size)
             .with_context(|| format!("parsing ELF64 {}", path.display()));
@@ -809,10 +829,7 @@ fn write_multiboot_info(host_mem: *mut c_void, mem_size: usize) -> Result<u64> {
 }
 
 fn write_vmcs(vcpu: HvVcpuId, field: u32, value: u64, name: &str) -> Result<()> {
-    hv_check(
-        unsafe { hv_vmx_vcpu_write_vmcs(vcpu, field, value) },
-        name,
-    )
+    hv_check(unsafe { hv_vmx_vcpu_write_vmcs(vcpu, field, value) }, name)
 }
 
 fn read_vmcs(vcpu: HvVcpuId, field: u32, name: &str) -> Result<u64> {
@@ -853,10 +870,7 @@ fn dump_invalid_guest_state(vcpu: HvVcpuId) {
         ("idtr_limit", VMCS_GUEST_IDTR_LIMIT),
         ("idtr_base", VMCS_GUEST_IDTR_BASE),
         ("activity_state", VMCS_GUEST_ACTIVITY_STATE),
-        (
-            "interruptibility_state",
-            VMCS_GUEST_INTERRUPTIBILITY_STATE,
-        ),
+        ("interruptibility_state", VMCS_GUEST_INTERRUPTIBILITY_STATE),
         (
             "vmentry_interruption_info",
             VMCS_CTRL_VMENTRY_INTERRUPTION_INFO,
@@ -976,7 +990,11 @@ struct ExitState {
 }
 
 fn read_exit_state(vcpu: HvVcpuId) -> Result<ExitState> {
-    let reason_raw = read_vmcs(vcpu, VMCS_RO_EXIT_REASON, "hv_vmx_vcpu_read_vmcs(EXIT_REASON)")?;
+    let reason_raw = read_vmcs(
+        vcpu,
+        VMCS_RO_EXIT_REASON,
+        "hv_vmx_vcpu_read_vmcs(EXIT_REASON)",
+    )?;
     let qualification = read_vmcs(
         vcpu,
         VMCS_RO_EXIT_QUALIFICATION,
@@ -1027,10 +1045,7 @@ fn classify_exit(vcpu: HvVcpuId, exit_state: &ExitState) -> Result<ExitReason> {
                 for (i, b) in data.iter_mut().enumerate() {
                     *b = ((rax >> (i * 8)) & 0xff) as u8;
                 }
-                ExitReason::IoOut {
-                    port,
-                    data,
-                }
+                ExitReason::IoOut { port, data }
             }
         }
         VMX_EXIT_REASON_EPT_VIOLATION => {
@@ -1042,10 +1057,7 @@ fn classify_exit(vcpu: HvVcpuId, exit_state: &ExitState) -> Result<ExitReason> {
                 for (i, b) in data.iter_mut().enumerate() {
                     *b = ((rax >> (i * 8)) & 0xff) as u8;
                 }
-                ExitReason::MmioWrite {
-                    addr,
-                    data,
-                }
+                ExitReason::MmioWrite { addr, data }
             } else {
                 ExitReason::MmioRead { addr, len: 4 }
             }
@@ -1069,7 +1081,14 @@ fn advance_guest_rip(vcpu: HvVcpuId, instr_len: u64) -> Result<()> {
     )
 }
 
-fn apply_cpuid_policy(_leaf: u32, _subleaf: u32, _eax: &mut u32, _ebx: &mut u32, _ecx: &mut u32, _edx: &mut u32) {
+fn apply_cpuid_policy(
+    _leaf: u32,
+    _subleaf: u32,
+    _eax: &mut u32,
+    _ebx: &mut u32,
+    _ecx: &mut u32,
+    _edx: &mut u32,
+) {
     // Placeholder for future VeerOS-specific CPUID filtering.
 }
 
@@ -1112,7 +1131,12 @@ fn write_rax_low(vcpu: HvVcpuId, len: usize, value: u64) -> Result<()> {
     write_reg(vcpu, HV_X86_RAX, merged, "hv_vcpu_write_register(RAX)")
 }
 
-fn emulate_io_exit_default(vcpu: HvVcpuId, exit: &ExitReason, instr_len: u64, uart: &mut HvfUart16550) -> Result<bool> {
+fn emulate_io_exit_default(
+    vcpu: HvVcpuId,
+    exit: &ExitReason,
+    instr_len: u64,
+    uart: &mut HvfUart16550,
+) -> Result<bool> {
     match exit {
         ExitReason::IoIn { port, len } => {
             let val = if *len == 1 {
@@ -1345,15 +1369,28 @@ fn dispatch_exit(
 
     let exit = classify_exit(vcpu, exit_state)?;
     if emulate_io_exit_default(vcpu, &exit, exit_state.instr_len, uart)? {
-        return Ok(ExitDispatch::Handled(format!("handled IO exit: {:?}", exit)));
+        return Ok(ExitDispatch::Handled(format!(
+            "handled IO exit: {:?}",
+            exit
+        )));
     }
-    if let Some(msg) = emulate_mmio_exit_default(vcpu, &exit, exit_state.instr_len, lapic, ioapic)? {
+    if let Some(msg) = emulate_mmio_exit_default(vcpu, &exit, exit_state.instr_len, lapic, ioapic)?
+    {
         return Ok(ExitDispatch::Handled(msg));
     }
     Ok(ExitDispatch::Stop(exit))
 }
 
-fn write_flat_seg(vcpu: HvVcpuId, selector: u16, sel_field: u32, limit_field: u32, base_field: u32, ar_field: u32, ar: u32, name: &str) -> Result<()> {
+fn write_flat_seg(
+    vcpu: HvVcpuId,
+    selector: u16,
+    sel_field: u32,
+    limit_field: u32,
+    base_field: u32,
+    ar_field: u32,
+    ar: u32,
+    name: &str,
+) -> Result<()> {
     write_vmcs(vcpu, sel_field, selector as u64, name)?;
     // Use 0xFFFF for protected mode segment limits (matches GDT and guest state dump)
     write_vmcs(vcpu, limit_field, 0xFFFF, name)?;
@@ -1409,10 +1446,25 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
         desired_cr4
     };
 
-    write_vmcs(vcpu, VMCS_GUEST_CR0, guest_cr0, "hv_vmx_vcpu_write_vmcs(GUEST_CR0)")?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_CR0,
+        guest_cr0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_CR0)",
+    )?;
     write_vmcs(vcpu, VMCS_GUEST_CR3, 0, "hv_vmx_vcpu_write_vmcs(GUEST_CR3)")?;
-    write_vmcs(vcpu, VMCS_GUEST_CR4, guest_cr4, "hv_vmx_vcpu_write_vmcs(GUEST_CR4)")?;
-    write_vmcs(vcpu, VMCS_GUEST_IA32_EFER, 0, "hv_vmx_vcpu_write_vmcs(GUEST_IA32_EFER)")?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_CR4,
+        guest_cr4,
+        "hv_vmx_vcpu_write_vmcs(GUEST_CR4)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_IA32_EFER,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_IA32_EFER)",
+    )?;
 
     // Access-rights bits align with Intel VMCS segment AR format.
     // Code: type=0xB (exec/read/accessed), S=1, P=1, D/B=1, G=1.
@@ -1421,7 +1473,7 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
     let data_ar = 0xC093_u32;
     // 32-bit available TSS, present. Required for valid VM-entry in protected mode.
     let tr_ar = 0x008B_u32; // Present, available 32-bit TSS
-    // Mark LDTR unusable (bit 16 = 1, all others 0)
+                            // Mark LDTR unusable (bit 16 = 1, all others 0)
     let ldtr_ar = 1u32 << 16;
 
     write_flat_seg(
@@ -1487,22 +1539,82 @@ fn setup_vmcs_protected_mode_state(vcpu: HvVcpuId) -> Result<()> {
     )?;
 
     // Task Register (TR): selector must be nonzero, AR must be present, type=0xB (available 32-bit TSS), limit >= 0x67, base=0
-    write_vmcs(vcpu, VMCS_GUEST_TR_SELECTOR, 0x18, "hv_vmx_vcpu_write_vmcs(GUEST_TR_SELECTOR)")?;
-    write_vmcs(vcpu, VMCS_GUEST_TR_LIMIT, 0x67, "hv_vmx_vcpu_write_vmcs(GUEST_TR_LIMIT)")?;
-    write_vmcs(vcpu, VMCS_GUEST_TR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_TR_BASE)")?;
-    write_vmcs(vcpu, VMCS_GUEST_TR_AR, tr_ar as u64, "hv_vmx_vcpu_write_vmcs(GUEST_TR_AR)")?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_TR_SELECTOR,
+        0x18,
+        "hv_vmx_vcpu_write_vmcs(GUEST_TR_SELECTOR)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_TR_LIMIT,
+        0x67,
+        "hv_vmx_vcpu_write_vmcs(GUEST_TR_LIMIT)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_TR_BASE,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_TR_BASE)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_TR_AR,
+        tr_ar as u64,
+        "hv_vmx_vcpu_write_vmcs(GUEST_TR_AR)",
+    )?;
 
     // LDTR: selector=0, AR unusable (bit 16 set), limit=0, base=0
-    write_vmcs(vcpu, VMCS_GUEST_LDTR_SELECTOR, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_SELECTOR)")?;
-    write_vmcs(vcpu, VMCS_GUEST_LDTR_LIMIT, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_LIMIT)")?;
-    write_vmcs(vcpu, VMCS_GUEST_LDTR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_BASE)")?;
-    write_vmcs(vcpu, VMCS_GUEST_LDTR_AR, ldtr_ar as u64, "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_AR)")?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_LDTR_SELECTOR,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_SELECTOR)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_LDTR_LIMIT,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_LIMIT)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_LDTR_BASE,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_BASE)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_LDTR_AR,
+        ldtr_ar as u64,
+        "hv_vmx_vcpu_write_vmcs(GUEST_LDTR_AR)",
+    )?;
 
-    write_vmcs(vcpu, VMCS_GUEST_GDTR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_GDTR_BASE)")?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_GDTR_BASE,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_GDTR_BASE)",
+    )?;
     // Null + code + data + TSS descriptor (selector 0x18 => bytes 0x18..0x1f).
-    write_vmcs(vcpu, VMCS_GUEST_GDTR_LIMIT, 0x1f, "hv_vmx_vcpu_write_vmcs(GUEST_GDTR_LIMIT)")?;
-    write_vmcs(vcpu, VMCS_GUEST_IDTR_BASE, 0, "hv_vmx_vcpu_write_vmcs(GUEST_IDTR_BASE)")?;
-    write_vmcs(vcpu, VMCS_GUEST_IDTR_LIMIT, 0x3ff, "hv_vmx_vcpu_write_vmcs(GUEST_IDTR_LIMIT)")?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_GDTR_LIMIT,
+        0x1f,
+        "hv_vmx_vcpu_write_vmcs(GUEST_GDTR_LIMIT)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_IDTR_BASE,
+        0,
+        "hv_vmx_vcpu_write_vmcs(GUEST_IDTR_BASE)",
+    )?;
+    write_vmcs(
+        vcpu,
+        VMCS_GUEST_IDTR_LIMIT,
+        0x3ff,
+        "hv_vmx_vcpu_write_vmcs(GUEST_IDTR_LIMIT)",
+    )?;
 
     Ok(())
 }
@@ -1701,8 +1813,10 @@ pub fn vcpu_probe() -> Result<()> {
 
     let mut vcpu_id: HvVcpuId = 0;
     let mut exit_ptr: *mut c_void = ptr::null_mut();
-    let (create_vcpu_rc, create_vcpu_diag) =
-        hv_vcpu_create_compat(&mut vcpu_id as *mut HvVcpuId, &mut exit_ptr as *mut *mut c_void);
+    let (create_vcpu_rc, create_vcpu_diag) = hv_vcpu_create_compat(
+        &mut vcpu_id as *mut HvVcpuId,
+        &mut exit_ptr as *mut *mut c_void,
+    );
 
     if create_vcpu_rc != HV_SUCCESS {
         let _ = unsafe { hv_vm_destroy() };
@@ -1746,7 +1860,6 @@ fn read_reg(vcpu: HvVcpuId, reg: u32, name: &str) -> Result<u64> {
     Ok(value)
 }
 
-
 fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
     let vcpu = vcpu_state.id;
     let run_once = std::env::var_os("VEER_VM_HVF_RUN_ONCE").is_some();
@@ -1755,7 +1868,10 @@ fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
     if let Some(seed) = std::env::var_os("VEER_VM_HVF_UART_RX") {
         let s = seed.to_string_lossy();
         uart.preload_rx_bytes(s.as_bytes());
-        eprintln!("[veer-vm] preloaded {} UART RX bytes from VEER_VM_HVF_UART_RX", s.len());
+        eprintln!(
+            "[veer-vm] preloaded {} UART RX bytes from VEER_VM_HVF_UART_RX",
+            s.len()
+        );
     }
     if let Some(path) = std::env::var_os("VEER_VM_HVF_UART_RX_FILE") {
         let p = std::path::PathBuf::from(path);
@@ -1856,24 +1972,28 @@ fn run_vcpu_placeholder(vcpu_state: &mut VcpuState) -> Result<()> {
                 eprintln!("[veer-vm] {}", msg);
                 continue;
             }
-            ExitDispatch::Stop(exit) => {
-                match exit {
-                    ExitReason::Hlt => {
-                        set_halted(vcpu_state, true)?;
-                        eprintln!("[veer-vm] guest entered HLT state at RIP={:#x}", rip);
-                        continue;
-                    }
-                    ExitReason::Shutdown => {
-                        set_activity_state(vcpu, VMCS_ACTIVITY_STATE_SHUTDOWN)?;
-                        eprintln!("[veer-vm] HVF run-once returned, RIP={:#x}, exit={:?}", rip, exit);
-                        return Ok(());
-                    }
-                    _ => {
-                        eprintln!("[veer-vm] HVF run-once returned, RIP={:#x}, exit={:?}", rip, exit);
-                        return Ok(());
-                    }
+            ExitDispatch::Stop(exit) => match exit {
+                ExitReason::Hlt => {
+                    set_halted(vcpu_state, true)?;
+                    eprintln!("[veer-vm] guest entered HLT state at RIP={:#x}", rip);
+                    continue;
                 }
-            }
+                ExitReason::Shutdown => {
+                    set_activity_state(vcpu, VMCS_ACTIVITY_STATE_SHUTDOWN)?;
+                    eprintln!(
+                        "[veer-vm] HVF run-once returned, RIP={:#x}, exit={:?}",
+                        rip, exit
+                    );
+                    return Ok(());
+                }
+                _ => {
+                    eprintln!(
+                        "[veer-vm] HVF run-once returned, RIP={:#x}, exit={:?}",
+                        rip, exit
+                    );
+                    return Ok(());
+                }
+            },
         }
     }
 }
@@ -1941,7 +2061,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     // Phase 2: Multi-vCPU support.
     let num_vcpus = cfg.cpus;
     let mut vcpu_states = Vec::new();
-    
+
     for cpu_idx in 0..num_vcpus {
         let mut vcpu_id: HvVcpuId = 0;
         let mut exit_ptr: *mut c_void = ptr::null_mut();
@@ -1973,17 +2093,19 @@ pub fn run(cfg: VmConfig) -> Result<()> {
                 hvf_preflight_hints()
             );
         }
-        
-        setup_vcpu_initial_state(vcpu_id, loaded.entry, mbinfo_gpa)
-            .context(format!("programming initial vCPU {} register state", cpu_idx))?;
-        
+
+        setup_vcpu_initial_state(vcpu_id, loaded.entry, mbinfo_gpa).context(format!(
+            "programming initial vCPU {} register state",
+            cpu_idx
+        ))?;
+
         vcpu_states.push(VcpuState {
             id: vcpu_id,
             halted: false,
             pending_interrupt: None,
         });
     }
-    
+
     let mut vm_guard = HvfVm {
         memory: guest_memory,
         vcpus: vcpu_states,

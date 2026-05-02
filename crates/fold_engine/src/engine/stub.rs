@@ -11,7 +11,9 @@ use crate::state::FoldRecord;
 pub struct StubEngine;
 
 impl StubEngine {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Engine for StubEngine {
@@ -21,5 +23,7 @@ impl Engine for StubEngine {
     fn stop(&self, _rec: &FoldRecord) -> Result<()> {
         bail!("fold_engine: host platform not yet supported")
     }
-    fn is_alive(&self, _rec: &FoldRecord) -> bool { false }
+    fn is_alive(&self, _rec: &FoldRecord) -> bool {
+        false
+    }
 }

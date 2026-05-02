@@ -70,7 +70,11 @@ pub const fn active_distribution() -> Distribution {
         return Distribution::RealTime;
     }
 
-    #[cfg(all(not(feature = "dist-full"), not(feature = "dist-rt"), feature = "dist-app"))]
+    #[cfg(all(
+        not(feature = "dist-full"),
+        not(feature = "dist-rt"),
+        feature = "dist-app"
+    ))]
     {
         return Distribution::Application;
     }

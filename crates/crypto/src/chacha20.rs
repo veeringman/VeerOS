@@ -3,7 +3,7 @@
 //! `no_std`, `no_alloc`, constant-time. Software-only, runs on all VeerOS
 //! targets from riscv32imc (ESP32-C3/C6) to aarch64 (RPi 5) to x86-64.
 
-use crate::{Aead, CryptoError, zeroize};
+use crate::{zeroize, Aead, CryptoError};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ChaCha20 stream cipher
@@ -18,10 +18,18 @@ fn le32(b: &[u8]) -> u32 {
 
 #[inline(always)]
 fn quarter_round(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
-    s[a] = s[a].wrapping_add(s[b]); s[d] ^= s[a]; s[d] = s[d].rotate_left(16);
-    s[c] = s[c].wrapping_add(s[d]); s[b] ^= s[c]; s[b] = s[b].rotate_left(12);
-    s[a] = s[a].wrapping_add(s[b]); s[d] ^= s[a]; s[d] = s[d].rotate_left(8);
-    s[c] = s[c].wrapping_add(s[d]); s[b] ^= s[c]; s[b] = s[b].rotate_left(7);
+    s[a] = s[a].wrapping_add(s[b]);
+    s[d] ^= s[a];
+    s[d] = s[d].rotate_left(16);
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] ^= s[c];
+    s[b] = s[b].rotate_left(12);
+    s[a] = s[a].wrapping_add(s[b]);
+    s[d] ^= s[a];
+    s[d] = s[d].rotate_left(8);
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] ^= s[c];
+    s[b] = s[b].rotate_left(7);
 }
 
 /// Generate one 64-byte ChaCha20 keystream block.
@@ -30,29 +38,38 @@ fn quarter_round(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
 #[inline(never)]
 pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     let mut s = [0u32; 16];
-    s[0] = SIGMA[0]; s[1] = SIGMA[1]; s[2] = SIGMA[2]; s[3] = SIGMA[3];
-    for i in 0..8 { s[4 + i] = le32(&key[i * 4..]); }
+    s[0] = SIGMA[0];
+    s[1] = SIGMA[1];
+    s[2] = SIGMA[2];
+    s[3] = SIGMA[3];
+    for i in 0..8 {
+        s[4 + i] = le32(&key[i * 4..]);
+    }
     s[12] = counter;
-    for i in 0..3 { s[13 + i] = le32(&nonce[i * 4..]); }
+    for i in 0..3 {
+        s[13 + i] = le32(&nonce[i * 4..]);
+    }
 
     let initial = s;
 
     // 20 rounds = 10 double-rounds
     for _ in 0..10 {
         // Column rounds
-        quarter_round(&mut s, 0, 4,  8, 12);
-        quarter_round(&mut s, 1, 5,  9, 13);
+        quarter_round(&mut s, 0, 4, 8, 12);
+        quarter_round(&mut s, 1, 5, 9, 13);
         quarter_round(&mut s, 2, 6, 10, 14);
         quarter_round(&mut s, 3, 7, 11, 15);
         // Diagonal rounds
         quarter_round(&mut s, 0, 5, 10, 15);
         quarter_round(&mut s, 1, 6, 11, 12);
-        quarter_round(&mut s, 2, 7,  8, 13);
-        quarter_round(&mut s, 3, 4,  9, 14);
+        quarter_round(&mut s, 2, 7, 8, 13);
+        quarter_round(&mut s, 3, 4, 9, 14);
     }
 
     // Add initial state
-    for i in 0..16 { s[i] = s[i].wrapping_add(initial[i]); }
+    for i in 0..16 {
+        s[i] = s[i].wrapping_add(initial[i]);
+    }
 
     let mut out = [0u8; 64];
     for i in 0..16 {
@@ -69,7 +86,9 @@ pub fn chacha20_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], data: &mut [
     while off < data.len() {
         let block = chacha20_block(key, ctr, nonce);
         let take = (data.len() - off).min(64);
-        for i in 0..take { data[off + i] ^= block[i]; }
+        for i in 0..take {
+            data[off + i] ^= block[i];
+        }
         off += take;
         ctr = ctr.wrapping_add(1);
     }
@@ -81,9 +100,9 @@ pub fn chacha20_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], data: &mut [
 
 /// Poly1305 one-time authenticator (internal to this module).
 struct Poly1305 {
-    r: [u32; 5],   // Clamped key in radix-2^26
-    s: [u32; 4],   // Second half of one-time key
-    h: [u32; 5],   // Accumulator in radix-2^26
+    r: [u32; 5], // Clamped key in radix-2^26
+    s: [u32; 4], // Second half of one-time key
+    h: [u32; 5], // Accumulator in radix-2^26
 }
 
 impl Poly1305 {
@@ -92,9 +111,13 @@ impl Poly1305 {
         // Clamp r (RFC 8439 §2.5)
         let mut rb = [0u8; 16];
         rb.copy_from_slice(&key[..16]);
-        rb[3]  &= 0x0f;  rb[7]  &= 0x0f;
-        rb[11] &= 0x0f;  rb[15] &= 0x0f;
-        rb[4]  &= 0xfc;  rb[8]  &= 0xfc;  rb[12] &= 0xfc;
+        rb[3] &= 0x0f;
+        rb[7] &= 0x0f;
+        rb[11] &= 0x0f;
+        rb[15] &= 0x0f;
+        rb[4] &= 0xfc;
+        rb[8] &= 0xfc;
+        rb[12] &= 0xfc;
 
         let t0 = le32(&rb[0..]);
         let t1 = le32(&rb[4..]);
@@ -104,12 +127,17 @@ impl Poly1305 {
         Self {
             r: [
                 t0 & 0x3ff_ffff,
-                ((t0 >> 26) | (t1 << 6))  & 0x3ff_ffff,
+                ((t0 >> 26) | (t1 << 6)) & 0x3ff_ffff,
                 ((t1 >> 20) | (t2 << 12)) & 0x3ff_ffff,
                 ((t2 >> 14) | (t3 << 18)) & 0x3ff_ffff,
                 t3 >> 8,
             ],
-            s: [le32(&key[16..]), le32(&key[20..]), le32(&key[24..]), le32(&key[28..])],
+            s: [
+                le32(&key[16..]),
+                le32(&key[20..]),
+                le32(&key[24..]),
+                le32(&key[28..]),
+            ],
             h: [0; 5],
         }
     }
@@ -130,41 +158,52 @@ impl Poly1305 {
         let t4 = n[16] as u32;
 
         // h += n (in radix-2^26)
-        self.h[0] = self.h[0].wrapping_add( t0 & 0x3ff_ffff);
-        self.h[1] = self.h[1].wrapping_add(((t0 >> 26) | (t1 << 6))  & 0x3ff_ffff);
+        self.h[0] = self.h[0].wrapping_add(t0 & 0x3ff_ffff);
+        self.h[1] = self.h[1].wrapping_add(((t0 >> 26) | (t1 << 6)) & 0x3ff_ffff);
         self.h[2] = self.h[2].wrapping_add(((t1 >> 20) | (t2 << 12)) & 0x3ff_ffff);
         self.h[3] = self.h[3].wrapping_add(((t2 >> 14) | (t3 << 18)) & 0x3ff_ffff);
         self.h[4] = self.h[4].wrapping_add((t3 >> 8) | (t4 << 24));
 
         // h *= r  (mod 2^130 − 5)
         let (r0, r1, r2, r3, r4) = (
-            self.r[0] as u64, self.r[1] as u64, self.r[2] as u64,
-            self.r[3] as u64, self.r[4] as u64,
+            self.r[0] as u64,
+            self.r[1] as u64,
+            self.r[2] as u64,
+            self.r[3] as u64,
+            self.r[4] as u64,
         );
         // Pre-multiply by 5 for the reduction: 2^130 ≡ 5 (mod p)
         let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
 
         let (h0, h1, h2, h3, h4) = (
-            self.h[0] as u64, self.h[1] as u64, self.h[2] as u64,
-            self.h[3] as u64, self.h[4] as u64,
+            self.h[0] as u64,
+            self.h[1] as u64,
+            self.h[2] as u64,
+            self.h[3] as u64,
+            self.h[4] as u64,
         );
 
-        let d0 = h0*r0 + h1*s4 + h2*s3 + h3*s2 + h4*s1;
-        let d1 = h0*r1 + h1*r0 + h2*s4 + h3*s3 + h4*s2;
-        let d2 = h0*r2 + h1*r1 + h2*r0 + h3*s4 + h4*s3;
-        let d3 = h0*r3 + h1*r2 + h2*r1 + h3*r0 + h4*s4;
-        let d4 = h0*r4 + h1*r3 + h2*r2 + h3*r1 + h4*r0;
+        let d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+        let d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
+        let d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
+        let d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
+        let d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
 
         // Partial reduction (carry chain)
-        let     c0 = d0 >> 26;  let h0 = (d0 & 0x3ff_ffff) as u32;
+        let c0 = d0 >> 26;
+        let h0 = (d0 & 0x3ff_ffff) as u32;
         let d1 = d1 + c0;
-        let     c1 = d1 >> 26;  let h1 = (d1 & 0x3ff_ffff) as u32;
+        let c1 = d1 >> 26;
+        let h1 = (d1 & 0x3ff_ffff) as u32;
         let d2 = d2 + c1;
-        let     c2 = d2 >> 26;  let h2 = (d2 & 0x3ff_ffff) as u32;
+        let c2 = d2 >> 26;
+        let h2 = (d2 & 0x3ff_ffff) as u32;
         let d3 = d3 + c2;
-        let     c3 = d3 >> 26;  let h3 = (d3 & 0x3ff_ffff) as u32;
+        let c3 = d3 >> 26;
+        let h3 = (d3 & 0x3ff_ffff) as u32;
         let d4 = d4 + c3;
-        let     c4 = d4 >> 26;  let h4 = (d4 & 0x3ff_ffff) as u32;
+        let c4 = d4 >> 26;
+        let h4 = (d4 & 0x3ff_ffff) as u32;
 
         // Wrap carry from limb4 back to limb0 (×5 because 2^130 ≡ 5)
         let mut h0 = h0.wrapping_add((c4 as u32) * 5);
@@ -191,17 +230,35 @@ impl Poly1305 {
             (self.h[0], self.h[1], self.h[2], self.h[3], self.h[4]);
 
         // Full carry propagation
-        let c = h1 >> 26; h1 &= 0x3ff_ffff; h2 += c;
-        let c = h2 >> 26; h2 &= 0x3ff_ffff; h3 += c;
-        let c = h3 >> 26; h3 &= 0x3ff_ffff; h4 += c;
-        let c = h4 >> 26; h4 &= 0x3ff_ffff; h0 += c * 5;
-        let c = h0 >> 26; h0 &= 0x3ff_ffff; h1 += c;
+        let c = h1 >> 26;
+        h1 &= 0x3ff_ffff;
+        h2 += c;
+        let c = h2 >> 26;
+        h2 &= 0x3ff_ffff;
+        h3 += c;
+        let c = h3 >> 26;
+        h3 &= 0x3ff_ffff;
+        h4 += c;
+        let c = h4 >> 26;
+        h4 &= 0x3ff_ffff;
+        h0 += c * 5;
+        let c = h0 >> 26;
+        h0 &= 0x3ff_ffff;
+        h1 += c;
 
         // Compute h − p = h − (2^130 − 5); keep h if h < p, else use h − p
-        let mut g0 = h0.wrapping_add(5); let c = g0 >> 26; g0 &= 0x3ff_ffff;
-        let mut g1 = h1.wrapping_add(c); let c = g1 >> 26; g1 &= 0x3ff_ffff;
-        let mut g2 = h2.wrapping_add(c); let c = g2 >> 26; g2 &= 0x3ff_ffff;
-        let mut g3 = h3.wrapping_add(c); let c = g3 >> 26; g3 &= 0x3ff_ffff;
+        let mut g0 = h0.wrapping_add(5);
+        let c = g0 >> 26;
+        g0 &= 0x3ff_ffff;
+        let mut g1 = h1.wrapping_add(c);
+        let c = g1 >> 26;
+        g1 &= 0x3ff_ffff;
+        let mut g2 = h2.wrapping_add(c);
+        let c = g2 >> 26;
+        g2 &= 0x3ff_ffff;
+        let mut g3 = h3.wrapping_add(c);
+        let c = g3 >> 26;
+        g3 &= 0x3ff_ffff;
         let g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
 
         // Constant-time select: mask = 0xFFFF_FFFF if h ≥ p, 0 otherwise
@@ -248,11 +305,7 @@ pub struct ChaCha20Poly1305 {
 
 /// Compute the Poly1305 tag for AEAD construction (RFC 8439 §2.8).
 #[inline(never)]
-fn poly1305_aead_tag(
-    poly_key: &[u8; 32],
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> [u8; 16] {
+fn poly1305_aead_tag(poly_key: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> [u8; 16] {
     let mut mac = Poly1305::new(poly_key);
 
     // AAD + pad to 16

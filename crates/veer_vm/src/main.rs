@@ -27,6 +27,8 @@ mod multiboot;
 #[cfg(target_os = "linux")]
 mod pci;
 #[cfg(target_os = "linux")]
+mod rv32_soft;
+#[cfg(target_os = "linux")]
 mod serial;
 #[cfg(target_os = "linux")]
 mod snapshot;
@@ -34,8 +36,6 @@ mod snapshot;
 mod termios_guard;
 #[cfg(target_os = "linux")]
 mod virtio;
-#[cfg(target_os = "linux")]
-mod rv32_soft;
 #[cfg(target_os = "linux")]
 mod vm;
 
@@ -162,6 +162,8 @@ enum ArchArg {
     X8664,
     #[value(name = "riscv32")]
     Riscv32,
+    #[value(name = "aarch64")]
+    Aarch64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -177,6 +179,7 @@ impl ArchArg {
         match self {
             ArchArg::X8664 => config::GuestArch::X86_64,
             ArchArg::Riscv32 => config::GuestArch::Riscv32,
+            ArchArg::Aarch64 => config::GuestArch::Aarch64,
         }
     }
 }
@@ -197,8 +200,7 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
         anyhow::bail!("MAC '{s}' must have 6 hex bytes separated by ':' or '-'");
     }
     for (i, p) in parts.iter().enumerate() {
-        out[i] = u8::from_str_radix(p, 16)
-            .with_context(|| format!("invalid MAC byte '{p}'"))?;
+        out[i] = u8::from_str_radix(p, 16).with_context(|| format!("invalid MAC byte '{p}'"))?;
     }
     Ok(out)
 }
@@ -261,9 +263,9 @@ fn main() -> Result<()> {
         None => {
             if cli.tap.is_some() {
                 if let Some(path) = restore_path.as_deref() {
-                    if let Some(snapshot_mac) = snapshot::load_net_mac(path)
-                        .with_context(|| format!("reading snapshot net MAC from {}", path.display()))?
-                    {
+                    if let Some(snapshot_mac) = snapshot::load_net_mac(path).with_context(|| {
+                        format!("reading snapshot net MAC from {}", path.display())
+                    })? {
                         snapshot_mac
                     } else {
                         default_mac()

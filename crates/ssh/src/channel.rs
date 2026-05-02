@@ -4,7 +4,7 @@
 //! (pty-req, shell, exec). VeerOS supports a single session channel that
 //! bridges to the shell via the `Serial` trait.
 
-use crate::{get_u32, get_string, put_u32, put_string};
+use crate::{get_string, get_u32, put_string, put_u32};
 
 /// Maximum number of simultaneous channels (1 is enough for a shell).
 pub const MAX_CHANNELS: usize = 1;
@@ -108,7 +108,12 @@ impl ChannelManager {
     }
 
     /// Allocate a channel from the client side (we know the server's channel ID).
-    pub fn alloc_client(&mut self, server_channel_id: u32, tx_window: u32, tx_max_packet: u32) -> Option<usize> {
+    pub fn alloc_client(
+        &mut self,
+        server_channel_id: u32,
+        tx_window: u32,
+        tx_max_packet: u32,
+    ) -> Option<usize> {
         for (i, ch) in self.channels.iter_mut().enumerate() {
             if ch.state == ChannelState::Free {
                 ch.state = ChannelState::Open;
@@ -333,13 +338,21 @@ impl ChannelManager {
     /// Returns bytes written into buf.
     pub fn build_channel_data(&mut self, chan_idx: usize, data: &[u8], buf: &mut [u8]) -> usize {
         let ch = &mut self.channels[chan_idx];
-        if ch.state != ChannelState::Open || data.is_empty() { return 0; }
+        if ch.state != ChannelState::Open || data.is_empty() {
+            return 0;
+        }
 
         let max_by_window = ch.tx_window as usize;
         let max_by_packet = ch.tx_max_packet.min(MAX_CHANNEL_PACKET) as usize;
         let max_by_buf = buf.len().saturating_sub(9);
-        let chunk_len = data.len().min(max_by_window).min(max_by_packet).min(max_by_buf);
-        if chunk_len == 0 { return 0; }
+        let chunk_len = data
+            .len()
+            .min(max_by_window)
+            .min(max_by_packet)
+            .min(max_by_buf);
+        if chunk_len == 0 {
+            return 0;
+        }
 
         let mut off = 0;
         buf[off] = 94; // SSH_MSG_CHANNEL_DATA

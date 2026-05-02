@@ -7,18 +7,16 @@
 #![no_std]
 #![no_main]
 
-mod trap;
 #[cfg(feature = "samples")]
 mod samples;
+mod trap;
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 
-use arch::{Console, SavedContext, TickTimer};
 #[cfg(feature = "net")]
 use arch::NetworkDevice;
-use soc_qemu_virt::{default_serial, system_timer, clint::Clint, QemuVirt};
-use microkernel::Kernel;
+use arch::{Console, SavedContext, TickTimer};
 use microkernel::alloc::Heap;
 use microkernel::channel::Channels;
 use microkernel::driver::{DriverCaps, DriverRegistry, MemRegion};
@@ -27,6 +25,7 @@ use microkernel::ipc::Ipc;
 use microkernel::task::Scheduler;
 #[cfg(feature = "shell")]
 use microkernel::task::TaskState;
+use microkernel::Kernel;
 #[cfg(feature = "net")]
 use net::{NetStack, NetStorage, TcpSerial};
 #[cfg(feature = "shell")]
@@ -35,6 +34,7 @@ use shell::{Shell, ShellEnv};
 use smoltcp::iface::SocketSet;
 #[cfg(feature = "net")]
 use smoltcp::wire::{IpCidr, Ipv4Address};
+use soc_qemu_virt::{clint::Clint, default_serial, system_timer, QemuVirt};
 
 use panic_halt as _;
 
@@ -162,9 +162,12 @@ use microkernel::fat32::Fat32;
 
 pub(crate) struct Fat32Cell(pub UnsafeCell<[Fat32; microkernel::fat32::MAX_FAT32]>);
 unsafe impl Sync for Fat32Cell {}
-pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new(
-    [Fat32::new(), Fat32::new(), Fat32::new(), Fat32::new()]
-));
+pub(crate) static FAT32: Fat32Cell = Fat32Cell(UnsafeCell::new([
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+    Fat32::new(),
+]));
 
 // ---------------------------------------------------------------------------
 // Mount table
@@ -209,10 +212,10 @@ pub(crate) static AUDIT: AuditCell = AuditCell(UnsafeCell::new(AuditLog::new()))
 // ---------------------------------------------------------------------------
 
 use microkernel::agent::AgentTable;
-use microkernel::intent::IntentEngine;
-use microkernel::memory_engine::MemoryEngine;
 use microkernel::fabric::ExecutionFabric;
+use microkernel::intent::IntentEngine;
 use microkernel::intent_sched::IntentScheduler;
+use microkernel::memory_engine::MemoryEngine;
 
 pub(crate) struct AgentCell(pub UnsafeCell<AgentTable>);
 unsafe impl Sync for AgentCell {}
@@ -224,7 +227,8 @@ pub(crate) static INTENTS: IntentCell = IntentCell(UnsafeCell::new(IntentEngine:
 
 pub(crate) struct MemoryEngineCell(pub UnsafeCell<MemoryEngine>);
 unsafe impl Sync for MemoryEngineCell {}
-pub(crate) static MEMORY_ENGINE: MemoryEngineCell = MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
+pub(crate) static MEMORY_ENGINE: MemoryEngineCell =
+    MemoryEngineCell(UnsafeCell::new(MemoryEngine::new()));
 
 pub(crate) struct FabricCell(pub UnsafeCell<ExecutionFabric>);
 unsafe impl Sync for FabricCell {}
@@ -232,7 +236,8 @@ pub(crate) static FABRIC: FabricCell = FabricCell(UnsafeCell::new(ExecutionFabri
 
 pub(crate) struct IntentSchedCell(pub UnsafeCell<IntentScheduler>);
 unsafe impl Sync for IntentSchedCell {}
-pub(crate) static INTENT_SCHED: IntentSchedCell = IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
+pub(crate) static INTENT_SCHED: IntentSchedCell =
+    IntentSchedCell(UnsafeCell::new(IntentScheduler::new()));
 
 // ---------------------------------------------------------------------------
 // Static timer handle (used by the trap dispatcher)
@@ -445,9 +450,7 @@ static NET_SOCKETS: SocketSetCell = SocketSetCell(UnsafeCell::new(None));
 #[cfg(feature = "net")]
 fn net_poll() -> bool {
     unsafe {
-        if let (Some(stack), Some(sockets)) =
-            (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
-        {
+        if let (Some(stack), Some(sockets)) = (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get()) {
             let ticks = (*SCHEDULER.0.get()).ticks;
             stack.poll(sockets, ticks);
         }
@@ -494,7 +497,13 @@ fn net_task() -> ! {
     let _ = writeln!(
         con,
         "[net] found NIC  MMIO-v{}  MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        nic.mmio_version(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        nic.mmio_version(),
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
     );
 
     // ── initialise smoltcp ───────────────────────────────────
@@ -527,9 +536,7 @@ fn net_task() -> ! {
     loop {
         // Start listening.
         unsafe {
-            if let (Some(stack), Some(sockets)) =
-                (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get())
-            {
+            if let (Some(stack), Some(sockets)) = (&mut *NET.0.get(), &mut *NET_SOCKETS.0.get()) {
                 stack.listen(sockets, REMOTE_SHELL_PORT);
             }
         }
@@ -538,9 +545,7 @@ fn net_task() -> ! {
         loop {
             net_poll();
             let connected = unsafe {
-                if let (Some(stack), Some(sockets)) =
-                    (&*NET.0.get(), &*NET_SOCKETS.0.get())
-                {
+                if let (Some(stack), Some(sockets)) = (&*NET.0.get(), &*NET_SOCKETS.0.get()) {
                     stack.is_connected(sockets)
                 } else {
                     false
@@ -557,7 +562,8 @@ fn net_task() -> ! {
         // ── authenticate, then run the shell over TCP ────────
         unsafe {
             let handle = (*NET.0.get()).as_ref().unwrap().tcp_handle();
-            let socket_set_ptr = (*NET_SOCKETS.0.get()).as_mut().unwrap() as *mut SocketSet<'static>;
+            let socket_set_ptr =
+                (*NET_SOCKETS.0.get()).as_mut().unwrap() as *mut SocketSet<'static>;
             let tcp_serial = TcpSerial::new(handle, socket_set_ptr, net_poll, net_poll_unlock);
             let mut tcp_con = Console::new(tcp_serial);
 
@@ -576,8 +582,8 @@ fn net_task() -> ! {
                         wifi_cmd: None,
                         bt_cmd: None,
                         zigbee_cmd: None,
-        sensor_cmd: None,
-        sensor_cmd: None,
+                        sensor_cmd: None,
+                        sensor_cmd: None,
                         get_current_user: Some(get_current_user),
                         get_user_list: Some(write_user_list),
                         vfs_list_dir: Some(vfs_list_dir),
@@ -845,7 +851,9 @@ fn vfs_list_dir(path: &str, w: &mut dyn core::fmt::Write) {
                     child = c.next_sibling;
                 }
             }
-            _ => { let _ = writeln!(w, "ls: '{}': no such directory", path); }
+            _ => {
+                let _ = writeln!(w, "ls: '{}': no such directory", path);
+            }
         }
     }
 }
@@ -858,9 +866,13 @@ fn vfs_read_file(path: &str, buf: &mut [u8]) -> usize {
         let ramfs = &*RAMFS.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return 0; }
+        if id == NO_INODE {
+            return 0;
+        }
         let inode = &inodes.inodes[id as usize];
-        if inode.kind != InodeKind::File { return 0; }
+        if inode.kind != InodeKind::File {
+            return 0;
+        }
         ramfs.read(inodes, id, 0, buf)
     }
 }
@@ -879,7 +891,9 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
                 let parent_path = if slash == 0 { "/" } else { &path[..slash] };
                 let name = &path[slash + 1..];
                 let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-                if parent == NO_INODE || name.is_empty() { return false; }
+                if parent == NO_INODE || name.is_empty() {
+                    return false;
+                }
                 id = match inodes.create_file_in(parent, name) {
                     Some(i) => i,
                     None => return false,
@@ -893,7 +907,9 @@ fn vfs_write_file(path: &str, data: &[u8], append: bool) -> bool {
             }
         }
         let inode = &inodes.inodes[id as usize];
-        if inode.kind != InodeKind::File { return false; }
+        if inode.kind != InodeKind::File {
+            return false;
+        }
         let offset = if append { inode.size } else { 0 };
         if !append {
             ramfs.truncate(inodes, id, 0);
@@ -912,7 +928,9 @@ fn vfs_mkdir(path: &str) -> bool {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.mkdir_in(parent, name).is_some()
         } else {
             inodes.mkdir_in(cwd, path).is_some()
@@ -956,7 +974,9 @@ fn vfs_unlink(path: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         inodes.unlink(id)
     }
 }
@@ -968,13 +988,17 @@ fn vfs_rename(old: &str, new: &str) -> bool {
         let inodes = &mut *INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
         let id = inodes.resolve(cwd, old).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
+        if id == NO_INODE {
+            return false;
+        }
         // Resolve the new parent and name.
         if let Some(slash) = new.rfind('/') {
             let parent_path = if slash == 0 { "/" } else { &new[..slash] };
             let name = &new[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.rename(id, parent, name)
         } else {
             inodes.rename(id, cwd, new)
@@ -999,8 +1023,12 @@ fn vfs_chdir(path: &str) -> bool {
         let procs = &mut *PROCESSES.0.get();
         let cwd = procs.processes[0].cwd;
         let id = inodes.resolve(cwd, path).unwrap_or(NO_INODE);
-        if id == NO_INODE { return false; }
-        if inodes.inodes[id as usize].kind != InodeKind::Directory { return false; }
+        if id == NO_INODE {
+            return false;
+        }
+        if inodes.inodes[id as usize].kind != InodeKind::Directory {
+            return false;
+        }
         procs.processes[0].cwd = id;
         true
     }
@@ -1008,11 +1036,13 @@ fn vfs_chdir(path: &str) -> bool {
 
 #[cfg(feature = "shell")]
 fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
-    use microkernel::vfs::{InodeKind, ROOT_INODE, NO_INODE};
+    use microkernel::vfs::{InodeKind, NO_INODE, ROOT_INODE};
     unsafe {
         let inodes = &*INODES.0.get();
         let cwd = (*PROCESSES.0.get()).processes[0].cwd;
-        let start = if path == "/" { ROOT_INODE } else {
+        let start = if path == "/" {
+            ROOT_INODE
+        } else {
             inodes.resolve(cwd, path).unwrap_or(NO_INODE)
         };
         if start == NO_INODE {
@@ -1029,7 +1059,15 @@ fn vfs_tree(path: &str, w: &mut dyn core::fmt::Write) {
             let _ = writeln!(w, "tree: '{}': not a directory", path);
             return;
         }
-        let _ = writeln!(w, "{}", if path == "/" || path == "." { "/" } else { path });
+        let _ = writeln!(
+            w,
+            "{}",
+            if path == "/" || path == "." {
+                "/"
+            } else {
+                path
+            }
+        );
         // Collect children into a small temp buffer, then push reversed.
         let mut kids: [u16; 64] = [NO_INODE; 64];
         let mut nk = 0usize;
@@ -1098,7 +1136,9 @@ fn vfs_touch(path: &str) -> bool {
             let parent_path = if slash == 0 { "/" } else { &path[..slash] };
             let name = &path[slash + 1..];
             let parent = inodes.resolve(cwd, parent_path).unwrap_or(NO_INODE);
-            if parent == NO_INODE || name.is_empty() { return false; }
+            if parent == NO_INODE || name.is_empty() {
+                return false;
+            }
             inodes.create_file_in(parent, name).is_some()
         } else {
             inodes.create_file_in(cwd, path).is_some()
@@ -1122,7 +1162,14 @@ fn mount_list(w: &mut dyn core::fmt::Write) {
                     microkernel::vfs::FsType::RamFs => "ramfs",
                     _ => "none",
                 };
-                let _ = writeln!(w, "  {} on {} type {} (slot {})", m.label_str(), path, fstype, i + 1);
+                let _ = writeln!(
+                    w,
+                    "  {} on {} type {} (slot {})",
+                    m.label_str(),
+                    path,
+                    fstype,
+                    i + 1
+                );
                 found = true;
             }
         }
@@ -1135,7 +1182,10 @@ fn mount_list(w: &mut dyn core::fmt::Write) {
 #[cfg(feature = "shell")]
 fn lsblk_info(w: &mut dyn core::fmt::Write) {
     let _ = writeln!(w, "  NAME   TYPE   SIZE");
-    let _ = writeln!(w, "  (no block devices — QEMU virtio-blk not yet implemented)");
+    let _ = writeln!(
+        w,
+        "  (no block devices — QEMU virtio-blk not yet implemented)"
+    );
 }
 
 #[cfg(feature = "shell")]
@@ -1250,35 +1300,53 @@ pub extern "C" fn _rust_start() -> ! {
         let reg = &mut *DRIVERS.0.get();
 
         // NS16550a UART
-        let uart = reg.register("uart0", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
-        reg.grant_mmio(uart, MemRegion::new(0x1000_0000, 0x100)).ok();
+        let uart = reg
+            .register(
+                "uart0",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
+        reg.grant_mmio(uart, MemRegion::new(0x1000_0000, 0x100))
+            .ok();
         reg.grant_irq(uart, 10); // UART IRQ on QEMU virt
 
         // CLINT timer
-        let clint = reg.register("clint", DriverCaps {
-            mmio_regions: 1,
-            uses_interrupts: true,
-            uses_dma: false,
-            uses_network: false,
-        }).unwrap();
-        reg.grant_mmio(clint, MemRegion::new(0x0200_0000, 0x10000)).ok();
+        let clint = reg
+            .register(
+                "clint",
+                DriverCaps {
+                    mmio_regions: 1,
+                    uses_interrupts: true,
+                    uses_dma: false,
+                    uses_network: false,
+                },
+            )
+            .unwrap();
+        reg.grant_mmio(clint, MemRegion::new(0x0200_0000, 0x10000))
+            .ok();
         reg.grant_irq(clint, 7); // machine timer
 
         // VIRTIO-NET
         #[cfg(feature = "net")]
         {
-            let vnet = reg.register("virtio-net", DriverCaps {
-                mmio_regions: 1,
-                uses_interrupts: true,
-                uses_dma: true,
-                uses_network: true,
-            }).unwrap();
-            reg.grant_mmio(vnet, MemRegion::new(0x1000_1000, 0x1000)).ok();
+            let vnet = reg
+                .register(
+                    "virtio-net",
+                    DriverCaps {
+                        mmio_regions: 1,
+                        uses_interrupts: true,
+                        uses_dma: true,
+                        uses_network: true,
+                    },
+                )
+                .unwrap();
+            reg.grant_mmio(vnet, MemRegion::new(0x1000_1000, 0x1000))
+                .ok();
             reg.grant_irq(vnet, 1);
         }
     }
@@ -1286,7 +1354,11 @@ pub extern "C" fn _rust_start() -> ! {
     let driver_count = 3;
     #[cfg(not(feature = "net"))]
     let driver_count = 2;
-    let _ = writeln!(con, "[boot] driver registry: {} drivers registered", driver_count);
+    let _ = writeln!(
+        con,
+        "[boot] driver registry: {} drivers registered",
+        driver_count
+    );
 
     // ── install trap vector ──────────────────────────────────
     #[cfg(target_arch = "riscv32")]
@@ -1330,7 +1402,9 @@ pub extern "C" fn _rust_start() -> ! {
         // Create root (/) and standard directories (/dev, /tmp, /etc).
         inodes.init_root();
         // Create device nodes.
-        let dev_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/dev").unwrap_or(microkernel::vfs::NO_INODE);
+        let dev_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/dev")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if dev_id != microkernel::vfs::NO_INODE {
             inodes.create_device_in(dev_id, "null", 0, 0);
             inodes.create_device_in(dev_id, "zero", 0, 1);
@@ -1340,13 +1414,19 @@ pub extern "C" fn _rust_start() -> ! {
             inodes.create_device_in(dev_id, "mouse", 1, 1);
         }
         // Populate /etc/motd and /etc/hostname.
-        let etc_id = inodes.resolve(microkernel::vfs::ROOT_INODE, "/etc").unwrap_or(microkernel::vfs::NO_INODE);
+        let etc_id = inodes
+            .resolve(microkernel::vfs::ROOT_INODE, "/etc")
+            .unwrap_or(microkernel::vfs::NO_INODE);
         if etc_id != microkernel::vfs::NO_INODE {
             ramfs.create_with_content(inodes, etc_id, "motd", b"Welcome to VeerOS!\n");
             ramfs.create_with_content(inodes, etc_id, "hostname", b"veeros-qemu\n");
         }
     }
-    let _ = writeln!(con, "[boot] VFS initialised (ramfs {} KiB)", microkernel::ramfs::RAMFS_POOL_SIZE / 1024);
+    let _ = writeln!(
+        con,
+        "[boot] VFS initialised (ramfs {} KiB)",
+        microkernel::ramfs::RAMFS_POOL_SIZE / 1024
+    );
 
     // ── scheduler + tasks ────────────────────────────────────
     unsafe {
@@ -1363,7 +1443,8 @@ pub extern "C" fn _rust_start() -> ! {
         // Idle task (priority 0).
         let sb = IDLE_STACK.0.as_ptr() as usize;
         let st = sb + IDLE_STACK.0.len();
-        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0) {
+        if let Some(idx) = sched.create_task("idle", idle_task as *const () as usize, st, sb, 0, 0)
+        {
             sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
         }
 
@@ -1372,7 +1453,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = SHELL_STACK.0.as_ptr() as usize;
             let st = sb + SHELL_STACK.0.len();
-            if let Some(idx) = sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -1382,7 +1465,9 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = NET_TASK_STACK.0.as_ptr() as usize;
             let st = sb + NET_TASK_STACK.0.len();
-            if let Some(idx) = sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0) {
+            if let Some(idx) =
+                sched.create_task("net", net_task as *const () as usize, st, sb, 1, 0)
+            {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -1392,26 +1477,54 @@ pub extern "C" fn _rust_start() -> ! {
         {
             let sb = HELLO_STACK.0.as_ptr() as usize;
             let st = sb + HELLO_STACK.0.len();
-            if let Some(idx) = sched.create_task("hello", samples::hello_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "hello",
+                samples::hello_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
 
             let sb = TIMER_STACK.0.as_ptr() as usize;
             let st = sb + TIMER_STACK.0.len();
-            if let Some(idx) = sched.create_task("timer", samples::timer_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "timer",
+                samples::timer_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
 
             // IPC pair: sender (slot N) talks to receiver (slot N+1)
             let sb = IPC_TX_STACK.0.as_ptr() as usize;
             let st = sb + IPC_TX_STACK.0.len();
-            if let Some(idx) = sched.create_task("ipc-tx", samples::ipc_sender_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "ipc-tx",
+                samples::ipc_sender_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
 
             let sb = IPC_RX_STACK.0.as_ptr() as usize;
             let st = sb + IPC_RX_STACK.0.len();
-            if let Some(idx) = sched.create_task("ipc-rx", samples::ipc_receiver_task as *const () as usize, st, sb, 2, 0) {
+            if let Some(idx) = sched.create_task(
+                "ipc-rx",
+                samples::ipc_receiver_task as *const () as usize,
+                st,
+                sb,
+                2,
+                0,
+            ) {
                 sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
             }
         }
@@ -1421,16 +1534,27 @@ pub extern "C" fn _rust_start() -> ! {
         use microkernel::task::TaskState;
         let sched = &*SCHEDULER.0.get();
         let procs = &mut *PROCESSES.0.get();
-        let count = sched.tasks.iter().filter(|t| t.state != TaskState::Free).count();
+        let count = sched
+            .tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Free)
+            .count();
         procs.processes[0].thread_count = count;
     }
     let _ = writeln!(con, "[boot] idle task registered");
     #[cfg(feature = "shell")]
     let _ = writeln!(con, "[boot] shell task registered");
     #[cfg(feature = "net")]
-    let _ = writeln!(con, "[boot] net listener task registered (port {})", REMOTE_SHELL_PORT);
+    let _ = writeln!(
+        con,
+        "[boot] net listener task registered (port {})",
+        REMOTE_SHELL_PORT
+    );
     #[cfg(feature = "samples")]
-    let _ = writeln!(con, "[boot] userlib sample tasks registered (hello, timer, ipc-tx, ipc-rx)");
+    let _ = writeln!(
+        con,
+        "[boot] userlib sample tasks registered (hello, timer, ipc-tx, ipc-rx)"
+    );
 
     // ── start the first task (never returns) ─────────────────
     let _ = writeln!(con, "[boot] starting scheduler — preemptive mode");
@@ -1469,9 +1593,7 @@ pub extern "C" fn _rust_start() -> ! {
 pub(crate) fn console_write_byte(b: u8) {
     let serial = default_serial();
     let mut con = Console::new(serial);
-    let _ = con.write_str(unsafe {
-        core::str::from_utf8_unchecked(core::slice::from_ref(&b))
-    });
+    let _ = con.write_str(unsafe { core::str::from_utf8_unchecked(core::slice::from_ref(&b)) });
 }
 
 #[allow(dead_code)]

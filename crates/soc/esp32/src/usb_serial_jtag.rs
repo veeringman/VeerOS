@@ -24,16 +24,16 @@ const USB_SERIAL_JTAG_BASE: usize = 0x6000_F000;
 // ---------------------------------------------------------------------------
 
 /// EP1 — shared TX/RX FIFO data register (64 bytes deep).
-const EP1_REG: usize       = 0x00;
+const EP1_REG: usize = 0x00;
 /// EP1_CONF — bit 0: WR_DONE (flush TX), bit 1: SERIAL_IN_EP_DATA_FREE (RO),
 ///            bit 2: SERIAL_OUT_EP_DATA_AVAIL (RO).
-const EP1_CONF_REG: usize  = 0x04;
+const EP1_CONF_REG: usize = 0x04;
 /// INT_RAW — raw (unmasked) interrupt status.
-const INT_RAW_REG: usize   = 0x08;
+const INT_RAW_REG: usize = 0x08;
 /// INT_ENA — interrupt enable mask (do NOT confuse with CLR).
-const INT_ENA_REG: usize   = 0x10;
+const INT_ENA_REG: usize = 0x10;
 /// INT_CLR — write-1-to-clear interrupt flags.
-const INT_CLR_REG: usize   = 0x14;
+const INT_CLR_REG: usize = 0x14;
 /// OUT_EP1_ST — OUT endpoint 1 status; bits [22:16] = received byte count.
 const OUT_EP1_ST_REG: usize = 0x3C;
 
@@ -42,11 +42,11 @@ const OUT_EP1_ST_REG: usize = 0x3C;
 // ---------------------------------------------------------------------------
 
 /// Write 1 to signal that we finished writing a packet into the TX FIFO.
-const WR_DONE: u32                    = 1 << 0;
+const WR_DONE: u32 = 1 << 0;
 /// (Read-only) 1 = TX FIFO is free — previous packet was consumed by host.
-const SERIAL_IN_EP_DATA_FREE: u32     = 1 << 1;
+const SERIAL_IN_EP_DATA_FREE: u32 = 1 << 1;
 /// (Read-only) 1 = RX FIFO has data from host.
-const SERIAL_OUT_EP_DATA_AVAIL: u32   = 1 << 2;
+const SERIAL_OUT_EP_DATA_AVAIL: u32 = 1 << 2;
 
 // ---------------------------------------------------------------------------
 // INT_RAW / INT_CLR bit masks
@@ -54,11 +54,11 @@ const SERIAL_OUT_EP_DATA_AVAIL: u32   = 1 << 2;
 
 /// Bit 1: SOF (Start-of-Frame) received — host sends one every 1 ms once
 /// USB enumeration completes.
-const SOF_INT: u32                    = 1 << 1;
+const SOF_INT: u32 = 1 << 1;
 /// Bit 2: a complete OUT packet was received from the host (RX ready).
-const SERIAL_OUT_RECV_PKT_INT: u32    = 1 << 2;
+const SERIAL_OUT_RECV_PKT_INT: u32 = 1 << 2;
 /// Bit 3: the Serial-IN (TX) FIFO is empty after the host consumed the data.
-const SERIAL_IN_EMPTY_INT: u32        = 1 << 3;
+const SERIAL_IN_EMPTY_INT: u32 = 1 << 3;
 
 // ---------------------------------------------------------------------------
 // TX FIFO depth & byte counter

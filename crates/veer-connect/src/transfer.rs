@@ -18,7 +18,7 @@
 //!    status 0x00 = OK (file data follows), 0x01 = not found
 //! 5. Server sends file data in encrypted frames
 
-use crate::vsc::{self, SecureChannel, MODE_PUSH, MODE_PULL, MAX_FRAME_PT};
+use crate::vsc::{self, SecureChannel, MAX_FRAME_PT, MODE_PULL, MODE_PUSH};
 use libc::{self, termios};
 
 use std::fs;
@@ -39,7 +39,9 @@ fn authenticate(stream: &TcpStream, ch: &mut SecureChannel) -> bool {
     // Then read password from local terminal and send it.
     loop {
         // Set a read timeout so we don't block forever.
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
 
         match vsc::recv_frame(stream, ch, &mut buf) {
             Some(n) => {
@@ -93,7 +95,9 @@ fn read_password() -> String {
     io::stdin().read_line(&mut password).ok();
 
     // Restore terminal.
-    unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old); }
+    unsafe {
+        libc::tcsetattr(stdin_fd, libc::TCSANOW, &old);
+    }
     eprintln!(); // newline after hidden input
 
     password.trim_end().to_string()
@@ -111,7 +115,10 @@ pub fn push(stream: &TcpStream, ch: &mut SecureChannel, local_path: &str, remote
     };
 
     let file_size = data.len();
-    eprintln!("[vsc] uploading {} ({} bytes) → {}", local_path, file_size, remote_path);
+    eprintln!(
+        "[vsc] uploading {} ({} bytes) → {}",
+        local_path, file_size, remote_path
+    );
 
     // Send mode byte.
     vsc::send_frame(stream, ch, &[MODE_PUSH]);
@@ -146,7 +153,9 @@ pub fn push(stream: &TcpStream, ch: &mut SecureChannel, local_path: &str, remote
 
     // Read server status.
     let mut status_buf = [0u8; MAX_FRAME_PT];
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
     match vsc::recv_frame(stream, ch, &mut status_buf) {
         Some(n) if n >= 1 && status_buf[0] == STATUS_OK => {
             eprintln!("[vsc] upload complete: {} → {}", local_path, remote_path);
@@ -190,7 +199,9 @@ pub fn pull(stream: &TcpStream, ch: &mut SecureChannel, remote_path: &str, local
 
     // Read server response: [status:u8][file_size:u32].
     let mut resp = [0u8; MAX_FRAME_PT];
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
     match vsc::recv_frame(stream, ch, &mut resp) {
         Some(n) if n >= 5 => n,
         Some(n) if n >= 1 && resp[0] != STATUS_OK => {
@@ -218,7 +229,9 @@ pub fn pull(stream: &TcpStream, ch: &mut SecureChannel, remote_path: &str, local
 
     // Receive file data.
     let mut file_data = Vec::with_capacity(file_size);
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .ok();
 
     while file_data.len() < file_size {
         let mut buf = [0u8; MAX_FRAME_PT];
@@ -228,7 +241,12 @@ pub fn pull(stream: &TcpStream, ch: &mut SecureChannel, remote_path: &str, local
                 file_data.extend_from_slice(&buf[..take]);
 
                 let pct = (file_data.len() * 100) / file_size.max(1);
-                eprint!("\r[vsc] progress: {}%  ({}/{})", pct, file_data.len(), file_size);
+                eprint!(
+                    "\r[vsc] progress: {}%  ({}/{})",
+                    pct,
+                    file_data.len(),
+                    file_size
+                );
             }
             None => {
                 eprintln!("\n[vsc] download failed: connection lost");

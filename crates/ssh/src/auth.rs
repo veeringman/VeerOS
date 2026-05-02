@@ -5,8 +5,8 @@
 //! - `password` — FNV-1a hash comparison (same as existing VeerOS auth)
 //! - `publickey` — Ed25519 public key verification (future)
 
+use crate::{get_string, get_u32, put_string, put_u32, MAX_PAYLOAD};
 use arch::Serial;
-use crate::{get_u32, get_string, put_u32, put_string, MAX_PAYLOAD};
 
 /// Authentication result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,19 +44,25 @@ pub fn check_userauth(
     let mut off = 1;
 
     // user name
-    if off + 4 > payload.len() { return (AuthResult::Failure, 0); }
+    if off + 4 > payload.len() {
+        return (AuthResult::Failure, 0);
+    }
     let (user, consumed) = get_string(&payload[off..]);
     off += consumed;
     let user_len = user.len().min(64);
     user_out[..user_len].copy_from_slice(&user[..user_len]);
 
     // service name (expect "ssh-connection")
-    if off + 4 > payload.len() { return (AuthResult::Failure, 0); }
+    if off + 4 > payload.len() {
+        return (AuthResult::Failure, 0);
+    }
     let (_service, consumed) = get_string(&payload[off..]);
     off += consumed;
 
     // method name
-    if off + 4 > payload.len() { return (AuthResult::Failure, 0); }
+    if off + 4 > payload.len() {
+        return (AuthResult::Failure, 0);
+    }
     let (method, consumed) = get_string(&payload[off..]);
     off += consumed;
 
@@ -66,12 +72,16 @@ pub fn check_userauth(
 
     if method == b"password" {
         // boolean    FALSE (no old password)
-        if off >= payload.len() { return (AuthResult::Failure, user_len); }
+        if off >= payload.len() {
+            return (AuthResult::Failure, user_len);
+        }
         let _change_password = payload[off];
         off += 1;
 
         // string    password
-        if off + 4 > payload.len() { return (AuthResult::Failure, user_len); }
+        if off + 4 > payload.len() {
+            return (AuthResult::Failure, user_len);
+        }
         let (password, _consumed) = get_string(&payload[off..]);
 
         // Verify via caller-supplied callback

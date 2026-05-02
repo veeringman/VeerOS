@@ -11,11 +11,11 @@
 //! - `CHAN_WRITABLE`: a specific channel has space
 //! - `TASK_EXIT`: a specific task has exited
 
-use arch::SavedContext;
 use crate::channel::Channels;
 use crate::ipc::Ipc;
-use crate::task::{BlockReason, Scheduler, TaskState, MAX_TASKS};
 use crate::syscall::*;
+use crate::task::{BlockReason, Scheduler, TaskState, MAX_TASKS};
+use arch::SavedContext;
 
 /// Per-task poll registration.
 #[derive(Debug, Clone, Copy)]
@@ -30,7 +30,11 @@ pub struct PollEntry {
 
 impl PollEntry {
     pub const fn empty() -> Self {
-        Self { mask: 0, param: 0, timer_deadline: 0 }
+        Self {
+            mask: 0,
+            param: 0,
+            timer_deadline: 0,
+        }
     }
 }
 

@@ -6,7 +6,7 @@
 //!
 //! After APIC-based timer is implemented, the PIC can be fully masked.
 
-use crate::{outb, io_wait};
+use crate::{io_wait, outb};
 
 // Master PIC (IRQ 0–7).
 const PIC1_CMD: u16 = 0x20;
@@ -65,8 +65,8 @@ pub fn init() {
         // Mask all IRQs except IRQ 0 (timer), IRQ 1 (keyboard),
         // IRQ 2 (cascade), and IRQ 4 (COM1).
         // Unmask bits: 0=IRQ0, 1=IRQ1, 2=IRQ2, 4=IRQ4 → mask = ~0x17 = 0xE8
-        outb(PIC1_DATA, 0xE8);   // unmask IRQ0 + IRQ1 + IRQ2 + IRQ4
-        outb(PIC2_DATA, 0xFF);    // mask all slave IRQs
+        outb(PIC1_DATA, 0xE8); // unmask IRQ0 + IRQ1 + IRQ2 + IRQ4
+        outb(PIC2_DATA, 0xFF); // mask all slave IRQs
     }
 }
 

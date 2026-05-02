@@ -73,7 +73,13 @@ impl VeerDeveloperSdk {
         self.aura_graph
             .overlap_graph(true, now_unix_ms())
             .into_iter()
-            .map(|e| (e.left.as_str().to_string(), e.right.as_str().to_string(), e.shared_members))
+            .map(|e| {
+                (
+                    e.left.as_str().to_string(),
+                    e.right.as_str().to_string(),
+                    e.shared_members,
+                )
+            })
             .collect()
     }
 
@@ -99,7 +105,11 @@ impl VeerDeveloperSdk {
             .map_err(|e| anyhow::anyhow!("register binding failed: {:?}", e))
     }
 
-    pub fn plan_service_connect(&mut self, service: &str, caller_auras: &[String]) -> Result<ServiceConnectPlan> {
+    pub fn plan_service_connect(
+        &mut self,
+        service: &str,
+        caller_auras: &[String],
+    ) -> Result<ServiceConnectPlan> {
         let service = canonical_typed(service, AddressType::Service, "service")?;
         let caller_auras = canonicalize_auras(caller_auras)?;
         let aura_refs: Vec<&str> = caller_auras.iter().map(|s| s.as_str()).collect();
@@ -152,7 +162,11 @@ fn canonical_typed(input: &str, expected: AddressType, what: &str) -> Result<Str
     let parsed = VasAddress::parse(&canonical)
         .map_err(|e| anyhow::anyhow!("invalid {} address {}: {}", what, input, e))?;
     if parsed.kind != expected {
-        bail!("{} address must use {}{{...}} type", what, expected.as_str());
+        bail!(
+            "{} address must use {}{{...}} type",
+            what,
+            expected.as_str()
+        );
     }
     Ok(canonical)
 }

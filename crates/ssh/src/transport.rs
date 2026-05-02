@@ -4,11 +4,11 @@
 //! Before key exchange completes, packets are unencrypted.
 //! After NEWKEYS, packets use chacha20-poly1305@openssh.com.
 
+use crate::{get_u32, put_u32, MAX_PACKET, MAX_PAYLOAD};
 use arch::Serial;
-use crypto::Aead;
 use crypto::chacha20::{chacha20_block, chacha20_xor};
 use crypto::zeroize;
-use crate::{MAX_PACKET, MAX_PAYLOAD, get_u32, put_u32};
+use crypto::Aead;
 
 /// Transport state — tracks encryption keys and sequence numbers.
 pub struct Transport {
@@ -62,11 +62,7 @@ impl Transport {
     }
 
     /// Write one SSH packet to the serial device.
-    pub fn write_packet<S: Serial>(
-        &mut self,
-        serial: &S,
-        payload: &[u8],
-    ) {
+    pub fn write_packet<S: Serial>(&mut self, serial: &S, payload: &[u8]) {
         match &self.keys {
             None => self.write_packet_plain(serial, payload),
             Some(_) => self.write_packet_encrypted(serial, payload),
@@ -113,18 +109,18 @@ impl Transport {
         payload_length
     }
 
-    fn write_packet_plain<S: Serial>(
-        &mut self,
-        serial: &S,
-        payload: &[u8],
-    ) {
+    fn write_packet_plain<S: Serial>(&mut self, serial: &S, payload: &[u8]) {
         // RFC 4253 §6: total of (packet_length‖padding_length‖payload‖padding)
         // must be a multiple of block_size(8).  That total = 4 + packet_length,
         // so we align (4 + 1 + payload_len) and derive padding from that.
         let block_size = 8;
         let unpadded = 4 + 1 + payload.len(); // include 4-byte length field
         let padding_len = block_size - (unpadded % block_size);
-        let padding_len = if padding_len < 4 { padding_len + block_size } else { padding_len };
+        let padding_len = if padding_len < 4 {
+            padding_len + block_size
+        } else {
+            padding_len
+        };
         let packet_length = 1 + payload.len() + padding_len;
 
         // Write packet_length (u32 BE)
@@ -195,7 +191,9 @@ impl Transport {
         let total = packet_length + 16;
         let mut buf = [0u8; MAX_PACKET];
         for i in 0..total {
-            if i >= buf.len() { return 0; }
+            if i >= buf.len() {
+                return 0;
+            }
             buf[i] = serial.read_byte();
         }
 
@@ -218,7 +216,7 @@ impl Transport {
         // Poly1305 verify
         let mut computed_tag = [0u8; 16];
         poly1305_mac(&poly_key, &auth_data[..auth_len], &mut computed_tag);
-        
+
         let mut diff: u8 = 0;
         for i in 0..16 {
             diff |= computed_tag[i] ^ tag[i];
@@ -243,11 +241,7 @@ impl Transport {
         payload_length
     }
 
-    fn write_packet_encrypted<S: Serial>(
-        &mut self,
-        serial: &S,
-        payload: &[u8],
-    ) {
+    fn write_packet_encrypted<S: Serial>(&mut self, serial: &S, payload: &[u8]) {
         let keys = self.keys.as_ref().unwrap();
 
         // chacha20-poly1305: the 4-byte length is encrypted separately and
@@ -256,7 +250,11 @@ impl Transport {
         let block_size = 8;
         let unpadded = 1 + payload.len();
         let padding_len = block_size - (unpadded % block_size);
-        let padding_len = if padding_len < 4 { padding_len + block_size } else { padding_len };
+        let padding_len = if padding_len < 4 {
+            padding_len + block_size
+        } else {
+            padding_len
+        };
         let packet_length = 1 + payload.len() + padding_len;
 
         let nonce = Self::openssh_chacha_nonce(self.tx_seq);
@@ -332,7 +330,12 @@ fn poly1305_mac(key: &[u8; 32], data: &[u8], tag: &mut [u8; 16]) {
         ((t2 >> 14) | (t3 << 18)) & 0x3ff_ffff,
         t3 >> 8,
     ];
-    let s = [le32(&key[16..]), le32(&key[20..]), le32(&key[24..]), le32(&key[28..])];
+    let s = [
+        le32(&key[16..]),
+        le32(&key[20..]),
+        le32(&key[24..]),
+        le32(&key[28..]),
+    ];
 
     let mut h = [0u32; 5];
     let mut off = 0;
@@ -356,11 +359,19 @@ fn poly1305_mac(key: &[u8; 32], data: &[u8], tag: &mut [u8; 16]) {
         h[4] = h[4].wrapping_add((t3 >> 8) | (t4 << 24));
 
         let (r0, r1, r2, r3, r4) = (
-            r[0] as u64, r[1] as u64, r[2] as u64, r[3] as u64, r[4] as u64,
+            r[0] as u64,
+            r[1] as u64,
+            r[2] as u64,
+            r[3] as u64,
+            r[4] as u64,
         );
         let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
         let (h0, h1, h2, h3, h4) = (
-            h[0] as u64, h[1] as u64, h[2] as u64, h[3] as u64, h[4] as u64,
+            h[0] as u64,
+            h[1] as u64,
+            h[2] as u64,
+            h[3] as u64,
+            h[4] as u64,
         );
 
         let d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
@@ -441,10 +452,8 @@ fn poly1305_mac(key: &[u8; 32], data: &[u8], tag: &mut [u8; 16]) {
         | ((h2 as u128) << 52)
         | ((h3 as u128) << 78)
         | ((h4 as u128) << 104);
-    let s_val = (s[0] as u128)
-        | ((s[1] as u128) << 32)
-        | ((s[2] as u128) << 64)
-        | ((s[3] as u128) << 96);
+    let s_val =
+        (s[0] as u128) | ((s[1] as u128) << 32) | ((s[2] as u128) << 64) | ((s[3] as u128) << 96);
     let tag_val = h_val.wrapping_add(s_val);
 
     tag[..8].copy_from_slice(&(tag_val as u64).to_le_bytes());
@@ -458,15 +467,14 @@ mod tests {
     #[test]
     fn poly1305_rfc8439_vector() {
         let key = [
-            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33,
-            0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8,
-            0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd,
-            0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b,
+            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5,
+            0x06, 0xa8, 0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf,
+            0x41, 0x49, 0xf5, 0x1b,
         ];
         let msg = b"Cryptographic Forum Research Group";
         let expected = [
-            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6,
-            0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9,
+            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01,
+            0x27, 0xa9,
         ];
 
         let mut tag = [0u8; 16];

@@ -4,12 +4,12 @@
 //! establish session keys. After KEX, both sides derive identical
 //! encryption keys via SHA-256 KDF.
 
-use crypto::sha256::Sha256;
-use crypto::x25519::{x25519_keypair, x25519_diffie_hellman};
-use crypto::ed25519::{ed25519_sign, Ed25519PublicKey, Ed25519Seed};
-use crypto::{CryptoRng, Hash};
-use crate::{put_u32, get_u32, put_string, put_mpint, MAX_PAYLOAD, VERSION_STRING};
 use crate::transport::TransportKeys;
+use crate::{get_u32, put_mpint, put_string, put_u32, MAX_PAYLOAD, VERSION_STRING};
+use crypto::ed25519::{ed25519_sign, Ed25519PublicKey, Ed25519Seed};
+use crypto::sha256::Sha256;
+use crypto::x25519::{x25519_diffie_hellman, x25519_keypair};
+use crypto::{CryptoRng, Hash};
 
 /// Our KEXINIT proposal.
 pub struct KexConfig {
@@ -88,8 +88,8 @@ pub fn build_kexinit(buf: &mut [u8], cookie: &[u8; 16]) -> usize {
     off += crate::put_name_list(&mut buf[off..], HOST_KEY_ALGORITHMS);
     off += crate::put_name_list(&mut buf[off..], CIPHER_ALGORITHMS); // c2s
     off += crate::put_name_list(&mut buf[off..], CIPHER_ALGORITHMS); // s2c
-    off += crate::put_name_list(&mut buf[off..], MAC_ALGORITHMS);    // c2s
-    off += crate::put_name_list(&mut buf[off..], MAC_ALGORITHMS);    // s2c
+    off += crate::put_name_list(&mut buf[off..], MAC_ALGORITHMS); // c2s
+    off += crate::put_name_list(&mut buf[off..], MAC_ALGORITHMS); // s2c
     off += crate::put_name_list(&mut buf[off..], COMPRESSION_ALGORITHMS); // c2s
     off += crate::put_name_list(&mut buf[off..], COMPRESSION_ALGORITHMS); // s2c
     off += crate::put_name_list(&mut buf[off..], b""); // languages c2s
@@ -119,7 +119,14 @@ pub fn process_ecdh_init(
     client_eph_pub: &[u8; 32],
     kex_state: &mut KexState,
     config: &KexConfig,
-) -> Option<([u8; MAX_PAYLOAD], usize, TransportKeys, [u8; 32], [u8; 32], [u8; 32])> {
+) -> Option<(
+    [u8; MAX_PAYLOAD],
+    usize,
+    TransportKeys,
+    [u8; 32],
+    [u8; 32],
+    [u8; 32],
+)> {
     // Compute shared secret K = X25519(server_ephemeral_sk, client_ephemeral_pk)
     let shared_secret = match x25519_diffie_hellman(&kex_state.eph_sk, client_eph_pub) {
         Ok(ss) => ss,
@@ -183,14 +190,14 @@ pub fn process_ecdh_init(
 ///
 /// Each component is encoded as an SSH string (length-prefixed).
 fn compute_exchange_hash(
-    v_c: &[u8],   // client version string (without CR LF)
-    v_s: &[u8],   // server version string
-    i_c: &[u8],   // client KEXINIT payload
-    i_s: &[u8],   // server KEXINIT payload
-    k_s: &[u8],   // server host key (raw ed25519 public key → as "ssh-ed25519" blob)
-    q_c: &[u8],   // client ephemeral public key
-    q_s: &[u8],   // server ephemeral public key
-    k: &[u8],     // shared secret
+    v_c: &[u8], // client version string (without CR LF)
+    v_s: &[u8], // server version string
+    i_c: &[u8], // client KEXINIT payload
+    i_s: &[u8], // server KEXINIT payload
+    k_s: &[u8], // server host key (raw ed25519 public key → as "ssh-ed25519" blob)
+    q_c: &[u8], // client ephemeral public key
+    q_s: &[u8], // server ephemeral public key
+    k: &[u8],   // shared secret
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     let mut tmp = [0u8; MAX_PAYLOAD];
@@ -307,24 +314,22 @@ fn derive_key_material(k: &[u8; 32], h: &[u8; 32], label: u8, session_id: &[u8; 
 mod tests {
     extern crate std;
 
+    use self::std::time::Instant;
     use super::*;
     use crypto::rng::ChaChaRng;
     use crypto::x25519::x25519_keypair;
-    use self::std::time::Instant;
 
     fn test_server_config() -> KexConfig {
         KexConfig {
             host_seed: [
-                0x56, 0x65, 0x65, 0x72, 0x4f, 0x53, 0x2d, 0x48,
-                0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79, 0x53, 0x65,
-                0x65, 0x64, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
-                0x36, 0x37, 0x38, 0x39, 0x41, 0x42, 0x43, 0x44,
+                0x56, 0x65, 0x65, 0x72, 0x4f, 0x53, 0x2d, 0x48, 0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79,
+                0x53, 0x65, 0x65, 0x64, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+                0x41, 0x42, 0x43, 0x44,
             ],
             host_pubkey: [
-                0xe2, 0x91, 0x74, 0x12, 0xbb, 0x3a, 0x6f, 0x7e,
-                0x80, 0x07, 0x28, 0x7f, 0xc4, 0x27, 0x01, 0x65,
-                0xcf, 0x5d, 0x05, 0x61, 0x63, 0xf0, 0x82, 0x4c,
-                0xda, 0x73, 0xdc, 0x70, 0x8d, 0x99, 0x94, 0x3b,
+                0xe2, 0x91, 0x74, 0x12, 0xbb, 0x3a, 0x6f, 0x7e, 0x80, 0x07, 0x28, 0x7f, 0xc4, 0x27,
+                0x01, 0x65, 0xcf, 0x5d, 0x05, 0x61, 0x63, 0xf0, 0x82, 0x4c, 0xda, 0x73, 0xdc, 0x70,
+                0x8d, 0x99, 0x94, 0x3b,
             ],
         }
     }

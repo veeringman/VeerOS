@@ -8,7 +8,7 @@
 //! - ESP32-C6: 8 KB (tight — suitable for config files, small logs)
 //! - QEMU / RPi: 64 KB (generous for development/demos)
 
-use crate::vfs::{InodeTable, InodeKind, MAX_INODES};
+use crate::vfs::{InodeKind, InodeTable, MAX_INODES};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -72,13 +72,7 @@ impl RamFs {
     }
 
     /// Read from a file inode's data. Returns bytes read.
-    pub fn read(
-        &self,
-        inodes: &InodeTable,
-        inode_id: u16,
-        offset: u32,
-        buf: &mut [u8],
-    ) -> usize {
+    pub fn read(&self, inodes: &InodeTable, inode_id: u16, offset: u32, buf: &mut [u8]) -> usize {
         let idx = inode_id as usize;
         if idx >= MAX_INODES {
             return 0;
@@ -92,7 +86,11 @@ impl RamFs {
             return 0;
         }
         let available = (file_size - offset) as usize;
-        let to_read = if buf.len() < available { buf.len() } else { available };
+        let to_read = if buf.len() < available {
+            buf.len()
+        } else {
+            available
+        };
         let start = (inode.data_offset + offset) as usize;
         if start + to_read > RAMFS_POOL_SIZE {
             return 0;
@@ -140,13 +138,11 @@ impl RamFs {
         } else if needed_end > inode_cap {
             // Need more space. If the inode is at the end of the pool,
             // we can extend in-place. Otherwise, reallocate.
-            let inode_end =
-                inodes.inodes[idx].data_offset as usize + inode_cap;
+            let inode_end = inodes.inodes[idx].data_offset as usize + inode_cap;
             if inode_end == self.next_free {
                 // Extend in place.
                 let extra = needed_end - inode_cap;
-                let aligned_extra =
-                    (extra + RAMFS_ALLOC_ALIGN - 1) & !(RAMFS_ALLOC_ALIGN - 1);
+                let aligned_extra = (extra + RAMFS_ALLOC_ALIGN - 1) & !(RAMFS_ALLOC_ALIGN - 1);
                 if self.next_free + aligned_extra > RAMFS_POOL_SIZE {
                     return 0;
                 }
@@ -173,9 +169,7 @@ impl RamFs {
                         }
                         inodes.inodes[idx].data_offset = new_off;
                         inodes.inodes[idx].data_cap =
-                            ((new_cap + RAMFS_ALLOC_ALIGN - 1)
-                                & !(RAMFS_ALLOC_ALIGN - 1))
-                                as u32;
+                            ((new_cap + RAMFS_ALLOC_ALIGN - 1) & !(RAMFS_ALLOC_ALIGN - 1)) as u32;
                         // Note: old space is leaked (no compaction).
                     }
                     None => return 0,

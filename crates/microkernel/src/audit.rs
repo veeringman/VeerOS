@@ -33,37 +33,37 @@ const AUDIT_CAPACITY: usize = 4096;
 pub enum AuditEvent {
     // ── Capability events ────────────────────────────────
     /// Syscall denied due to missing capability.
-    CapDenied       = 0x01,
+    CapDenied = 0x01,
     /// Capability voluntarily dropped.
-    CapDropped      = 0x02,
+    CapDropped = 0x02,
     /// Child process caps restricted.
-    CapSetChild     = 0x03,
+    CapSetChild = 0x03,
 
     // ── Authentication events ────────────────────────────
     /// Successful login / auth.
-    AuthSuccess     = 0x10,
+    AuthSuccess = 0x10,
     /// Failed login / auth attempt.
-    AuthFail        = 0x11,
+    AuthFail = 0x11,
     /// Logout.
-    Logout          = 0x12,
+    Logout = 0x12,
     /// UID change (setuid).
-    UidChange       = 0x13,
+    UidChange = 0x13,
 
     // ── Process lifecycle ────────────────────────────────
     /// New process spawned.
-    ProcessSpawn    = 0x20,
+    ProcessSpawn = 0x20,
     /// Process exited.
-    ProcessExit     = 0x21,
+    ProcessExit = 0x21,
 
     // ── Filesystem / mount events ────────────────────────
     /// Filesystem mounted.
-    Mount           = 0x30,
+    Mount = 0x30,
     /// Filesystem unmounted.
-    Unmount         = 0x31,
+    Unmount = 0x31,
 
     // ── Crypto events ────────────────────────────────────
     /// CSPRNG seeded from hardware entropy.
-    RngSeeded       = 0x40,
+    RngSeeded = 0x40,
 
     // ── Boot / integrity events ──────────────────────────
     /// Boot measurement recorded.
@@ -71,13 +71,13 @@ pub enum AuditEvent {
 
     // ── Network events ───────────────────────────────────
     /// Inbound connection accepted.
-    NetAccept       = 0x60,
+    NetAccept = 0x60,
     /// Firewall rule matched (drop/reject).
-    FirewallDrop    = 0x61,
+    FirewallDrop = 0x61,
 
     // ── Generic ──────────────────────────────────────────
     /// Custom event logged by userspace via SYS_AUDIT_LOG.
-    UserEvent       = 0xF0,
+    UserEvent = 0xF0,
 }
 
 /// A single audit log entry (16 bytes — cache-friendly).
@@ -190,7 +190,11 @@ impl AuditLog {
     /// Write human-readable dump of the last `max_entries` entries.
     pub fn dump(&self, w: &mut dyn fmt::Write, max_entries: usize) {
         let count = self.len();
-        let show = if max_entries < count { count - max_entries } else { 0 };
+        let show = if max_entries < count {
+            count - max_entries
+        } else {
+            0
+        };
 
         let _ = writeln!(w, "  TICK       PID  UID  EVENT            DETAIL");
         let _ = writeln!(w, "  ─────────  ───  ───  ───────────────  ──────────");
@@ -236,6 +240,6 @@ fn event_name(e: u8) -> &'static str {
         0x60 => "NET_ACCEPT",
         0x61 => "FW_DROP",
         0xF0 => "USER_EVENT",
-        _    => "UNKNOWN",
+        _ => "UNKNOWN",
     }
 }

@@ -47,12 +47,22 @@ impl GuestMem {
             bail!("mmap guest memory ({size} bytes): {e}");
         }
         let base = NonNull::new(ptr as *mut u8).context("mmap returned null")?;
-        Ok(Self { base, size, gpa_base })
+        Ok(Self {
+            base,
+            size,
+            gpa_base,
+        })
     }
 
-    pub fn host_addr(&self) -> u64 { self.base.as_ptr() as u64 }
-    pub fn size(&self) -> usize { self.size }
-    pub fn gpa_base(&self) -> u64 { self.gpa_base }
+    pub fn host_addr(&self) -> u64 {
+        self.base.as_ptr() as u64
+    }
+    pub fn size(&self) -> usize {
+        self.size
+    }
+    pub fn gpa_base(&self) -> u64 {
+        self.gpa_base
+    }
 
     pub fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.size) }
@@ -71,7 +81,8 @@ impl GuestMem {
             );
         }
         let offset = gpa - self.gpa_base;
-        let end = offset.checked_add(len as u64)
+        let end = offset
+            .checked_add(len as u64)
             .context("guest slice end overflow")?;
         if end > self.size as u64 {
             bail!(
@@ -126,6 +137,8 @@ impl GuestMem {
 impl Drop for GuestMem {
     fn drop(&mut self) {
         // SAFETY: `base` and `size` came from a successful `mmap`.
-        unsafe { libc::munmap(self.base.as_ptr() as *mut _, self.size); }
+        unsafe {
+            libc::munmap(self.base.as_ptr() as *mut _, self.size);
+        }
     }
 }

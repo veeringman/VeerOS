@@ -52,7 +52,7 @@ pub const WIFI_MAC_BASE: usize = 0x600A_4000;
 
 /// MMIO region covering the full Wi-Fi MAC + baseband.
 pub const WIFI_MMIO_BASE: usize = 0x600A_4000;
-pub const WIFI_MMIO_SIZE: usize = 0x8000;  // 32 KiB covers MAC + BB
+pub const WIFI_MMIO_SIZE: usize = 0x8000; // 32 KiB covers MAC + BB
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BLE controller registers
@@ -90,7 +90,7 @@ pub const IEEE802154_MMIO_SIZE: usize = 0x1000;
 
 /// The full modem register space spans 0x600A_3000 - 0x600B_0000.
 pub const MODEM_MMIO_BASE: usize = 0x600A_3000;
-pub const MODEM_MMIO_SIZE: usize = 0x0D000;  // 52 KiB
+pub const MODEM_MMIO_SIZE: usize = 0x0D000; // 52 KiB
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Modem power-up / clock-enable bit masks
@@ -371,8 +371,8 @@ pub fn init_radio_clocks() {
         mmio_write(PMU_HP_ACTIVE_ICG_MODEM, 2 << 30);
 
         // Trigger immediate update of ICG switch + modem enable.
-        mmio_write(PMU_IMM_SLEEP_SYSCLK, 1 << 28);  // update_dig_icg_switch
-        mmio_write(PMU_IMM_MODEM_ICG, 1 << 31);      // update_dig_icg_modem_en
+        mmio_write(PMU_IMM_SLEEP_SYSCLK, 1 << 28); // update_dig_icg_switch
+        mmio_write(PMU_IMM_MODEM_ICG, 1 << 31); // update_dig_icg_modem_en
 
         // ── MODEM_SYSCON: state-based clock gating ─────────────────
         // clk_zb/fe/bt/wifi_st_map = 6, modem_peri = 4, modem_apb = 6
@@ -438,12 +438,18 @@ pub fn reset_all_modems() {
         let rst_reg = MODEM_LPCON_BASE + MODEM_RST_CTRL;
         let rst = mmio_read(rst_reg);
         // Assert reset on all three subsystems.
-        mmio_write(rst_reg, rst | RST_WIFI_MAC | RST_BLE_BB | RST_IEEE802154_MAC);
+        mmio_write(
+            rst_reg,
+            rst | RST_WIFI_MAC | RST_BLE_BB | RST_IEEE802154_MAC,
+        );
         // Brief delay — a few reads act as a fence.
         let _ = mmio_read(rst_reg);
         let _ = mmio_read(rst_reg);
         // Deassert reset.
-        mmio_write(rst_reg, rst & !(RST_WIFI_MAC | RST_BLE_BB | RST_IEEE802154_MAC));
+        mmio_write(
+            rst_reg,
+            rst & !(RST_WIFI_MAC | RST_BLE_BB | RST_IEEE802154_MAC),
+        );
     }
 }
 

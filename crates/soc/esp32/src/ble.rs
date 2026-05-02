@@ -26,7 +26,11 @@ use core::fmt;
 
 /// Clamp attribute data length to prevent reading past a response buffer.
 fn attr_length_bounded(len: usize) -> usize {
-    if len == 0 { 1 } else { len }
+    if len == 0 {
+        1
+    } else {
+        len
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +123,7 @@ impl BleScanResult {
         let _ = write!(
             w,
             "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            self.addr[0], self.addr[1], self.addr[2],
-            self.addr[3], self.addr[4], self.addr[5]
+            self.addr[0], self.addr[1], self.addr[2], self.addr[3], self.addr[4], self.addr[5]
         );
     }
 
@@ -232,7 +235,11 @@ pub struct GattService {
 
 impl GattService {
     pub const fn empty() -> Self {
-        Self { uuid16: 0, start_handle: 0, end_handle: 0 }
+        Self {
+            uuid16: 0,
+            start_handle: 0,
+            end_handle: 0,
+        }
     }
 }
 
@@ -249,12 +256,22 @@ pub struct GattChar {
 
 impl GattChar {
     pub const fn empty() -> Self {
-        Self { uuid16: 0, value_handle: 0, properties: 0 }
+        Self {
+            uuid16: 0,
+            value_handle: 0,
+            properties: 0,
+        }
     }
 
-    pub fn can_read(&self) -> bool { self.properties & 0x02 != 0 }
-    pub fn can_write(&self) -> bool { self.properties & 0x08 != 0 }
-    pub fn can_notify(&self) -> bool { self.properties & 0x10 != 0 }
+    pub fn can_read(&self) -> bool {
+        self.properties & 0x02 != 0
+    }
+    pub fn can_write(&self) -> bool {
+        self.properties & 0x08 != 0
+    }
+    pub fn can_notify(&self) -> bool {
+        self.properties & 0x10 != 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -361,27 +378,22 @@ impl Esp32Ble {
                 | ((self.local_addr[1] as u32) << 8)
                 | ((self.local_addr[2] as u32) << 16)
                 | ((self.local_addr[3] as u32) << 24);
-            let addr_hi = (self.local_addr[4] as u32)
-                | ((self.local_addr[5] as u32) << 8);
+            let addr_hi = (self.local_addr[4] as u32) | ((self.local_addr[5] as u32) << 8);
             modem::mmio_write(modem::BLE_BB_BASE + modem::BLE_ADDR_LO, addr_lo);
             modem::mmio_write(modem::BLE_BB_BASE + modem::BLE_ADDR_HI, addr_hi);
         }
 
         // Step 6: Enable the BLE controller and clear pending interrupts.
         unsafe {
-            modem::mmio_write(
-                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
-                0xFFFF_FFFF,
-            );
+            modem::mmio_write(modem::BLE_BB_BASE + modem::BLE_INT_CLR, 0xFFFF_FFFF);
             modem::mmio_write(
                 modem::BLE_BB_BASE + modem::BLE_INT_ENA,
-                modem::BLE_INT_SCAN_DONE | modem::BLE_INT_ADV_DONE
-                    | modem::BLE_INT_RX_DONE | modem::BLE_INT_CONN_DONE,
+                modem::BLE_INT_SCAN_DONE
+                    | modem::BLE_INT_ADV_DONE
+                    | modem::BLE_INT_RX_DONE
+                    | modem::BLE_INT_CONN_DONE,
             );
-            modem::mmio_write(
-                modem::BLE_BB_BASE + modem::BLE_CTRL,
-                modem::BLE_CTRL_ENABLE,
-            );
+            modem::mmio_write(modem::BLE_BB_BASE + modem::BLE_CTRL, modem::BLE_CTRL_ENABLE);
         }
 
         self.initialised = true;
@@ -427,9 +439,7 @@ impl Esp32Ble {
                 break;
             }
 
-            let status = unsafe {
-                modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS)
-            };
+            let status = unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS) };
 
             if status & modem::BLE_INT_RX_DONE != 0 {
                 // Clear the RX interrupt.
@@ -441,9 +451,7 @@ impl Esp32Ble {
                 }
 
                 // Read advertisement data from the RX descriptor.
-                let rx_data = unsafe {
-                    modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR)
-                };
+                let rx_data = unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR) };
 
                 if rx_data != 0 && rx_data != 0xFFFF_FFFF {
                     let mut r = BleScanResult::empty();
@@ -452,9 +460,8 @@ impl Esp32Ble {
                     r.addr[1] = ((rx_data >> 8) & 0xFF) as u8;
                     r.addr[2] = ((rx_data >> 16) & 0xFF) as u8;
                     r.addr[3] = ((rx_data >> 24) & 0xFF) as u8;
-                    let rx_data2 = unsafe {
-                        modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR + 4)
-                    };
+                    let rx_data2 =
+                        unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR + 4) };
                     r.addr[4] = (rx_data2 & 0xFF) as u8;
                     r.addr[5] = ((rx_data2 >> 8) & 0xFF) as u8;
                     r.addr_type = BleAddrType::Public;
@@ -489,15 +496,47 @@ impl Esp32Ble {
     /// returned no results — keeps the shell testable).
     fn scan_synthetic(&self, results: &mut [BleScanResult]) -> Result<usize, BleError> {
         let fake_devices: &[(&[u8], [u8; 6], BleAddrType, i8, bool)] = &[
-            (b"VeerOS-Sensor",  [0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03], BleAddrType::Public, -45, true),
-            (b"Mi Band 7",     [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC], BleAddrType::Random, -62, true),
-            (b"AirTag",        [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01], BleAddrType::Random, -71, false),
-            (b"",              [0x11, 0x22, 0x33, 0x44, 0x55, 0x66], BleAddrType::Random, -88, true),
-            (b"ESP32-C6-Test", [0xC6, 0xC6, 0xC6, 0x01, 0x02, 0x03], BleAddrType::Public, -38, true),
+            (
+                b"VeerOS-Sensor",
+                [0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03],
+                BleAddrType::Public,
+                -45,
+                true,
+            ),
+            (
+                b"Mi Band 7",
+                [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC],
+                BleAddrType::Random,
+                -62,
+                true,
+            ),
+            (
+                b"AirTag",
+                [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
+                BleAddrType::Random,
+                -71,
+                false,
+            ),
+            (
+                b"",
+                [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+                BleAddrType::Random,
+                -88,
+                true,
+            ),
+            (
+                b"ESP32-C6-Test",
+                [0xC6, 0xC6, 0xC6, 0x01, 0x02, 0x03],
+                BleAddrType::Public,
+                -38,
+                true,
+            ),
         ];
 
         let count = fake_devices.len().min(results.len());
-        for (i, &(name, addr, addr_type, rssi, connectable)) in fake_devices.iter().enumerate().take(count) {
+        for (i, &(name, addr, addr_type, rssi, connectable)) in
+            fake_devices.iter().enumerate().take(count)
+        {
             let mut r = BleScanResult::empty();
             let len = name.len().min(MAX_NAME_LEN);
             r.name[..len].copy_from_slice(&name[..len]);
@@ -586,9 +625,7 @@ impl Esp32Ble {
 
         // Poll for connection complete event.
         for _ in 0..5000 {
-            let status = unsafe {
-                modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS)
-            };
+            let status = unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS) };
             if status & modem::BLE_INT_CONN_DONE != 0 {
                 unsafe {
                     modem::mmio_write(
@@ -597,15 +634,16 @@ impl Esp32Ble {
                     );
                 }
                 // Read connection handle from controller.
-                let handle = unsafe {
-                    modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_CONN_HANDLE)
-                };
+                let handle =
+                    unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_CONN_HANDLE) };
                 self.conn_handle = (handle & 0x0FFF) as u16;
                 self.peer_addr = *addr;
                 self.connected = true;
                 return Ok(());
             }
-            for _ in 0..1000 { core::hint::spin_loop(); }
+            for _ in 0..1000 {
+                core::hint::spin_loop();
+            }
         }
 
         // Timeout — cancel connection attempt.
@@ -654,20 +692,14 @@ impl Esp32Ble {
         use crate::modem;
         unsafe {
             // Write the ATT PDU length + data into the BLE TX descriptor.
-            modem::mmio_write(
-                modem::BLE_BB_BASE + modem::BLE_TX_CTRL,
-                pdu.len() as u32,
-            );
+            modem::mmio_write(modem::BLE_BB_BASE + modem::BLE_TX_CTRL, pdu.len() as u32);
             modem::mmio_write(
                 modem::BLE_BB_BASE + modem::BLE_TX_DESCR,
                 pdu.as_ptr() as u32,
             );
             // Trigger TX.
             let ctrl = modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_TX_CTRL);
-            modem::mmio_write(
-                modem::BLE_BB_BASE + modem::BLE_TX_CTRL,
-                ctrl | (1 << 31),
-            );
+            modem::mmio_write(modem::BLE_BB_BASE + modem::BLE_TX_CTRL, ctrl | (1 << 31));
         }
     }
 
@@ -679,9 +711,7 @@ impl Esp32Ble {
         use crate::modem;
 
         for _ in 0..3000 {
-            let status = unsafe {
-                modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS)
-            };
+            let status = unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS) };
             if status & modem::BLE_INT_RX_DONE != 0 {
                 unsafe {
                     modem::mmio_write(
@@ -690,9 +720,7 @@ impl Esp32Ble {
                     );
                 }
                 // Read from RX descriptor.
-                let rx_word = unsafe {
-                    modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR)
-                };
+                let rx_word = unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR) };
                 let len = ((rx_word >> 16) & 0xFF) as usize;
                 let len = len.min(buf.len());
                 // Read data words.
@@ -710,7 +738,9 @@ impl Esp32Ble {
                 }
                 return len;
             }
-            for _ in 0..500 { core::hint::spin_loop(); }
+            for _ in 0..500 {
+                core::hint::spin_loop();
+            }
         }
         0
     }
@@ -738,8 +768,10 @@ impl Esp32Ble {
                 0x10, // opcode
                 (start_handle & 0xFF) as u8,
                 (start_handle >> 8) as u8,
-                0xFF, 0xFF, // end handle
-                0x00, 0x28, // UUID: Primary Service (little-endian)
+                0xFF,
+                0xFF, // end handle
+                0x00,
+                0x28, // UUID: Primary Service (little-endian)
             ];
             self.att_send(&pdu);
 
@@ -782,11 +814,7 @@ impl Esp32Ble {
     /// Discover characteristics within a service handle range.
     ///
     /// Uses ATT "Read By Type" (opcode 0x08) with UUID=0x2803 (characteristic).
-    pub fn discover_characteristics(
-        &mut self,
-        start: u16,
-        end: u16,
-    ) -> Result<usize, BleError> {
+    pub fn discover_characteristics(&mut self, start: u16, end: u16) -> Result<usize, BleError> {
         if !self.connected {
             return Err(BleError::NotInitialised);
         }
@@ -807,7 +835,8 @@ impl Esp32Ble {
                 (cur_handle >> 8) as u8,
                 (end & 0xFF) as u8,
                 (end >> 8) as u8,
-                0x03, 0x28, // UUID: Characteristic (little-endian)
+                0x03,
+                0x28, // UUID: Characteristic (little-endian)
             ];
             self.att_send(&pdu);
 
@@ -852,11 +881,7 @@ impl Esp32Ble {
         }
 
         // ATT Read Request: Opcode=0x0A, handle
-        let pdu: [u8; 3] = [
-            0x0A,
-            (handle & 0xFF) as u8,
-            (handle >> 8) as u8,
-        ];
+        let pdu: [u8; 3] = [0x0A, (handle & 0xFF) as u8, (handle >> 8) as u8];
         self.att_send(&pdu);
 
         let mut resp = [0u8; 256];
@@ -934,9 +959,7 @@ impl Esp32Ble {
 
         use crate::modem;
 
-        let status = unsafe {
-            modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS)
-        };
+        let status = unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_INT_STATUS) };
 
         if status & modem::BLE_INT_RX_DONE != 0 {
             unsafe {
@@ -947,9 +970,7 @@ impl Esp32Ble {
             }
 
             // Read the RX PDU.
-            let rx_word = unsafe {
-                modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR)
-            };
+            let rx_word = unsafe { modem::mmio_read(modem::BLE_BB_BASE + modem::BLE_RX_DESCR) };
             let pdu_len = ((rx_word >> 16) & 0xFF) as usize;
 
             if pdu_len > 0 {
@@ -994,16 +1015,24 @@ impl Esp32Ble {
     }
 
     /// Number of discovered services.
-    pub fn service_count(&self) -> usize { self.service_count }
+    pub fn service_count(&self) -> usize {
+        self.service_count
+    }
 
     /// Discovered services slice.
-    pub fn services(&self) -> &[GattService] { &self.services[..self.service_count] }
+    pub fn services(&self) -> &[GattService] {
+        &self.services[..self.service_count]
+    }
 
     /// Number of discovered characteristics.
-    pub fn char_count(&self) -> usize { self.char_count }
+    pub fn char_count(&self) -> usize {
+        self.char_count
+    }
 
     /// Discovered characteristics slice.
-    pub fn chars(&self) -> &[GattChar] { &self.chars[..self.char_count] }
+    pub fn chars(&self) -> &[GattChar] {
+        &self.chars[..self.char_count]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,7 +1180,8 @@ impl BleManager {
         for (i, dev) in self.scan_results[..self.scan_count].iter().enumerate() {
             let conn = if dev.connectable { " yes" } else { "  no" };
             // Format address inline
-            let _ = write!(
+            let _ =
+                write!(
                 w,
                 "  {:2}  {:<20} {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}  {:>6}  {:>4}  {}  {}",
                 i + 1,
@@ -1177,10 +1207,8 @@ impl BleManager {
             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
         );
         if self.driver.is_advertising() {
-            let name = core::str::from_utf8(
-                &self.driver.adv_name[..self.driver.adv_name_len],
-            )
-            .unwrap_or("<invalid>");
+            let name = core::str::from_utf8(&self.driver.adv_name[..self.driver.adv_name_len])
+                .unwrap_or("<invalid>");
             let _ = writeln!(w, "  Advertising: {}", name);
         }
         let _ = writeln!(w, "  Devices    : {} found (last scan)", self.scan_count);
@@ -1189,8 +1217,7 @@ impl BleManager {
             let _ = writeln!(
                 w,
                 "  Connected  : {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}  handle={}",
-                pa[0], pa[1], pa[2], pa[3], pa[4], pa[5],
-                self.driver.conn_handle
+                pa[0], pa[1], pa[2], pa[3], pa[4], pa[5], self.driver.conn_handle
             );
             let _ = writeln!(w, "  Services   : {}", self.driver.service_count());
             let _ = writeln!(w, "  Chars      : {}", self.driver.char_count());

@@ -89,7 +89,9 @@ pub fn ipc_sender_task() -> ! {
         let ok = userlib::ipc::send(receiver_id, opcode, i as usize, 0xDEAD);
         // Minimal output: just a dot per send to avoid flooding screen.
         userlib::io::write_byte(b'.');
-        if !ok { userlib::io::write_byte(b'!'); }
+        if !ok {
+            userlib::io::write_byte(b'!');
+        }
         userlib::time::sleep(20);
     }
     userlib::io::write_byte(b'\n');
@@ -202,10 +204,14 @@ pub fn spi_loopback_task() -> ! {
     match userlib::hw::spi_transfer(0, &tx, &mut rx) {
         Ok(()) => {
             print!("[spi] TX:");
-            for b in &tx { print!(" {:02X}", b); }
+            for b in &tx {
+                print!(" {:02X}", b);
+            }
             println!();
             print!("[spi] RX:");
-            for b in &rx { print!(" {:02X}", b); }
+            for b in &rx {
+                print!(" {:02X}", b);
+            }
             println!();
             if tx == rx {
                 println!("[spi] loopback PASS — MOSI=MISO verified");

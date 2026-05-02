@@ -103,12 +103,9 @@ impl CapabilityCommitment {
         let mut preimage = [0u8; MAX_CAP_BITS * HASH_LEN];
         for i in 0..MAX_CAP_BITS {
             let leaf = Self::compute_leaf(i, capabilities, &salts[i]);
-            preimage[i * HASH_LEN..(i + 1) * HASH_LEN]
-                .copy_from_slice(&leaf);
+            preimage[i * HASH_LEN..(i + 1) * HASH_LEN].copy_from_slice(&leaf);
         }
-        let root_digest = crypto::sha256::Sha256::digest(
-            &preimage[..MAX_CAP_BITS * HASH_LEN],
-        );
+        let root_digest = crypto::sha256::Sha256::digest(&preimage[..MAX_CAP_BITS * HASH_LEN]);
         let mut root = [0u8; HASH_LEN];
         root.copy_from_slice(&root_digest.bytes[..HASH_LEN]);
 
@@ -124,7 +121,11 @@ impl CapabilityCommitment {
     fn compute_leaf(index: usize, capabilities: u32, salt: &[u8; SALT_LEN]) -> [u8; HASH_LEN] {
         use crypto::Hash;
 
-        let bit = if capabilities & (1u32 << index) != 0 { 1u8 } else { 0u8 };
+        let bit = if capabilities & (1u32 << index) != 0 {
+            1u8
+        } else {
+            0u8
+        };
         let mut input = [0u8; SALT_LEN + 2];
         input[0] = bit;
         input[1..1 + SALT_LEN].copy_from_slice(salt);
@@ -234,15 +235,12 @@ impl CapabilityProof {
                 preimage[i * HASH_LEN..(i + 1) * HASH_LEN]
                     .copy_from_slice(&my_leaf_digest.bytes[..HASH_LEN]);
             } else {
-                preimage[i * HASH_LEN..(i + 1) * HASH_LEN]
-                    .copy_from_slice(&self.sibling_hashes[i]);
+                preimage[i * HASH_LEN..(i + 1) * HASH_LEN].copy_from_slice(&self.sibling_hashes[i]);
             }
         }
 
         // Compute root and compare.
-        let root_digest = crypto::sha256::Sha256::digest(
-            &preimage[..MAX_CAP_BITS * HASH_LEN],
-        );
+        let root_digest = crypto::sha256::Sha256::digest(&preimage[..MAX_CAP_BITS * HASH_LEN]);
         let mut diff = 0u8;
         for i in 0..HASH_LEN {
             diff |= self.root[i] ^ root_digest.bytes[i];
@@ -424,8 +422,7 @@ impl CompletionProof {
         let ctx_len = context.len().min(64);
         let mut chal_input = [0u8; HASH_LEN + 64];
         chal_input[..HASH_LEN].copy_from_slice(&self.commitment);
-        chal_input[HASH_LEN..HASH_LEN + ctx_len]
-            .copy_from_slice(&context[..ctx_len]);
+        chal_input[HASH_LEN..HASH_LEN + ctx_len].copy_from_slice(&context[..ctx_len]);
         let ch = crypto::sha256::Sha256::digest(&chal_input[..HASH_LEN + ctx_len]);
 
         // Check challenge matches.
@@ -479,13 +476,7 @@ impl MemoryExistenceProof {
     }
 
     /// Generate an existence proof for a memory entry.
-    pub fn prove(
-        key: &[u8],
-        value: &[u8],
-        tag: u8,
-        scope: u8,
-        salt: &[u8; SALT_LEN],
-    ) -> Self {
+    pub fn prove(key: &[u8], value: &[u8], tag: u8, scope: u8, salt: &[u8; SALT_LEN]) -> Self {
         use crypto::Hash;
 
         let mut proof = Self::empty();

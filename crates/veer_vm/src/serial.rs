@@ -36,7 +36,7 @@ pub struct SerialSnapshot {
     pub rx: Vec<u8>,
 }
 
-const LSR_DR:   u8 = 1 << 0; // data ready
+const LSR_DR: u8 = 1 << 0; // data ready
 const LSR_THRE: u8 = 1 << 5; // transmit holding register empty
 const LSR_TEMT: u8 = 1 << 6; // transmitter empty
 
@@ -52,7 +52,9 @@ pub struct SerialShared {
 
 impl SerialShared {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { rx: Mutex::new(VecDeque::with_capacity(256)) })
+        Arc::new(Self {
+            rx: Mutex::new(VecDeque::with_capacity(256)),
+        })
     }
 }
 
@@ -78,8 +80,15 @@ impl Serial16550 {
     ) -> Self {
         Self {
             out,
-            ier: 0, lcr: 0, mcr: 0, scr: 0, dll: 0, dlm: 0,
-            shared, irq, irq_asserted: false,
+            ier: 0,
+            lcr: 0,
+            mcr: 0,
+            scr: 0,
+            dll: 0,
+            dlm: 0,
+            shared,
+            irq,
+            irq_asserted: false,
         }
     }
 
@@ -87,7 +96,9 @@ impl Serial16550 {
         Self::new(Box::new(io::stdout()), shared, irq)
     }
 
-    fn dlab(&self) -> bool { (self.lcr & 0x80) != 0 }
+    fn dlab(&self) -> bool {
+        (self.lcr & 0x80) != 0
+    }
 
     fn has_rx(&self) -> bool {
         !self.shared.rx.lock().unwrap().is_empty()
@@ -104,7 +115,9 @@ impl Serial16550 {
     }
 
     pub fn io_in(&mut self, port: u16, data: &mut [u8]) {
-        if data.is_empty() { return; }
+        if data.is_empty() {
+            return;
+        }
         let offset = (port & 0x7) as u8;
         let v = match offset {
             0 if self.dlab() => self.dll,
@@ -128,7 +141,9 @@ impl Serial16550 {
             4 => self.mcr,
             5 => {
                 let mut lsr = LSR_THRE | LSR_TEMT;
-                if self.has_rx() { lsr |= LSR_DR; }
+                if self.has_rx() {
+                    lsr |= LSR_DR;
+                }
                 lsr
             }
             6 => 0, // MSR — report nothing
@@ -136,7 +151,9 @@ impl Serial16550 {
             _ => 0,
         };
         data[0] = v;
-        for b in &mut data[1..] { *b = 0; }
+        for b in &mut data[1..] {
+            *b = 0;
+        }
 
         // Reading RBR / IIR may clear the pending IRQ condition.
         if offset == 0 || offset == 2 {
@@ -145,7 +162,9 @@ impl Serial16550 {
     }
 
     pub fn io_out(&mut self, port: u16, data: &[u8]) {
-        if data.is_empty() { return; }
+        if data.is_empty() {
+            return;
+        }
         let offset = (port & 0x7) as u8;
         let v = data[0];
         match offset {
@@ -170,7 +189,9 @@ impl Serial16550 {
     }
 
     /// Re-evaluate IRQ after external RX queue change.
-    pub fn kick_rx(&mut self) { self.update_irq(); }
+    pub fn kick_rx(&mut self) {
+        self.update_irq();
+    }
 
     pub fn snapshot(&self) -> SerialSnapshot {
         let rx = self.shared.rx.lock().unwrap().iter().copied().collect();
