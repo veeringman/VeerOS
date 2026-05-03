@@ -92,6 +92,10 @@ pub enum VmCmd {
         #[arg(long, value_parser = ["shared", "host"])]
         vmnet: Option<String>,
 
+        /// macOS riscv32 backend passed through to `veer-vm --riscv32-backend`.
+        #[arg(long, value_parser = ["auto", "soft", "qemu"])]
+        riscv32_backend: Option<String>,
+
         /// Fold name. Defaults to `veeros-vm-<6-hex>`.
         #[arg(long, short)]
         name: Option<String>,
@@ -237,6 +241,33 @@ mod tests {
                 cmd: VmCmd::Spawn { tap, .. },
             } => {
                 assert!(tap.is_none());
+            }
+            _ => panic!("parsed wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn vm_spawn_parses_riscv32_backend_flag() {
+        let cli = Cli::try_parse_from([
+            "fold",
+            "vm",
+            "spawn",
+            "--kernel",
+            "/tmp/kernel.elf",
+            "--arch",
+            "riscv32",
+            "--riscv32-backend",
+            "soft",
+        ])
+        .unwrap();
+
+        match cli.cmd {
+            Cmd::Vm {
+                cmd: VmCmd::Spawn {
+                    riscv32_backend, ..
+                },
+            } => {
+                assert_eq!(riscv32_backend.as_deref(), Some("soft"));
             }
             _ => panic!("parsed wrong command variant"),
         }

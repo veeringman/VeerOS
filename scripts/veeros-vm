@@ -8,6 +8,10 @@
 # Usage:
 #   veeros-vm create <name> [options]     Create a new VM
 #     --target x86_64|esp32c6            Target architecture
+#     --net nat|bridge|user              Network backend
+#       nat    — QEMU user-net with hostfwd (x86_64 / esp32c6)
+#       bridge — virtio-net TAP bridge (Linux)
+#       user   — veer-vm user-net, no root (esp32c6 VirtualIoT, macOS)
 #   veeros-vm start <name>                Start a VM
 #   veeros-vm stop <name>                 Stop a VM (graceful)
 #   veeros-vm kill <name>                 Force-kill a VM
@@ -47,6 +51,7 @@ VEEROS_VOLUMES="$VEEROS_HOME/volumes"
 VEEROS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VEEROS_ISO="$VEEROS_ROOT/build/veeros.iso"
 VEEROS_ESP32C6_ELF="$VEEROS_ROOT/target/riscv32imc-unknown-none-elf/release/kernel-qemu-esp32c6"
+VEEROS_ESP32C6_DEBUG_ELF="$VEEROS_ROOT/target/riscv32imc-unknown-none-elf/debug/kernel-qemu-esp32c6"
 
 # Ensure base dirs exist
 mkdir -p "$VEEROS_VMS" "$VEEROS_VOLUMES"
@@ -289,7 +294,7 @@ _tap_destroy() {
 
 cmd_create() {
     local name="${1:-}"
-    [ -n "$name" ] || die "usage: veeros-vm create <name> [--target x86_64|esp32c6] [--memory MB] [--disk SIZE] [--ssh-port PORT] [--net nat|bridge] [--bridge BR]"
+    [ -n "$name" ] || die "usage: veeros-vm create <name> [--target x86_64|esp32c6] [--memory MB] [--disk SIZE] [--ssh-port PORT] [--net nat|bridge|user] [--bridge BR]"
     validate_name "$name"
     vm_exists "$name" && die "VM '$name' already exists"
     shift
@@ -321,6 +326,10 @@ cmd_create() {
     case "$target" in
         x86_64|esp32c6) ;;
         *) die "invalid target '$target' (use x86_64 or esp32c6)" ;;
+    esac
+    case "$net_mode" in
+        nat|bridge|user) ;;
+        *) die "invalid --net '$net_mode' (use nat, bridge, or user)" ;;
     esac
 
     # Apply target defaults
@@ -467,12 +476,42 @@ cmd_start() {
     local qemu_args=()
 
     if [ "$target" = "esp32c6" ]; then
-        # ── ESP32-C6 (RISC-V 32, QEMU virt) ────────────────────────
-        if [ ! -f "$VEEROS_ESP32C6_ELF" ]; then
+        # ── ESP32-C6 (RISC-V 32) ────────────────────────────────────
+        # Prefer release ELF; fall back to debug for dev workflows
+        local esp32c6_elf="$VEEROS_ESP32C6_ELF"
+        if [ ! -f "$esp32c6_elf" ] && [ -f "$VEEROS_ESP32C6_DEBUG_ELF" ]; then
+            esp32c6_elf="$VEEROS_ESP32C6_DEBUG_ELF"
+        fi
+        if [ ! -f "$esp32c6_elf" ]; then
             echo "Building ESP32-C6 kernel..."
             "$VEEROS_ROOT/scripts/build-qemu-esp32c6.sh" release
+            esp32c6_elf="$VEEROS_ESP32C6_ELF"
         fi
 
+        if [ "$net_mode" = "user" ]; then
+            # user-net: run via veer-vm (no root, no TAP, macOS-friendly)
+            local veer_vm_bin="$VEEROS_ROOT/target/debug/veer-vm"
+            if [ ! -f "$veer_vm_bin" ]; then
+                veer_vm_bin="$VEEROS_ROOT/target/release/veer-vm"
+            fi
+            [ -f "$veer_vm_bin" ] || die "veer-vm binary not found — run build-veer-vm-esp32c6.sh first"
+
+            echo "Starting VirtualIoT '$name' (user-net, port $ssh_port) ..."
+            nohup "$veer_vm_bin" \
+                --arch riscv32 \
+                --kernel "$esp32c6_elf" \
+                --memory "$memory" \
+                --net user \
+                --net-hostfwd-port "$ssh_port" \
+                >"$log" 2>&1 &
+            echo $! > "$(vm_pid_file "$name")"
+            vm_set "$name" last_started "$(date -Iseconds)"
+            echo "VM '$name' started (pid=$!)"
+            echo "  Connect: veer-connect shell 127.0.0.1 ${ssh_port}  (user: root / toor)"
+            return 0
+        fi
+
+        # nat / bridge: use bare QEMU for compatibility
         qemu_bin="qemu-system-riscv32"
         command -v "$qemu_bin" >/dev/null 2>&1 || die "qemu-system-riscv32 not found — install qemu-system-misc"
 
@@ -480,7 +519,7 @@ cmd_start() {
             -M virt
             -m "${memory}M"
             -bios none
-            -kernel "$VEEROS_ESP32C6_ELF"
+            -kernel "$esp32c6_elf"
             -name "veeros-$name"
         )
 
@@ -631,11 +670,18 @@ cmd_start() {
 
     echo "VM '$name' started (pid=$pid)"
     if [ "$target" = "esp32c6" ]; then
-        if [ "$net_mode" = "nat" ]; then
-            echo "  Connect: nc localhost ${ssh_port}  (password: veeros)"
-        else
-            echo "  Connect: nc <ip> 2323  (use 'veeros-vm ip $name' after boot)"
-        fi
+        case "$net_mode" in
+            user)
+                echo "  Connect: veer-connect shell 127.0.0.1 ${ssh_port}  (user: root / toor)"
+                echo "  Sensors: veer-connect shell 127.0.0.1 ${ssh_port}  then: sensor list"
+                ;;
+            nat)
+                echo "  Connect: nc localhost ${ssh_port}  (password: veeros)"
+                ;;
+            *)
+                echo "  Connect: nc <ip> 2323  (use 'veeros-vm ip $name' after boot)"
+                ;;
+        esac
     elif [ "$net_mode" = "nat" ]; then
         echo "  SSH: ssh -p ${ssh_port} veeros@localhost"
     else

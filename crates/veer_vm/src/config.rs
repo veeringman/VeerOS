@@ -12,17 +12,25 @@ pub enum GuestArch {
     Aarch64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmnetMode {
     Shared,
     Host,
+    /// Bridged to a specific physical interface (e.g. "en0").
+    Bridged(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UserNetMode {
+    User { host_port: u16, guest_port: u16 },
 }
 
 impl VmnetMode {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             VmnetMode::Shared => "shared",
             VmnetMode::Host => "host",
+            VmnetMode::Bridged(_) => "bridged",
         }
     }
 }
@@ -49,6 +57,8 @@ pub struct VmConfig {
     pub tap_name: Option<String>,
     /// macOS vmnet mode request.
     pub vmnet_mode: Option<VmnetMode>,
+    /// Entitlement-free userspace networking request.
+    pub user_net: Option<UserNetMode>,
     /// MAC address advertised to the guest.
     pub mac: [u8; 6],
     /// Save a snapshot directory when the VM shuts down cleanly.

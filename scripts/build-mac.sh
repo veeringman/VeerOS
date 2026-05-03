@@ -19,6 +19,19 @@ else
 fi
 
 ENTITLEMENTS="${VEER_VM_CRATE}/veer-vm.entitlements"
+# Use the vmnet entitlements file when VEER_VM_VMNET=1 is set AND SIP is
+# disabled.  With SIP enabled, com.apple.vm.networking requires a provisioning
+# profile; embedding it without one causes an immediate SIGKILL.
+# veer-vm-vmnet.entitlements adds com.apple.vm.networking on top of the base.
+if [[ "${VEER_VM_VMNET:-0}" == "1" ]]; then
+    if csrutil status 2>/dev/null | grep -q "disabled"; then
+        ENTITLEMENTS="${VEER_VM_CRATE}/veer-vm-vmnet.entitlements"
+    else
+        echo "WARN: VEER_VM_VMNET=1 requested but SIP is enabled — using base entitlements."
+        echo "      vmnet modes (shared/host/bridged) will be rejected at runtime."
+        echo "      Disable SIP or provide a provisioning profile to use vmnet."
+    fi
+fi
 DEFAULT_TARGET_DIR="${MANIFEST_DIR}/target"
 
 native_macos_target() {
@@ -154,8 +167,16 @@ sign_and_verify() {
     echo "▶ Signing veer-vm: ${bin}"
     # Remove any stale signature before re-signing to make result deterministic.
     codesign --remove-signature "${bin}" >/dev/null 2>&1 || true
-    # '-' means ad-hoc signing (no certificate needed for local dev).
-    codesign --force --sign - --timestamp=none --entitlements "${entitlements}" "${bin}"
+    # Use Apple Development cert if available; fall back to ad-hoc (-).
+    # NOTE: com.apple.vm.networking (vmnet.framework) additionally requires a
+    # provisioning profile approved by the Apple Developer portal — ad-hoc
+    # signing is sufficient only when SIP is disabled. See SIP_DISABLE_GUIDE.md.
+    local SIGN_IDENTITY="-"
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "Apple Development:"; then
+        SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+            | grep 'Apple Development:' | head -1 | awk '{print $2}')"
+    fi
+    codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none --entitlements "${entitlements}" "${bin}"
 
     echo "▶ Verifying signature and hypervisor entitlement..."
     codesign --verify --verbose=4 "${bin}"

@@ -34,7 +34,50 @@ use crate::config::{BootSource, VmConfig};
 use crate::elf;
 use crate::memory::GuestMem;
 use crate::termios_guard::RawMode;
+use crate::user_net::UserNetHandle;
 use crate::vm::{self, SHUTDOWN};
+
+// ── macOS vmnet.framework bindings ──────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+use std::ffi::{c_char, c_uchar, c_void, CString};
+#[cfg(target_os = "macos")]
+use crate::config::VmnetMode;
+
+#[cfg(target_os = "macos")]
+const VMNET_SUCCESS_RC: i32 = 1000;
+
+#[cfg(target_os = "macos")]
+#[link(name = "veer_vmnet_shim", kind = "static")]
+unsafe extern "C" {
+    fn veer_vmnet_start(mode: u32, mac: *const c_char, bridge_if: *const c_char, out_interface: *mut *mut c_void) -> i32;
+    fn veer_vmnet_stop(interface: *mut c_void) -> i32;
+    fn veer_vmnet_write_frame(interface: *mut c_void, frame: *const c_uchar, len: usize) -> i32;
+    fn veer_vmnet_read_frame(
+        interface: *mut c_void,
+        frame: *mut c_uchar,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> i32;
+}
+
+/// Thread-safe wrapper around a vmnet interface pointer.
+#[cfg(target_os = "macos")]
+struct VmnetHandle(pub *mut c_void);
+#[cfg(target_os = "macos")]
+unsafe impl Send for VmnetHandle {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for VmnetHandle {}
+#[cfg(target_os = "macos")]
+impl Drop for VmnetHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                veer_vmnet_stop(self.0);
+            }
+        }
+    }
+}
 
 // ── MMIO map ────────────────────────────────────────────────────────────
 
@@ -267,6 +310,10 @@ pub(crate) struct VirtioNetDev {
     queues: [VirtQueue; 2],
     /// Raw TAP fd; -1 if not configured.
     pub(crate) tap_fd: std::os::unix::io::RawFd,
+    /// macOS vmnet.framework interface (preferred over tap_fd on macOS).
+    #[cfg(target_os = "macos")]
+    pub(crate) vmnet: Option<Arc<VmnetHandle>>,
+    pub(crate) user_net: Option<Arc<UserNetHandle>>,
 }
 
 impl VirtioNetDev {
@@ -280,6 +327,9 @@ impl VirtioNetDev {
             mac,
             queues: [VirtQueue::new(), VirtQueue::new()],
             tap_fd,
+            #[cfg(target_os = "macos")]
+            vmnet: None,
+            user_net: None,
         }
     }
 }
@@ -291,6 +341,7 @@ impl Drop for VirtioNetDev {
                 libc::close(self.tap_fd);
             }
         }
+        // vmnet Arc<VmnetHandle> drops automatically, calling veer_vmnet_stop.
     }
 }
 
@@ -420,12 +471,31 @@ fn process_tx(dev: &mut VirtioNetDev, guest: &Arc<GuestMem>) {
         let buf_len = g_r32(guest, d.wrapping_add(8)) as usize;
 
         // Strip 10-byte virtio-net header, send raw Ethernet frame.
-        if tap_fd >= 0 && buf_len > VIRTIO_NET_HDR_SIZE {
+        if buf_len > VIRTIO_NET_HDR_SIZE {
             let frame_gpa = buf_addr as u32 + VIRTIO_NET_HDR_SIZE as u32;
             let frame_len = buf_len - VIRTIO_NET_HDR_SIZE;
             if let Ok(frame) = guest.slice_mut(frame_gpa as u64, frame_len) {
-                unsafe {
-                    libc::write(tap_fd, frame.as_ptr() as *const libc::c_void, frame_len);
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(vmnet) = &dev.vmnet {
+                        unsafe {
+                            veer_vmnet_write_frame(vmnet.0, frame.as_ptr(), frame_len);
+                        }
+                    } else if let Some(user_net) = &dev.user_net {
+                        user_net.send_frame(frame);
+                    } else if tap_fd >= 0 {
+                        unsafe {
+                            libc::write(tap_fd, frame.as_ptr() as *const libc::c_void, frame_len);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                if let Some(user_net) = &dev.user_net {
+                    user_net.send_frame(frame);
+                } else if tap_fd >= 0 {
+                    unsafe {
+                        libc::write(tap_fd, frame.as_ptr() as *const libc::c_void, frame_len);
+                    }
                 }
             }
         }
@@ -472,10 +542,29 @@ fn g_w32(mem: &Arc<GuestMem>, gpa: u32, v: u32) {
 // ── Open TAP fd ────────────────────────────────────────────────────────
 
 fn open_tap(ifname: &str) -> anyhow::Result<std::os::unix::io::RawFd> {
-    use anyhow::{bail, Context};
+    use anyhow::bail;
     if ifname.len() >= 16 {
         bail!("TAP interface name '{ifname}' too long (max 15 bytes)");
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        if !ifname.starts_with("tap") {
+            bail!("macOS TAP name '{ifname}' is unsupported (expected tapN, e.g. tap0)");
+        }
+        let dev_path = format!("/dev/{ifname}");
+        let c_path = std::ffi::CString::new(dev_path.clone())
+            .map_err(|e| anyhow::anyhow!("building TAP device path: {e}"))?;
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            bail!("open {dev_path}: {e} (install/load tuntaposx and ensure {ifname} exists)");
+        }
+        return Ok(fd);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
     let fd = unsafe {
         libc::open(
             b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
@@ -508,6 +597,57 @@ fn open_tap(ifname: &str) -> anyhow::Result<std::os::unix::io::RawFd> {
         bail!("TUNSETIFF on '{ifname}': {e} (create it first: `ip tuntap add dev {ifname} mode tap user $USER && ip link set {ifname} up`)");
     }
     Ok(fd)
+    }
+}
+
+// ── Virtio-net RX delivery ──────────────────────────────────────────────
+
+fn deliver_rx_frame(guest: &Arc<GuestMem>, vnet: &Arc<Mutex<VirtioNetDev>>, frame: &[u8]) -> bool {
+    let mut dev = vnet.lock().unwrap();
+    let q = &mut dev.queues[0]; // RX
+    if !q.ready || q.avail_addr == 0 {
+        return false;
+    }
+
+    let avail_idx = g_r16(guest, q.avail_addr.wrapping_add(2));
+    if q.last_avail_idx == avail_idx {
+        return false;
+    }
+
+    let ring_slot = (q.last_avail_idx as u32 % q.num) as u32;
+    let desc_id = g_r16(
+        guest,
+        q.avail_addr.wrapping_add(4).wrapping_add(ring_slot * 2),
+    ) as usize;
+
+    let d = q.desc_addr.wrapping_add(desc_id as u32 * 16);
+    let buf_addr = g_r32(guest, d) as u32;
+    let buf_len = g_r32(guest, d.wrapping_add(8)) as usize;
+
+    let total = (VIRTIO_NET_HDR_SIZE + frame.len()).min(buf_len);
+    let _ = guest.write(buf_addr as u64, &[0u8; 10]);
+    if total > VIRTIO_NET_HDR_SIZE {
+        let frame_len = total - VIRTIO_NET_HDR_SIZE;
+        let _ = guest.write(buf_addr as u64 + 10, &frame[..frame_len]);
+    }
+
+    let used_idx = g_r16(guest, q.used_addr.wrapping_add(2));
+    let used_slot = (used_idx as u32 % q.num) as u32;
+    g_w32(
+        guest,
+        q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8),
+        desc_id as u32,
+    );
+    g_w32(
+        guest,
+        q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8 + 4),
+        total as u32,
+    );
+    g_w16(guest, q.used_addr.wrapping_add(2), used_idx.wrapping_add(1));
+
+    q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
+    dev.interrupt_status |= 1;
+    true
 }
 
 // ── TAP rx thread ───────────────────────────────────────────────────────
@@ -545,58 +685,52 @@ fn tap_rx_thread(
             break;
         }
         let n = n as usize;
+        let _ = deliver_rx_frame(&guest, &vnet, &frame_buf[..n]);
+    }
+}
 
-        let mut dev = vnet.lock().unwrap();
-        let q = &mut dev.queues[0]; // RX
-        if !q.ready || q.avail_addr == 0 {
-            continue;
+fn user_net_rx_thread(
+    user_net: Arc<UserNetHandle>,
+    guest: Arc<GuestMem>,
+    vnet: Arc<Mutex<VirtioNetDev>>,
+) {
+    while !SHUTDOWN.load(Ordering::SeqCst) {
+        if let Some(frame) = user_net.recv_frame(Duration::from_millis(10)) {
+            while !SHUTDOWN.load(Ordering::SeqCst) {
+                if deliver_rx_frame(&guest, &vnet, &frame) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+// ── vmnet rx thread (macOS vmnet.framework) ─────────────────────────────
+
+#[cfg(target_os = "macos")]
+fn vmnet_rx_thread(
+    vmnet: Arc<VmnetHandle>,
+    guest: Arc<GuestMem>,
+    vnet: Arc<Mutex<VirtioNetDev>>,
+) {
+    let mut frame_buf = vec![0u8; 2048];
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            break;
         }
 
-        let avail_idx = g_r16(&guest, q.avail_addr.wrapping_add(2));
-        if q.last_avail_idx == avail_idx {
-            // No RX buffers posted; drop frame.
-            continue;
+        let mut len = 0usize;
+        let rc = unsafe {
+            veer_vmnet_read_frame(vmnet.0, frame_buf.as_mut_ptr(), frame_buf.len(), &mut len)
+        };
+
+        if rc == VMNET_SUCCESS_RC && len > 0 {
+            let _ = deliver_rx_frame(&guest, &vnet, &frame_buf[..len]);
+        } else {
+            // No data available; sleep before polling again.
+            thread::sleep(Duration::from_millis(2));
         }
-
-        let ring_slot = (q.last_avail_idx as u32 % q.num) as u32;
-        let desc_id = g_r16(
-            &guest,
-            q.avail_addr.wrapping_add(4).wrapping_add(ring_slot * 2),
-        ) as usize;
-
-        let d = q.desc_addr.wrapping_add(desc_id as u32 * 16);
-        let buf_addr = g_r32(&guest, d) as u32;
-        let buf_len = g_r32(&guest, d.wrapping_add(8)) as usize;
-
-        let total = (VIRTIO_NET_HDR_SIZE + n).min(buf_len);
-        // Write 10-byte virtio-net header (all zeros = no offload).
-        let _ = guest.write(buf_addr as u64, &[0u8; 10]);
-        if total > VIRTIO_NET_HDR_SIZE {
-            let frame_len = total - VIRTIO_NET_HDR_SIZE;
-            let _ = guest.write(buf_addr as u64 + 10, &frame_buf[..frame_len]);
-        }
-
-        // Update used ring.
-        let used_idx = g_r16(&guest, q.used_addr.wrapping_add(2));
-        let used_slot = (used_idx as u32 % q.num) as u32;
-        g_w32(
-            &guest,
-            q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8),
-            desc_id as u32,
-        );
-        g_w32(
-            &guest,
-            q.used_addr.wrapping_add(4).wrapping_add(used_slot * 8 + 4),
-            total as u32,
-        );
-        g_w16(
-            &guest,
-            q.used_addr.wrapping_add(2),
-            used_idx.wrapping_add(1),
-        );
-
-        q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
-        dev.interrupt_status |= 1;
     }
 }
 
@@ -650,6 +784,70 @@ pub fn run(cfg: VmConfig) -> Result<()> {
 
     let vnet = Arc::new(Mutex::new(VirtioNetDev::new(cfg.mac, tap_fd)));
 
+    let user_net_handle: Option<Arc<UserNetHandle>> = if let Some(mode) = &cfg.user_net {
+        if cfg.tap_name.is_some() || cfg.vmnet_mode.is_some() {
+            bail!("--net user is mutually exclusive with --tap and --vmnet for rv32-soft");
+        }
+        match mode {
+            crate::config::UserNetMode::User { host_port, guest_port } => {
+                let handle = UserNetHandle::start(cfg.mac, *host_port, *guest_port)?;
+                vnet.lock().unwrap().user_net = Some(handle.clone());
+                eprintln!(
+                    "[veer-vm] rv32-soft: user-net dhcp=10.0.2.15 hostfwd=tcp::{}-:{} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    host_port,
+                    guest_port,
+                    cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5],
+                );
+                Some(handle)
+            }
+        }
+    } else {
+        None
+    };
+
+    // On macOS, open vmnet.framework interface when --vmnet is requested.
+    #[cfg(target_os = "macos")]
+    let vmnet_handle: Option<Arc<VmnetHandle>> = if let Some(mode) = cfg.vmnet_mode {
+        if cfg.tap_name.is_some() {
+            bail!("--tap and --vmnet are mutually exclusive for rv32-soft");
+        }
+        let (mode_raw, bridge_if_cstr): (u32, Option<CString>) = match &mode {
+            VmnetMode::Bridged(iface) => (
+                0,
+                Some(CString::new(iface.as_str()).context("formatting bridge interface")?),
+            ),
+            VmnetMode::Host => (1, None),
+            VmnetMode::Shared => (2, None),
+        };
+        let bridge_if_ptr = bridge_if_cstr.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5]
+        );
+        let mac_cstr = CString::new(mac_str).context("formatting vmnet MAC")?;
+        let mut iface: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe { veer_vmnet_start(mode_raw, mac_cstr.as_ptr(), bridge_if_ptr, &mut iface) };
+        if rc != VMNET_SUCCESS_RC {
+            bail!(
+                "vmnet_start_interface failed (rc={rc}). \
+                 Requires the com.apple.vm.networking entitlement or admin approval."
+            );
+        }
+        if iface.is_null() {
+            bail!("vmnet started but returned a null interface");
+        }
+        let handle = Arc::new(VmnetHandle(iface));
+        vnet.lock().unwrap().vmnet = Some(handle.clone());
+        eprintln!(
+            "[veer-vm] rv32-soft: vmnet={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mode.as_str(),
+            cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5],
+        );
+        Some(handle)
+    } else {
+        None
+    };
+
     vm::install_signal_handlers()?;
     let raw_guard = RawMode::enter()?;
     let interactive = raw_guard.is_active();
@@ -676,6 +874,26 @@ pub fn run(cfg: VmConfig) -> Result<()> {
             .name("veer-vm-rv32-tap-rx".into())
             .spawn(move || tap_rx_thread(tap_fd, guest_rx, vnet_rx))
             .context("spawn rv32 TAP rx thread")?;
+    }
+
+    // Spawn vmnet rx thread if vmnet is configured (macOS only).
+    #[cfg(target_os = "macos")]
+    if let Some(vmnet) = vmnet_handle {
+        let guest_rx = guest.clone();
+        let vnet_rx = vnet.clone();
+        thread::Builder::new()
+            .name("veer-vm-rv32-vmnet-rx".into())
+            .spawn(move || vmnet_rx_thread(vmnet, guest_rx, vnet_rx))
+            .context("spawn rv32 vmnet rx thread")?;
+    }
+
+    if let Some(user_net) = user_net_handle {
+        let guest_rx = guest.clone();
+        let vnet_rx = vnet.clone();
+        thread::Builder::new()
+            .name("veer-vm-rv32-user-net-rx".into())
+            .spawn(move || user_net_rx_thread(user_net, guest_rx, vnet_rx))
+            .context("spawn rv32 user-net rx thread")?;
     }
 
     // Spawn sensor feed thread if a FIFO path is provided.

@@ -707,9 +707,11 @@ static IDLE_STACK: IdleStack = IdleStack([0u8; 512]);
 
 #[cfg(feature = "shell")]
 #[repr(align(16))]
-struct ShellStack([u8; 49152]);
+struct ShellStack([u8; 131072]);
 #[cfg(feature = "shell")]
-static SHELL_STACK: ShellStack = ShellStack([0u8; 49152]);
+const SHELL_STACK_BYTES: usize = 131072;
+#[cfg(feature = "shell")]
+static mut SHELL_STACK: ShellStack = ShellStack([0u8; SHELL_STACK_BYTES]);
 
 // ---------------------------------------------------------------------------
 // Network task — multi-connection support
@@ -753,17 +755,80 @@ static mut CONN_STORAGE: [NetStorage; MAX_REMOTE_SESSIONS] = [
     NetStorage::new(),
 ];
 
-// Per-connection task stacks (48KB each — vi editor needs headroom)
+// Per-connection task stacks (128KB each — extra headroom to avoid deep
+// shell/network call-chain overflows under rv32-soft timing).
 #[cfg(feature = "net")]
 #[repr(align(16))]
-struct ConnStack([u8; 49152]);
+struct ConnStack([u8; 131072]);
 #[cfg(feature = "net")]
-static CONN_STACKS: [ConnStack; MAX_REMOTE_SESSIONS] = [
-    ConnStack([0u8; 49152]),
-    ConnStack([0u8; 49152]),
-    ConnStack([0u8; 49152]),
-    ConnStack([0u8; 49152]),
+const CONN_STACK_BYTES: usize = 131072;
+#[cfg(feature = "net")]
+static mut CONN_STACKS: [ConnStack; MAX_REMOTE_SESSIONS] = [
+    ConnStack([0u8; CONN_STACK_BYTES]),
+    ConnStack([0u8; CONN_STACK_BYTES]),
+    ConnStack([0u8; CONN_STACK_BYTES]),
+    ConnStack([0u8; CONN_STACK_BYTES]),
 ];
+
+#[cfg(feature = "shell")]
+const STACK_CANARY_LEN: usize = 64;
+#[cfg(feature = "shell")]
+const STACK_CANARY_BYTE: u8 = 0xA5;
+
+#[cfg(feature = "shell")]
+fn init_stack_canaries() {
+    unsafe {
+        let shell_base = core::ptr::addr_of_mut!(SHELL_STACK.0) as *mut u8;
+        for i in 0..STACK_CANARY_LEN {
+            shell_base.add(i).write(STACK_CANARY_BYTE);
+        }
+        #[cfg(feature = "net")]
+        for slot in 0..MAX_REMOTE_SESSIONS {
+            let conn_base = core::ptr::addr_of_mut!(CONN_STACKS[slot].0) as *mut u8;
+            for i in 0..STACK_CANARY_LEN {
+                conn_base.add(i).write(STACK_CANARY_BYTE);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
+unsafe fn stack_canary_ok(base: *const u8) -> bool {
+    for i in 0..STACK_CANARY_LEN {
+        if base.add(i).read() != STACK_CANARY_BYTE {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(feature = "shell")]
+fn write_stack_canary_info(w: &mut dyn core::fmt::Write) {
+    unsafe {
+        let shell_ok = stack_canary_ok(core::ptr::addr_of!(SHELL_STACK.0) as *const u8);
+        let _ = writeln!(
+            w,
+            "  shell stack canary : {}",
+            if shell_ok { "ok" } else { "OVERFLOW" }
+        );
+
+        #[cfg(feature = "net")]
+        {
+            let mut bad = 0usize;
+            for slot in 0..MAX_REMOTE_SESSIONS {
+                if !stack_canary_ok(core::ptr::addr_of!(CONN_STACKS[slot].0) as *const u8) {
+                    bad += 1;
+                }
+            }
+            let _ = writeln!(
+                w,
+                "  remote stack canary: {}/{} bad",
+                bad,
+                MAX_REMOTE_SESSIONS
+            );
+        }
+    }
+}
 
 /// Session timeout: force-kill sessions older than this many scheduler ticks.
 /// With 1 ms ticks this is ~120 seconds.
@@ -1322,8 +1387,8 @@ fn net_task() -> ! {
                         slots[listen_slot].started_tick = now;
                         *PENDING_CONN_SLOT.0.get() = listen_slot;
 
-                        let sb = CONN_STACKS[listen_slot].0.as_ptr() as usize;
-                        let st = sb + CONN_STACKS[listen_slot].0.len();
+                        let sb = core::ptr::addr_of!(CONN_STACKS[listen_slot].0) as *const u8 as usize;
+                        let st = sb + CONN_STACK_BYTES;
 
                         #[cfg(feature = "shell")]
                         {
@@ -1411,10 +1476,25 @@ fn get_uptime_ticks() -> u64 {
 }
 
 #[cfg(feature = "shell")]
+fn write_scheduler_health(w: &mut dyn core::fmt::Write) {
+    unsafe {
+        let sched = &*SCHEDULER.0.get();
+        let _ = writeln!(w, "  scheduler ticks : {}", sched.ticks);
+        if sched.current < sched.tasks.len() {
+            let _ = writeln!(w, "  scheduler slot  : {}", sched.current);
+        } else {
+            let _ = writeln!(w, "  scheduler slot  : none");
+        }
+    }
+}
+
+#[cfg(feature = "shell")]
 fn write_mem_info(w: &mut dyn core::fmt::Write) {
     unsafe {
         (*HEAP.0.get()).write_stats(w);
     }
+    write_scheduler_health(w);
+    write_stack_canary_info(w);
 }
 
 #[cfg(feature = "shell")]
@@ -1426,23 +1506,8 @@ fn write_driver_list(w: &mut dyn core::fmt::Write) {
 
 #[cfg(feature = "shell")]
 fn write_task_list(w: &mut dyn core::fmt::Write) {
-    let sched = unsafe { &*SCHEDULER.0.get() };
-    let _ = writeln!(w, "  ID  STATE     PRI  NAME");
-    let _ = writeln!(w, "  --  --------  ---  --------");
-    for (i, t) in sched.tasks.iter().enumerate() {
-        if t.state != TaskState::Free {
-            let st = match t.state {
-                TaskState::Free => "free",
-                TaskState::Ready => "ready",
-                TaskState::Running => "RUNNING",
-                TaskState::Blocked => "blocked",
-                TaskState::Suspended => "suspend",
-                TaskState::Zombie => "zombie",
-            };
-            let _ = writeln!(w, "  {:2}  {:8}  {:3}  {}", i, st, t.priority, t.name);
-        }
-    }
-    let _ = writeln!(w, "  ticks: {}", sched.ticks);
+    let _ = writeln!(w, "  task table: temporarily unavailable");
+    let _ = writeln!(w, "  reason: scheduler metadata inspection is disabled to avoid hangs");
 }
 
 #[cfg(feature = "shell")]
@@ -2691,6 +2756,9 @@ pub extern "C" fn _rust_start() -> ! {
         let user_tbl = &mut *USERS.0.get();
         user_tbl.init_defaults();
 
+        #[cfg(feature = "shell")]
+        init_stack_canaries();
+
         // Idle task (priority 0)
         let sb = IDLE_STACK.0.as_ptr() as usize;
         let st = sb + IDLE_STACK.0.len();
@@ -2702,8 +2770,8 @@ pub extern "C" fn _rust_start() -> ! {
         // Shell task (priority 1)
         #[cfg(feature = "shell")]
         {
-            let sb = SHELL_STACK.0.as_ptr() as usize;
-            let st = sb + SHELL_STACK.0.len();
+            let sb = core::ptr::addr_of!(SHELL_STACK.0) as *const u8 as usize;
+            let st = sb + SHELL_STACK_BYTES;
             if let Some(idx) =
                 sched.create_task("shell", shell_task as *const () as usize, st, sb, 1, 0)
             {

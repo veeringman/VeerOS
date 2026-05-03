@@ -5,7 +5,9 @@
 #include <vmnet/vmnet.h>
 #include <xpc/xpc.h>
 
-int veer_vmnet_start(uint32_t mode, const char *mac, void **out_interface) {
+// mode: 0 = bridged, 1 = host, 2 = shared
+// bridge_if: physical interface name for bridged mode (e.g. "en0"); NULL for shared/host
+int veer_vmnet_start(uint32_t mode, const char *mac, const char *bridge_if, void **out_interface) {
     if (out_interface == NULL) {
         return VMNET_INVALID_ARGUMENT;
     }
@@ -16,15 +18,23 @@ int veer_vmnet_start(uint32_t mode, const char *mac, void **out_interface) {
         return VMNET_MEM_FAILURE;
     }
 
-    xpc_dictionary_set_uint64(
-        desc,
-        vmnet_operation_mode_key,
-        mode == 1 ? VMNET_HOST_MODE : VMNET_SHARED_MODE);
+    uint64_t vmnet_mode;
+    if (mode == 0) {
+        vmnet_mode = VMNET_BRIDGED_MODE;
+    } else if (mode == 1) {
+        vmnet_mode = VMNET_HOST_MODE;
+    } else {
+        vmnet_mode = VMNET_SHARED_MODE;
+    }
+    xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, vmnet_mode);
     xpc_dictionary_set_uint64(desc, vmnet_mtu_key, 1500);
     xpc_dictionary_set_uint64(desc, vmnet_max_packet_size_key, 1514);
     xpc_dictionary_set_bool(desc, vmnet_allocate_mac_address_key, false);
     if (mac != NULL && mac[0] != '\0') {
         xpc_dictionary_set_string(desc, vmnet_mac_address_key, mac);
+    }
+    if (mode == 0 && bridge_if != NULL && bridge_if[0] != '\0') {
+        xpc_dictionary_set_string(desc, vmnet_shared_interface_name_key, bridge_if);
     }
 
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);

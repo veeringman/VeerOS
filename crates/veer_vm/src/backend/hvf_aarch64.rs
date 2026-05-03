@@ -90,7 +90,7 @@ const VMNET_NOT_AUTHORIZED: i32 = 1010;
 
 #[link(name = "veer_vmnet_shim", kind = "static")]
 unsafe extern "C" {
-    fn veer_vmnet_start(mode: u32, mac: *const c_char, out_interface: *mut *mut c_void) -> i32;
+    fn veer_vmnet_start(mode: u32, mac: *const c_char, bridge_if: *const c_char, out_interface: *mut *mut c_void) -> i32;
     fn veer_vmnet_stop(interface: *mut c_void) -> i32;
     fn veer_vmnet_write_frame(interface: *mut c_void, frame: *const c_uchar, len: usize) -> i32;
     fn veer_vmnet_read_frame(
@@ -536,13 +536,18 @@ impl VirtioMmioBlk {
 
 impl VmnetInterface {
     fn start(mode: VmnetMode, mac: [u8; 6]) -> Result<Self> {
-        let mode_raw = match mode {
-            VmnetMode::Host => 1,
-            VmnetMode::Shared => 2,
+        let (mode_raw, bridge_if_cstr) = match &mode {
+            VmnetMode::Bridged(iface) => {
+                let c = CString::new(iface.as_str()).context("formatting bridge interface")?;
+                (0u32, Some(c))
+            }
+            VmnetMode::Host => (1u32, None),
+            VmnetMode::Shared => (2u32, None),
         };
+        let bridge_if_ptr = bridge_if_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr());
         let mac = CString::new(format_mac(mac)).context("formatting vmnet MAC")?;
         let mut interface = ptr::null_mut();
-        let rc = unsafe { veer_vmnet_start(mode_raw, mac.as_ptr(), &mut interface) };
+        let rc = unsafe { veer_vmnet_start(mode_raw, mac.as_ptr(), bridge_if_ptr, &mut interface) };
         if rc != VMNET_SUCCESS {
             bail!("{}", vmnet_error(rc));
         }

@@ -19,6 +19,7 @@ pub struct VmSpawnOpts {
     pub arch: VmArchArg,
     pub tap: Option<String>,
     pub vmnet: Option<String>,
+    pub riscv32_backend: Option<String>,
     pub name: Option<String>,
     pub vmm: Option<PathBuf>,
     pub user_ns: bool,
@@ -121,6 +122,10 @@ pub fn build_manifest(opts: VmSpawnOpts) -> Result<Manifest> {
     if let Some(vmnet) = opts.vmnet {
         args.push("--vmnet".into());
         args.push(vmnet);
+    }
+    if let Some(rv32_backend) = opts.riscv32_backend {
+        args.push("--riscv32-backend".into());
+        args.push(rv32_backend);
     }
 
     Ok(Manifest {
@@ -266,6 +271,7 @@ mod tests {
             arch: VmArchArg::Riscv32,
             tap: Some("tap0".to_string()),
             vmnet: None,
+            riscv32_backend: None,
             name: Some("vm-test".to_string()),
             vmm: Some(vmm),
             user_ns: true,
@@ -292,6 +298,7 @@ mod tests {
             arch: VmArchArg::Riscv32,
             tap: None,
             vmnet: None,
+            riscv32_backend: None,
             name: Some("vm-test".to_string()),
             vmm: Some(vmm),
             user_ns: true,

@@ -18,9 +18,13 @@ mod irq;
 
 #[cfg(target_os = "linux")]
 mod elf;
+#[cfg(target_os = "macos")]
+mod elf;
 #[cfg(target_os = "linux")]
 mod iso;
 #[cfg(target_os = "linux")]
+mod memory;
+#[cfg(target_os = "macos")]
 mod memory;
 #[cfg(target_os = "linux")]
 mod multiboot;
@@ -28,15 +32,22 @@ mod multiboot;
 mod pci;
 #[cfg(target_os = "linux")]
 mod rv32_soft;
+#[cfg(target_os = "macos")]
+mod rv32_soft;
 #[cfg(target_os = "linux")]
 mod serial;
 #[cfg(target_os = "linux")]
 mod snapshot;
 #[cfg(target_os = "linux")]
 mod termios_guard;
+#[cfg(target_os = "macos")]
+mod termios_guard;
+mod user_net;
 #[cfg(target_os = "linux")]
 mod virtio;
 #[cfg(target_os = "linux")]
+mod vm;
+#[cfg(target_os = "macos")]
 mod vm;
 
 #[derive(Parser, Debug)]
@@ -84,10 +95,26 @@ struct Cli {
 
     /// macOS-only host networking mode via vmnet.framework.
     ///
-    /// `shared` uses host NAT; `host` creates host-only networking.
+    /// `shared` uses host NAT; `host` creates host-only networking;
+    /// `bridged` bridges to the physical interface named by `--vmnet-bridge-if`.
     /// Mutually exclusive with `--tap`.
     #[arg(long, value_enum)]
     vmnet: Option<VmnetModeArg>,
+
+    /// Physical interface to bridge to when `--vmnet bridged` is used (e.g. `en0`).
+    #[arg(long, default_value = "en0")]
+    vmnet_bridge_if: String,
+
+    /// Entitlement-free user-mode networking for rv32-soft.
+    ///
+    /// `user` provides DHCP plus localhost forwarding without TAP/vmnet.
+    /// Mutually exclusive with `--tap` and `--vmnet`.
+    #[arg(long, value_enum)]
+    net: Option<NetModeArg>,
+
+    /// TCP host-forwarding rule for `--net user` (currently tcp::HOST-:GUEST).
+    #[arg(long, default_value = "tcp::2323-:2323")]
+    hostfwd: String,
 
     /// MAC address to advertise to the guest (format `aa:bb:cc:dd:ee:ff`).
     /// Defaults to a locally-administered, randomly-seeded address.
@@ -99,6 +126,14 @@ struct Cli {
     /// Guest architecture.
     #[arg(long, value_enum, default_value_t = ArchArg::X8664)]
     arch: ArchArg,
+
+    /// Backend selection for macOS `--arch riscv32` execution.
+    ///
+    /// `auto` and `soft` run the in-process rv32-soft engine (Linux-like).
+    /// `qemu` uses `qemu-system-riscv32` as an external virtualizer.
+    #[cfg(target_os = "macos")]
+    #[arg(long, value_enum, default_value_t = Riscv32BackendArg::Auto)]
+    riscv32_backend: Riscv32BackendArg,
 
     /// Busy-loop throttle sleep (milliseconds) for riscv32 software mode.
     ///
@@ -216,12 +251,20 @@ enum ArchArg {
     Aarch64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum VmnetModeArg {
     #[value(name = "shared")]
     Shared,
     #[value(name = "host")]
     Host,
+    #[value(name = "bridged")]
+    Bridged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum NetModeArg {
+    #[value(name = "user")]
+    User,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -236,6 +279,17 @@ enum HostBackendArg {
     Custom,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Riscv32BackendArg {
+    #[value(name = "auto")]
+    Auto,
+    #[value(name = "soft")]
+    Soft,
+    #[value(name = "qemu")]
+    Qemu,
+}
+
 impl ArchArg {
     fn to_guest_arch(self) -> config::GuestArch {
         match self {
@@ -247,11 +301,38 @@ impl ArchArg {
 }
 
 impl VmnetModeArg {
-    fn to_vmnet_mode(self) -> config::VmnetMode {
+    fn to_vmnet_mode(self, bridge_if: String) -> config::VmnetMode {
         match self {
             VmnetModeArg::Shared => config::VmnetMode::Shared,
             VmnetModeArg::Host => config::VmnetMode::Host,
+            VmnetModeArg::Bridged => config::VmnetMode::Bridged(bridge_if),
         }
+    }
+}
+
+fn parse_hostfwd(rule: &str) -> Result<(u16, u16)> {
+    let Some(rest) = rule.strip_prefix("tcp::") else {
+        anyhow::bail!("--hostfwd currently supports tcp::HOST-:GUEST (got '{rule}')");
+    };
+    let Some((host, guest)) = rest.split_once("-:") else {
+        anyhow::bail!("--hostfwd currently supports tcp::HOST-:GUEST (got '{rule}')");
+    };
+    let host_port = host
+        .parse::<u16>()
+        .with_context(|| format!("parsing host port in --hostfwd '{rule}'"))?;
+    let guest_port = guest
+        .parse::<u16>()
+        .with_context(|| format!("parsing guest port in --hostfwd '{rule}'"))?;
+    Ok((host_port, guest_port))
+}
+
+fn user_net_mode(net: Option<NetModeArg>, hostfwd: &str) -> Result<Option<config::UserNetMode>> {
+    match net {
+        Some(NetModeArg::User) => {
+            let (host_port, guest_port) = parse_hostfwd(hostfwd)?;
+            Ok(Some(config::UserNetMode::User { host_port, guest_port }))
+        }
+        None => Ok(None),
     }
 }
 
@@ -313,6 +394,9 @@ fn main() -> Result<()> {
     if cli.vmnet.is_some() {
         anyhow::bail!("--vmnet is macOS-only");
     }
+    if cli.net.is_some() && cli.tap.is_some() {
+        anyhow::bail!("--net user and --tap are mutually exclusive");
+    }
     if cli.backend != HostBackendArg::Auto
         || cli.custom_runner.is_some()
         || !cli.custom_args.is_empty()
@@ -363,6 +447,7 @@ fn main() -> Result<()> {
         disk_read_only: cli.disk_ro,
         tap_name: cli.tap,
         vmnet_mode: None,
+        user_net: user_net_mode(cli.net, &cli.hostfwd)?,
         mac,
         snapshot_save: cli.snapshot_save,
         cpu_throttle_ms: cli.cpu_throttle_ms,
@@ -377,6 +462,9 @@ fn main() -> Result<()> {
     validate_cpus(cli.cpus)?;
     if cli.tap.is_some() && cli.vmnet.is_some() {
         anyhow::bail!("--tap and --vmnet are mutually exclusive");
+    }
+    if cli.net.is_some() && (cli.tap.is_some() || cli.vmnet.is_some()) {
+        anyhow::bail!("--net user is mutually exclusive with --tap and --vmnet");
     }
     if cli.backend != HostBackendArg::Auto
         || cli.custom_runner.is_some()
@@ -429,12 +517,20 @@ fn main() -> Result<()> {
         disk_path: cli.disk,
         disk_read_only: cli.disk_ro,
         tap_name: cli.tap,
-        vmnet_mode: cli.vmnet.map(|m| m.to_vmnet_mode()),
+        vmnet_mode: cli.vmnet.map(|m| m.to_vmnet_mode(cli.vmnet_bridge_if.clone())),
+        user_net: user_net_mode(cli.net, &cli.hostfwd)?,
         mac,
         snapshot_save: cli.snapshot_save,
         cpu_throttle_ms: cli.cpu_throttle_ms,
         sensor_feed: cli.sensor_feed,
     };
+
+    if cfg.guest_arch == config::GuestArch::Riscv32 {
+        return match cli.riscv32_backend {
+            Riscv32BackendArg::Auto | Riscv32BackendArg::Soft => crate::rv32_soft::run(cfg),
+            Riscv32BackendArg::Qemu => backend::macos_qemu::run_riscv32(cfg),
+        };
+    }
     backend::hvf::run(cfg)
 }
 
@@ -448,6 +544,9 @@ fn main() -> Result<()> {
     }
     if cli.vmnet.is_some() {
         anyhow::bail!("--vmnet is macOS-only");
+    }
+    if cli.net.is_some() {
+        anyhow::bail!("--net user is currently supported on Linux/macOS rv32-soft only");
     }
 
     let boot = match (cli.kernel, cli.restore) {
@@ -471,6 +570,7 @@ fn main() -> Result<()> {
         disk_read_only: cli.disk_ro,
         tap_name: cli.tap,
         vmnet_mode: None,
+        user_net: None,
         mac,
         snapshot_save: cli.snapshot_save,
         cpu_throttle_ms: cli.cpu_throttle_ms,
