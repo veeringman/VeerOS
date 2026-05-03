@@ -150,6 +150,58 @@ cargo build -p kernel-qemu-virt \
 > Feature-gated components are still being implemented. The default build uses
 > the `dist-minimal` round-robin scheduler.
 
+## veeros-vm CLI
+
+`scripts/veeros-vm` is the primary lifecycle manager for VeerOS VMs used by EdgeFabric.
+
+### ESP32-C6 — two runtime modes
+
+#### `--net nat` (QEMU, default)
+
+Uses `qemu-system-riscv32` with a host-forwarded port. Works on Linux and macOS.
+
+```bash
+veeros-vm create my-dev --target esp32c6 --net nat
+veeros-vm start my-dev
+veer-connect shell localhost 2230
+```
+
+#### `--net user` (veer-vm binary, rootless)
+
+Uses the `veer-vm` Rust VMM (HVF on macOS, KVM on Linux). No QEMU needed, no root required. Preferred on macOS.
+
+```bash
+cargo build -p veer-vm          # build once
+veeros-vm create my-dev --target esp32c6 --net user
+veeros-vm start my-dev
+veer-connect shell localhost 2230
+```
+
+### Multi-VM operation
+
+Multiple VMs can run concurrently. Each receives a unique host-forwarded port starting at 2230. Port allocation is serialized to prevent collisions.
+
+```bash
+veeros-vm create vm-a --target esp32c6 --net nat   # gets 2230
+veeros-vm create vm-b --target esp32c6 --net nat   # gets 2231
+veeros-vm start vm-a && veeros-vm start vm-b
+veeros-vm list                                      # human-readable table
+veeros-vm list-json                                 # JSON array (used by EdgeFabric agent)
+```
+
+### Stale process cleanup
+
+If a previous VM was killed without a clean stop, `veeros-vm start` automatically detects and removes orphaned `qemu-system-riscv32` or `veer-vm` processes tied to that VM before launching a new instance.
+
+### Sensor injection
+
+```bash
+veeros-vm sensor inject my-dev temperature 27.5
+veeros-vm sensor inject my-dev humidity 55.0
+```
+
+---
+
 ## EdgeFabric Runtime Integration
 
 For orchestration and lifecycle management of fold + veer-vm based ESP32-C6

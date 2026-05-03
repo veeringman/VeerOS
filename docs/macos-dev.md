@@ -105,6 +105,50 @@ cd ~/rnd/VeerOS
 cargo check -p veer_vm --target x86_64-apple-darwin
 ```
 
+## ESP32-C6 Virtual IoT on macOS
+
+For EdgeFabric virtual IoT workflows on Apple Silicon two runtime modes are available:
+
+### Mode 1: QEMU (always available)
+
+```bash
+brew install qemu
+veeros-vm create my-esp32 --target esp32c6 --net nat
+veeros-vm start my-esp32
+veer-connect shell localhost 2230
+```
+
+### Mode 2: veer-vm binary (rootless, recommended)
+
+Uses Apple Hypervisor framework — no QEMU, no root:
+
+```bash
+cargo build -p veer-vm
+veeros-vm create my-esp32 --target esp32c6 --net user
+veeros-vm start my-esp32
+veer-connect shell localhost 2230
+```
+
+### Multiple concurrent VMs
+
+Both modes support running multiple VMs simultaneously. Ports are auto-assigned starting at 2230 and the orphan-cleanup guard prevents stale process accumulation from earlier crashed or unclean stops.
+
+### EdgeFabric agent (macOS, agent-only mode)
+
+To run just the agent and streaming server locally without a control plane:
+
+```bash
+EF_RUN_MODE=development \
+EF__VEEROS__ROOT_DIR=~/VeerOS \
+EF__VEEROS__VM_SCRIPT_PATH=~/VeerOS/scripts/veeros-vm \
+EF__VEEROS__VEER_CONNECT_PATH=~/VeerOS/target/debug/veer-connect \
+  ./scripts/deploy.sh agent
+```
+
+The streaming server on port 7070 starts immediately. Control-plane registration runs in the background and retries automatically when available.
+
+---
+
 ## Troubleshooting
 
 1. `hv_vm_create` fails:
