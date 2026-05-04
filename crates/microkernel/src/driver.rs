@@ -124,6 +124,15 @@ pub enum DriverError {
 pub struct DriverRegistry {
     drivers: [DriverInfo; MAX_DRIVERS],
     count: usize,
+    /// Accelerator device descriptor registry (quantum, FPGA, GPU, …).
+    #[cfg(feature = "accel")]
+    pub accel: crate::accelerator::AcceleratorRegistry,
+    /// Built-in state-vector quantum simulator.
+    #[cfg(feature = "accel")]
+    pub quantum_sim: quantum::simulator::SimulatorBackend,
+    /// In-kernel quantum circuit slot table (for SYS_Q_* syscalls).
+    #[cfg(feature = "accel")]
+    pub qcircuits: crate::accelerator::QuantumCircuitTable,
 }
 
 impl DriverRegistry {
@@ -131,6 +140,12 @@ impl DriverRegistry {
         Self {
             drivers: [DriverInfo::empty(); MAX_DRIVERS],
             count: 0,
+            #[cfg(feature = "accel")]
+            accel: crate::accelerator::AcceleratorRegistry::new(),
+            #[cfg(feature = "accel")]
+            quantum_sim: quantum::simulator::SimulatorBackend::with_seed(0x51_1C_7E_A8_DE_AD_BE_EF),
+            #[cfg(feature = "accel")]
+            qcircuits: crate::accelerator::QuantumCircuitTable::new(),
         }
     }
 

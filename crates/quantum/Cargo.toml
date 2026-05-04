@@ -1,0 +1,18 @@
+[package]
+name = "quantum"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VeerOS quantum abstraction layer: circuit IR, backend traits, simulator, and cloud bridge contracts"
+
+[features]
+default = ["simulator"]
+simulator = []
+quantum-cloud = []
+quantum-cloud-ibm = ["quantum-cloud"]
+circuit-1k = []
+circuit-4k = []
+
+[dependencies]

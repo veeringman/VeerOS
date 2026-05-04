@@ -4,9 +4,13 @@ use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use quantum::cloud::CloudQpu;
+use quantum::ibm::{HttpMethod, HttpRequest, IbmQuantumBackend, TransportError};
+use quantum::Circuit;
 use serde::{Deserialize, Serialize};
 use vas::{canonicalize, AddressType, VasAddress};
 use veer_governor::{analyze_audit_records, AnalysisConfig, AuditAnalysisReport, AuditRecord};
@@ -40,6 +44,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TraceCmd,
     },
+    Quantum {
+        #[command(subcommand)]
+        cmd: QuantumCmd,
+    },
     Connect(ConnectArgs),
 }
 
@@ -70,6 +78,12 @@ enum TraceCmd {
     Decision(TraceDecisionArgs),
     /// Analyze governor audit stream for anomalies and policy suggestions.
     Governor(TraceGovernorArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum QuantumCmd {
+    /// Execute a program on IBM Quantum cloud backend.
+    IbmRun(QuantumIbmRunArgs),
 }
 
 #[derive(Args, Debug)]
@@ -222,6 +236,58 @@ struct TraceGovernorArgs {
     /// Emit JSON report.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Debug)]
+struct QuantumIbmRunArgs {
+    /// Program template to execute (Bell, Ghz3, Qft3).
+    #[arg(long, value_enum)]
+    program: Option<QuantumProgram>,
+    /// Path to OpenQASM 3.0 file to execute. Overrides --program if provided.
+    #[arg(long)]
+    qasm_file: Option<PathBuf>,
+    /// Number of shots.
+    #[arg(long, default_value_t = 1024)]
+    shots: u32,
+    /// IBM backend name (example: ibm_brisbane).
+    #[arg(long, default_value = "ibm_brisbane")]
+    backend: String,
+    /// IBM Quantum API token. If omitted, IBM_QUANTUM_API_TOKEN env var is used.
+    #[arg(long)]
+    token: Option<String>,
+    /// IBM Quantum instance CRN/project. If omitted, IBM_QUANTUM_INSTANCE env var is used.
+    #[arg(long)]
+    instance: Option<String>,
+    /// Poll interval between status checks.
+    #[arg(long, default_value_t = 2_000)]
+    poll_ms: u64,
+    /// Overall timeout for job completion.
+    #[arg(long, default_value_t = 900)]
+    timeout_sec: u64,
+    /// Emit full histogram of all outcomes instead of just top result.
+    #[arg(long)]
+    histogram: bool,
+    /// Endpoint variant: 'default' or 'staging' (default: api.quantum-computing.ibm.com).
+    #[arg(long, value_enum)]
+    endpoint: Option<EndpointVariant>,
+    /// Emit JSON response.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum QuantumProgram {
+    Bell,
+    Ghz3,
+    Qft3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum EndpointVariant {
+    /// Production endpoint.
+    Default,
+    /// IBM staging endpoint for testing.
+    Staging,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -401,6 +467,7 @@ fn main() -> Result<()> {
         Cmd::Fold { cmd } => cmd_fold(cmd),
         Cmd::Gateway { cmd } => cmd_gateway(cmd),
         Cmd::Trace { cmd } => cmd_trace(cmd),
+        Cmd::Quantum { cmd } => cmd_quantum(cmd),
         Cmd::Connect(args) => cmd_connect(args),
     }
 }
@@ -409,6 +476,12 @@ fn cmd_trace(cmd: TraceCmd) -> Result<()> {
     match cmd {
         TraceCmd::Decision(args) => cmd_trace_decision(args),
         TraceCmd::Governor(args) => cmd_trace_governor(args),
+    }
+}
+
+fn cmd_quantum(cmd: QuantumCmd) -> Result<()> {
+    match cmd {
+        QuantumCmd::IbmRun(args) => cmd_quantum_ibm_run(args),
     }
 }
 
@@ -954,6 +1027,311 @@ fn cmd_fold(cmd: FoldCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn ibm_http_transport(req: HttpRequest<'_>) -> Result<usize, TransportError> {
+    let host = core::str::from_utf8(req.host).map_err(|_| TransportError::NotConnected)?;
+    let path = core::str::from_utf8(req.path).map_err(|_| TransportError::NotConnected)?;
+    let url = format!("https://{}{}", host, path);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| TransportError::TlsError)?;
+
+    let mut rb = match req.method {
+        HttpMethod::Get => client.get(&url),
+        HttpMethod::Post => client.post(&url),
+    };
+
+    for (k, v) in req.headers {
+        let k = core::str::from_utf8(k).map_err(|_| TransportError::NotConnected)?;
+        let v = core::str::from_utf8(v).map_err(|_| TransportError::NotConnected)?;
+        rb = rb.header(k, v);
+    }
+
+    if !req.body.is_empty() {
+        rb = rb.body(req.body.to_vec());
+    }
+
+    let resp = rb
+        .send()
+        .map_err(|e| {
+            if e.is_timeout() {
+                TransportError::Timeout
+            } else {
+                TransportError::NotConnected
+            }
+        })?;
+
+    let status = resp.status().as_u16();
+    let bytes = resp
+        .bytes()
+        .map_err(|_| TransportError::NotConnected)?;
+
+    if status < 200 || status >= 300 {
+        return Err(TransportError::HttpError(status));
+    }
+    if bytes.len() > req.out_buf.len() {
+        return Err(TransportError::BufferTooSmall);
+    }
+
+    req.out_buf[..bytes.len()].copy_from_slice(&bytes);
+    Ok(bytes.len())
+}
+
+fn build_quantum_program(program: QuantumProgram) -> Circuit {
+    match program {
+        QuantumProgram::Bell => Circuit::new(2).h(0).cx(0, 1).measure_all(),
+        QuantumProgram::Ghz3 => Circuit::new(3).h(0).cx(0, 1).cx(1, 2).measure_all(),
+        QuantumProgram::Qft3 => Circuit::new(3)
+            .h(0)
+            .cx(0, 1)
+            .h(1)
+            .cx(1, 2)
+            .h(2)
+            .measure_all(),
+    }
+}
+
+fn parse_quantum_circuit_from_qasm(qasm: &str) -> Result<Circuit> {
+    // Simple QASM parser: extracts qubit count and builds a basic circuit
+    // For real QASM parsing, this would need a full parser. This is a simplified version
+    // that tries to extract the qubit count and identify measure_all patterns
+    
+    let mut qubits = 2usize;
+    
+    // Extract qubit count from "qubit[N]" declarations
+    for line in qasm.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("qubit[") && trimmed.contains(']') {
+            if let Some(start) = trimmed.find('[') {
+                if let Some(end) = trimmed.find(']') {
+                    if let Ok(count) = trimmed[start + 1..end].parse::<usize>() {
+                        qubits = count;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Create circuit with extracted qubit count
+    let mut circuit = Circuit::new(qubits as u16);
+    
+    // Try to parse basic gate operations (simplified parsing)
+    for line in qasm.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("OPENQASM")
+            || trimmed.starts_with("include") || trimmed.starts_with("qubit[")
+            || trimmed.starts_with("bit[") 
+        {
+            continue;
+        }
+        
+        // Parse simple gates: h q[0]; cx q[0], q[1];
+        if let Some(gate_part) = trimmed.split(' ').next() {
+            match gate_part {
+                "h" | "x" | "y" | "z" => {
+                    // Single qubit gates - extract qubit index
+                    if let Some(idx) = extract_qubit_index(trimmed) {
+                        match gate_part {
+                            "h" => { circuit = circuit.h(idx as u16); }
+                            "x" => { circuit = circuit.x(idx as u16); }
+                            "y" => { circuit = circuit.y(idx as u16); }
+                            "z" => { circuit = circuit.z(idx as u16); }
+                            _ => {}
+                        }
+                    }
+                }
+                "cx" => {
+                    // Two qubit gates
+                    if let Some((q0, q1)) = extract_two_qubit_indices(trimmed) {
+                        circuit = circuit.cx(q0 as u16, q1 as u16);
+                    }
+                }
+                "measure" => {
+                    // measure c[idx] = measure q[idx];
+                    if let Some(idx) = extract_qubit_index(trimmed) {
+                        circuit = circuit.measure(idx as u16);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    Ok(circuit)
+}
+
+fn extract_qubit_index(line: &str) -> Option<usize> {
+    if let Some(start) = line.find("q[") {
+        if let Some(end) = line[start..].find(']') {
+            return line[start + 2..start + end].parse::<usize>().ok();
+        }
+    }
+    None
+}
+
+fn extract_two_qubit_indices(line: &str) -> Option<(usize, usize)> {
+    let mut indices = Vec::new();
+    let mut current = 0usize;
+    while current < line.len() {
+        if let Some(start) = line[current..].find("q[") {
+            if let Some(end) = line[current + start..].find(']') {
+                if let Ok(idx) = line[current + start + 2..current + start + end].parse::<usize>() {
+                    indices.push(idx);
+                    current += start + end + 1;
+                    if indices.len() == 2 {
+                        return Some((indices[0], indices[1]));
+                    }
+                } else {
+                    current += start + 1;
+                }
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+fn cmd_quantum_ibm_run(args: QuantumIbmRunArgs) -> Result<()> {
+    let token = args
+        .token
+        .or_else(|| std::env::var("IBM_QUANTUM_API_TOKEN").ok())
+        .with_context(|| "missing IBM token: pass --token or set IBM_QUANTUM_API_TOKEN")?;
+    let instance = args
+        .instance
+        .or_else(|| std::env::var("IBM_QUANTUM_INSTANCE").ok())
+        .with_context(|| "missing IBM instance: pass --instance or set IBM_QUANTUM_INSTANCE")?;
+
+    // Resolve circuit from file or template
+    let circuit = if let Some(ref qasm_path) = args.qasm_file {
+        // Load QASM file
+        let qasm_text = std::fs::read_to_string(qasm_path)
+            .with_context(|| format!("failed to read QASM file: {:?}", qasm_path))?;
+        parse_quantum_circuit_from_qasm(&qasm_text)?
+    } else {
+        // Use template (default to Bell if not specified)
+        let program = args.program.unwrap_or(QuantumProgram::Bell);
+        build_quantum_program(program)
+    };
+    circuit
+        .status()
+        .map_err(|e| anyhow::anyhow!("invalid circuit: {:?}", e))?;
+
+    let mut backend = IbmQuantumBackend::new(
+        token.as_bytes(),
+        instance.as_bytes(),
+        args.backend.as_bytes(),
+        127,
+        ibm_http_transport,
+    );
+    backend.set_default_shots(args.shots);
+    
+    // Configure endpoint variant if specified
+    if let Some(endpoint) = args.endpoint {
+        let host = match endpoint {
+            EndpointVariant::Default => "api.quantum-computing.ibm.com".as_bytes(),
+            EndpointVariant::Staging => "api-staging.quantum-computing.ibm.com".as_bytes(),
+        };
+        backend.set_api_host(host);
+    }
+
+    let job_id = backend
+        .submit_cloud_job(&circuit)
+        .map_err(|e| anyhow::anyhow!("failed to submit IBM Quantum job: {:?}", e))?;
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(args.timeout_sec);
+    let mut status = quantum::cloud::CloudJobStatus::Queued;
+    while start.elapsed() < timeout {
+        let (st, _meta) = backend
+            .poll_cloud_job(job_id)
+            .map_err(|e| anyhow::anyhow!("polling IBM Quantum job status failed: {:?}", e))?;
+        status = st;
+        match status {
+            quantum::cloud::CloudJobStatus::Completed
+            | quantum::cloud::CloudJobStatus::Failed
+            | quantum::cloud::CloudJobStatus::Cancelled => break,
+            quantum::cloud::CloudJobStatus::Queued | quantum::cloud::CloudJobStatus::Running => {
+                std::thread::sleep(Duration::from_millis(args.poll_ms));
+            }
+        }
+    }
+
+    if status != quantum::cloud::CloudJobStatus::Completed {
+        bail!("IBM job did not complete successfully (status: {:?})", status);
+    }
+
+    let result = backend
+        .fetch_cloud_result(job_id)
+        .map_err(|e| anyhow::anyhow!("fetching IBM Quantum result failed: {:?}", e))?;
+
+    let mut bits = String::new();
+    let mut i = result.len();
+    while i > 0 {
+        i -= 1;
+        let ch = match result.get(i) {
+            Some(quantum::Measurement::One) => '1',
+            _ => '0',
+        };
+        bits.push(ch);
+    }
+
+    // Extract histogram if available
+    let histogram_json = if args.histogram {
+        core::str::from_utf8(backend.last_histogram()).ok()
+    } else {
+        None
+    };
+
+    let program_str = args.program.map(|p| format!("{:?}", p).to_ascii_lowercase()).unwrap_or_else(|| "file".to_string());
+
+    if args.json {
+        let mut json_obj = serde_json::json!({
+            "provider": "ibm-quantum",
+            "backend": args.backend,
+            "program": program_str,
+            "shots": args.shots,
+            "top_bitstring": bits,
+            "classical_bits": result.len(),
+            "elapsed_ms": start.elapsed().as_millis()
+        });
+        
+        if let Some(hist) = histogram_json {
+            if let Ok(hist_obj) = serde_json::from_str::<serde_json::Value>(hist) {
+                json_obj["histogram"] = hist_obj;
+            }
+        }
+        
+        if let Some(endpoint) = args.endpoint {
+            json_obj["endpoint_variant"] = serde_json::json!(format!("{:?}", endpoint).to_ascii_lowercase());
+        }
+        
+        println!("{}", json_obj);
+    } else {
+        println!("provider     : ibm-quantum");
+        println!("backend      : {}", args.backend);
+        println!("program      : {}", program_str);
+        println!("shots        : {}", args.shots);
+        println!("top bitstring: {}", bits);
+        
+        if let Some(endpoint) = args.endpoint {
+            println!("endpoint     : {:?}", endpoint);
+        }
+        
+        if let Some(hist) = histogram_json {
+            println!("histogram    :");
+            println!("{}", hist);
+        }
+        
+        println!("elapsed      : {} ms", start.elapsed().as_millis());
+    }
+
+    Ok(())
 }
 
 fn cmd_connect(args: ConnectArgs) -> Result<()> {

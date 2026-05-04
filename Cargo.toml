@@ -24,6 +24,7 @@ members = [
     "crates/crypto",
     "crates/ssh",
     "crates/microkernel",
+    "crates/quantum",
     "crates/distributions",
     "crates/net",
     "crates/shell",

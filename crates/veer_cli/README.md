@@ -108,6 +108,29 @@ With this file present, you can omit `--host` and/or `--port`:
 veer connect svc{render,company,live} --aura aur{design,private,open}
 ```
 
+### Quantum cloud execution (IBM)
+
+Run a real quantum program template against IBM Quantum:
+
+```bash
+export IBM_QUANTUM_API_TOKEN="<your-token>"
+export IBM_QUANTUM_INSTANCE="<your-instance>"
+
+veer quantum ibm-run --program bell --backend ibm_brisbane --shots 1024
+```
+
+JSON output mode:
+
+```bash
+veer quantum ibm-run --program ghz3 --backend ibm_brisbane --shots 2048 --json
+```
+
+Supported built-in templates:
+
+- `bell`
+- `ghz3`
+- `qft3`
+
 ### Legacy socket bridge
 
 Classic TCP bridge for legacy clients:

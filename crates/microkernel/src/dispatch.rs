@@ -229,7 +229,9 @@ pub unsafe fn dispatch(
         // Unified accelerator interface (desktop/server only)
         #[cfg(feature = "accel")]
         SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
-        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => ProcessCaps::ACCEL,
+        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT
+        | SYS_Q_ALLOC | SYS_Q_GATE | SYS_Q_MEASURE | SYS_Q_CIRCUIT_SUBMIT
+        | SYS_Q_RESULT | SYS_Q_RESET | SYS_Q_STATUS | SYS_Q_TRANSPILE => ProcessCaps::ACCEL,
 
         // Audit syscalls — read-only, always allowed
         SYS_AUDIT_READ | SYS_AUDIT_COUNT => ProcessCaps::TASK_BASIC,
@@ -2305,21 +2307,310 @@ pub unsafe fn dispatch(
 
         // ── Accelerators / FPGA / Quantum (desktop/server only) ──
         #[cfg(feature = "accel")]
-        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
-        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => {
-            // ABI surface is reserved and capability-gated. Platform-specific
-            // runtime integration is provided by accelerator drivers.
+        SYS_ACCEL_COUNT => {
+            c.set_ret(0, drivers.accel.count());
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_ACCEL_INFO => {
+            // a0 = device index, a1 = ptr to AcceleratorDevice output buffer
+            let idx = a0;
+            let out_ptr = a1 as *mut crate::accelerator::AcceleratorDevice;
+            match drivers.accel.get(idx) {
+                Some(dev) => {
+                    if out_ptr as usize != 0
+                        && check_user_ptr(sched, processes, a1, core::mem::size_of::<crate::accelerator::AcceleratorDevice>(), MemPerms::WRITE)
+                    {
+                        unsafe { out_ptr.write(dev) };
+                        c.set_ret(0, 0);
+                    } else {
+                        c.set_ret(0, usize::MAX);
+                    }
+                }
+                None => {
+                    c.set_ret(0, usize::MAX);
+                }
+            }
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_ACCEL_SUBMIT | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL | SYS_FPGA_PROGRAM => {
+            // Generic accelerator submit/poll/cancel — drivers not yet wired.
             c.set_ret(0, usize::MAX);
             c.set_ret(1, 0);
             SyscallAction::Resume
         }
 
-        // ── Accelerators / FPGA / Quantum (desktop/server only) ──
         #[cfg(feature = "accel")]
-        SYS_ACCEL_COUNT | SYS_ACCEL_INFO | SYS_ACCEL_SUBMIT | SYS_ACCEL_POLL | SYS_ACCEL_CANCEL
-        | SYS_FPGA_PROGRAM | SYS_QPU_SUBMIT => {
-            // ABI surface is reserved and capability-gated. Platform-specific
-            // runtime integration is provided by accelerator drivers.
+        SYS_QPU_SUBMIT => {
+            // QPU submit ABI:
+            //   a0 = device_id (u16 as usize) — must match a registered Quantum device
+            //   a1 = ptr to quantum::Circuit struct
+            //   a2 = n_shots (u32)
+            //   a3 = ptr to output buffer  [u32; n_outcomes * 2] (bitstring, count pairs)
+            //   a4 = output buffer capacity in bytes
+            // Returns:
+            //   a0 = number of distinct outcomes written (usize::MAX on error)
+            //   a1 = total shots executed
+            use crate::accelerator::{AcceleratorClass, QuantumModel};
+            use quantum::circuit::Circuit;
+
+            let device_id = a0 as u16;
+            let circuit_ptr = a1 as *const Circuit;
+            let n_shots = a2 as u32;
+            let out_ptr = a3 as *mut u32;
+            let out_cap = a4; // bytes
+
+            // Verify device exists and is a Quantum/Simulator device.
+            let dev_ok = match drivers.accel.find_by_id(device_id) {
+                Some(dev) => dev.class == AcceleratorClass::Quantum
+                    && dev.quantum.map_or(false, |q| q.model == QuantumModel::Simulator),
+                None => false,
+            };
+
+            if !dev_ok {
+                c.set_ret(0, usize::MAX);
+                c.set_ret(1, 0);
+                return SyscallAction::Resume;
+            }
+
+            // Validate circuit and output pointers.
+            let circuit_ok = circuit_ptr as usize != 0
+                && check_user_ptr(sched, processes, a1, core::mem::size_of::<Circuit>(), MemPerms::READ);
+            let out_ok = out_ptr as usize != 0 && out_cap >= 8 && check_user_ptr(sched, processes, a3, out_cap, MemPerms::WRITE);
+
+            if !circuit_ok || !out_ok {
+                c.set_ret(0, usize::MAX);
+                c.set_ret(1, 0);
+                return SyscallAction::Resume;
+            }
+
+            let circuit = unsafe { &*circuit_ptr };
+            match drivers.quantum_sim.execute_shots(circuit, n_shots) {
+                Ok(hist) => {
+                    // Write (bitstring: u32, count: u32) pairs into output buffer.
+                    let max_entries = (out_cap / 8).min(64);
+                    let mut written = 0usize;
+                    let mut i = 0usize;
+                    while i < 64 && written < max_entries {
+                        if let Some((bits, count)) = hist.bin(i) {
+                            unsafe {
+                                out_ptr.add(written * 2).write(bits as u32);
+                                out_ptr.add(written * 2 + 1).write(count);
+                            }
+                            written += 1;
+                        }
+                        i += 1;
+                    }
+                    c.set_ret(0, written);
+                    c.set_ret(1, hist.total_shots as usize);
+                }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    c.set_ret(1, 0);
+                }
+            }
+            SyscallAction::Resume
+        }
+
+        // ── Phase 9D: High-level Quantum Syscalls ───────────────
+        #[cfg(feature = "accel")]
+        SYS_Q_ALLOC => {
+            // a0 = max_qubits requested
+            let max_qubits = a0 as u16;
+            match drivers.qcircuits.alloc(max_qubits) {
+                Some(handle) => c.set_ret(0, handle),
+                None => c.set_ret(0, usize::MAX),
+            }
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_Q_GATE => {
+            use quantum::circuit::{CircuitOp, FixedQ16, Gate};
+            // a0 = circuit handle
+            // a1 = gate opcode (Gate discriminant: 0=H, 1=X, 2=Y, 3=Z, 4=S, 5=Sdg, 6=T, 7=Tdg,
+            //                   8=Rx, 9=Ry, 10=Rz, 20=Cx, 21=Cz)
+            // a2 = angle arg as i32 bits (FixedQ16; 0 if not applicable)
+            // a3 = packed qubit indices: q0 = bits[0..15], q1 = bits[16..31], q2 = bits[32..47]
+            let handle = a0;
+            let opcode = a1 as u16;
+            let angle = FixedQ16(a2 as i32);
+            let q0 = (a3 & 0xFFFF) as u16;
+            let q1 = ((a3 >> 16) & 0xFFFF) as u16;
+            let q2 = ((a3 >> 32) & 0xFFFF) as u16;
+
+            let gate = match opcode {
+                0  => Some(Gate::H),
+                1  => Some(Gate::X),
+                2  => Some(Gate::Y),
+                3  => Some(Gate::Z),
+                4  => Some(Gate::S),
+                5  => Some(Gate::Sdg),
+                6  => Some(Gate::T),
+                7  => Some(Gate::Tdg),
+                8  => Some(Gate::Rx(angle)),
+                9  => Some(Gate::Ry(angle)),
+                10 => Some(Gate::Rz(angle)),
+                20 => Some(Gate::Cx),
+                21 => Some(Gate::Cz),
+                22 => Some(Gate::Cy),
+                23 => Some(Gate::Swap),
+                30 => Some(Gate::Ccx),
+                _  => None,
+            };
+
+            match gate {
+                None => {
+                    c.set_ret(0, usize::MAX);
+                }
+                Some(g) => {
+                    let qubit_count = match opcode {
+                        0..=10 => 1u8,
+                        20..=23 => 2,
+                        30 => 3,
+                        _ => 1,
+                    };
+                    let op = match qubit_count {
+                        1 => CircuitOp::gate1(g, q0),
+                        2 => CircuitOp::gate2(g, q0, q1),
+                        _ => CircuitOp::gate3(g, q0, q1, q2),
+                    };
+                    match drivers.qcircuits.get_mut(handle) {
+                        Some(slot) => {
+                            match slot.circuit.push_op(op) {
+                                Ok(()) => c.set_ret(0, 0),
+                                Err(_) => c.set_ret(0, usize::MAX),
+                            }
+                        }
+                        None => c.set_ret(0, usize::MAX),
+                    }
+                }
+            }
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_Q_MEASURE => {
+            use quantum::circuit::{CircuitOp};
+            // a0 = circuit handle, a1 = qubit index to measure
+            let handle = a0;
+            let qubit = a1 as u16;
+            match drivers.qcircuits.get_mut(handle) {
+                Some(slot) => {
+                    let cbit = slot.circuit.classical_bits_count() as u16;
+                    let op = CircuitOp::measure(qubit, cbit);
+                    match slot.circuit.push_op(op) {
+                        Ok(()) => c.set_ret(0, cbit as usize),
+                        Err(_) => c.set_ret(0, usize::MAX),
+                    }
+                }
+                None => c.set_ret(0, usize::MAX),
+            }
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_Q_CIRCUIT_SUBMIT => {
+            use crate::accelerator::{AcceleratorClass, QuantumModel};
+            // a0 = circuit handle, a1 = device_id, a2 = n_shots, a3 = out_ptr, a4 = out_cap
+            let handle = a0;
+            let device_id = a1 as u16;
+            let n_shots = a2 as u32;
+            let out_ptr = a3 as *mut u32;
+            let out_cap = a4;
+
+            let dev_ok = match drivers.accel.find_by_id(device_id) {
+                Some(dev) => dev.class == AcceleratorClass::Quantum
+                    && dev.quantum.map_or(false, |q| q.model == QuantumModel::Simulator),
+                None => false,
+            };
+
+            if !dev_ok || out_ptr as usize == 0 || out_cap < 8
+                || !check_user_ptr(sched, processes, a3, out_cap, MemPerms::WRITE)
+            {
+                c.set_ret(0, usize::MAX);
+                c.set_ret(1, 0);
+                return SyscallAction::Resume;
+            }
+
+            // Extract circuit (must clone to avoid holding mutable borrow during sim).
+            let circuit = match drivers.qcircuits.get_mut(handle) {
+                Some(slot) => slot.circuit,
+                None => {
+                    c.set_ret(0, usize::MAX);
+                    c.set_ret(1, 0);
+                    return SyscallAction::Resume;
+                }
+            };
+
+            match drivers.quantum_sim.execute_shots(&circuit, n_shots) {
+                Ok(hist) => {
+                    let max_entries = (out_cap / 8).min(64);
+                    let mut written = 0usize;
+                    let mut i = 0usize;
+                    while i < 64 && written < max_entries {
+                        if let Some((bits, count)) = hist.bin(i) {
+                            unsafe {
+                                out_ptr.add(written * 2).write(bits as u32);
+                                out_ptr.add(written * 2 + 1).write(count);
+                            }
+                            written += 1;
+                        }
+                        i += 1;
+                    }
+                    c.set_ret(0, written);
+                    c.set_ret(1, hist.total_shots as usize);
+                }
+                Err(_) => {
+                    c.set_ret(0, usize::MAX);
+                    c.set_ret(1, 0);
+                }
+            }
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_Q_RESET => {
+            // a0 = circuit handle
+            drivers.qcircuits.free(a0);
+            c.set_ret(0, 0);
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_Q_STATUS => {
+            // a0 = device_id, a1 = ptr to AcceleratorDevice output
+            let device_id = a0 as u16;
+            let out_ptr = a1 as *mut crate::accelerator::AcceleratorDevice;
+            match drivers.accel.find_by_id(device_id) {
+                Some(dev) => {
+                    if out_ptr as usize != 0
+                        && check_user_ptr(sched, processes, a1, core::mem::size_of::<crate::accelerator::AcceleratorDevice>(), MemPerms::WRITE)
+                    {
+                        unsafe { out_ptr.write(dev) };
+                        c.set_ret(0, 0);
+                    } else {
+                        c.set_ret(0, usize::MAX);
+                    }
+                }
+                None => c.set_ret(0, usize::MAX),
+            }
+            c.set_ret(1, 0);
+            SyscallAction::Resume
+        }
+
+        #[cfg(feature = "accel")]
+        SYS_Q_RESULT | SYS_Q_TRANSPILE => {
+            // Phase 9C/async — reserved until Phase 9C transpiler is implemented.
             c.set_ret(0, usize::MAX);
             c.set_ret(1, 0);
             SyscallAction::Resume

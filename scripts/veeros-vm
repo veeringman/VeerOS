@@ -1051,6 +1051,36 @@ cmd_list() {
     $found || echo "(no VMs)"
 }
 
+cmd_list_json() {
+    local first=true
+    printf '['
+    for d in "$VEEROS_VMS"/*/vm.conf; do
+        [ -f "$d" ] || continue
+        local name hostname memory ssh_port net_mode target created last_started status
+        name=$(basename "$(dirname "$d")")
+        hostname=$(vm_get "$name" hostname)
+        memory=$(vm_get "$name" memory)
+        ssh_port=$(vm_get "$name" ssh_port)
+        net_mode=$(vm_get "$name" net_mode)
+        target=$(vm_get "$name" target)
+        target="${target:-x86_64}"
+        created=$(vm_get "$name" created)
+        last_started=$(vm_get "$name" last_started)
+
+        if vm_is_running "$name"; then
+            status="running"
+        else
+            status="stopped"
+        fi
+
+        $first || printf ','
+        first=false
+        printf '{"name":"%s","target":"%s","hostname":"%s","memory":%s,"ssh_port":%s,"net_mode":"%s","status":"%s","created":"%s","last_started":"%s"}' \
+            "$name" "$target" "$hostname" "${memory:-0}" "${ssh_port:-0}" "$net_mode" "$status" "${created:-}" "${last_started:-}"
+    done
+    printf ']\n'
+}
+
 cmd_ssh() {
     local name="${1:-}"
     [ -n "$name" ] || die "usage: veeros-vm ssh <name> [command...]"
@@ -1544,6 +1574,7 @@ case "$cmd" in
     restart)  cmd_restart "$@" ;;
     status)   cmd_status "$@" ;;
     list|ls)  cmd_list ;;
+    list-json) cmd_list_json ;;
     ssh)      cmd_ssh "$@" ;;
     connect)  cmd_connect "$@" ;;
     copy|cp)  cmd_copy "$@" ;;

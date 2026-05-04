@@ -16,9 +16,10 @@ dist-full = ["dist-app", "dist-xrt"]
 dist-cluster = ["crypto/sha256", "crypto/chacha20"]
 multi-user = []
 ramfs-small = []
-accel = []
+accel = ["dep:quantum"]
 
 [dependencies]
 bitflags.workspace = true
 arch = { path = "../arch" }
 crypto = { path = "../crypto" }
+quantum = { path = "../quantum", default-features = false, features = ["simulator"], optional = true }

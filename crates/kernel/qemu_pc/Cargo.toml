@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [features]
-default = ["dist-app", "dhcp", "multi-user"]
+default = ["dist-app", "accel", "dhcp", "multi-user"]
 
 dist-minimal = ["microkernel/dist-minimal"]
 dist-app     = ["microkernel/dist-app", "shell", "ssh", "userlib", "samples"]

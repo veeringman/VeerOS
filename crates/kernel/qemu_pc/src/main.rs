@@ -2659,6 +2659,47 @@ pub extern "C" fn _rust_start() -> ! {
     }
     let _ = writeln!(con, "[boot] driver registry: 4 drivers registered");
 
+    // ── Quantum simulator device registration ─────────────────
+    #[cfg(feature = "accel")]
+    unsafe {
+        use microkernel::accelerator::{
+            AcceleratorBus, AcceleratorCapabilities, AcceleratorClass, AcceleratorDevice,
+            AcceleratorTransport, QuantumInfo, QuantumModel,
+        };
+        let reg = &mut *DRIVERS.0.get();
+        let qpu_dev = AcceleratorDevice {
+            id: 0x0001,
+            class: AcceleratorClass::Quantum,
+            bus: AcceleratorBus::SharedMemory,
+            transport: AcceleratorTransport::RegisterCommand,
+            irq_line: None,
+            control_region: None,
+            queue_region: None,
+            caps: AcceleratorCapabilities {
+                max_queues: 1,
+                max_transfer_bytes: 4096,
+                dma_coherency: microkernel::accelerator::DmaCoherency::Coherent,
+                supports_preemption: false,
+                supports_sriov: false,
+                supports_bitstream_reconfig: false,
+                supports_quantum: true,
+                max_physical_qubits: 12,
+                max_logical_qubits: 12,
+                supports_gpu_compute: false,
+            },
+            quantum: Some(QuantumInfo {
+                model: QuantumModel::Simulator,
+                t1_ns: u32::MAX,
+                t2_ns: u32::MAX,
+                gate_error_ppm: 0,
+                readout_error_ppm: 0,
+            }),
+            gpu: None,
+        };
+        let _ = reg.accel.register(qpu_dev);
+        let _ = writeln!(con, "[boot] quantum: simulator QPU registered (id=0x0001, 12 qubits)");
+    }
+
     // ── GDT + IDT ────────────────────────────────────────────
     trap::load_gdt();
     trap::load_idt();

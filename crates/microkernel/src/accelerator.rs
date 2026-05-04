@@ -326,3 +326,83 @@ impl AcceleratorRegistry {
         n
     }
 }
+
+// ── In-kernel quantum circuit slot table ────────────────────────────────────
+
+/// Maximum number of concurrently held in-kernel quantum circuit slots.
+#[cfg(feature = "accel")]
+pub const MAX_KERNEL_CIRCUITS: usize = 8;
+
+/// State of one in-kernel quantum circuit slot.
+#[cfg(feature = "accel")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KernelCircuitState {
+    Free,
+    Building,
+}
+
+/// One in-kernel circuit slot holding a `quantum::Circuit`.
+#[cfg(feature = "accel")]
+pub struct KernelCircuitSlot {
+    pub state: KernelCircuitState,
+    pub circuit: quantum::circuit::Circuit,
+}
+
+#[cfg(feature = "accel")]
+impl KernelCircuitSlot {
+    pub const fn empty() -> Self {
+        Self {
+            state: KernelCircuitState::Free,
+            circuit: quantum::circuit::Circuit::new(0),
+        }
+    }
+}
+
+/// Fixed-size table of in-kernel quantum circuit slots (one per process max).
+#[cfg(feature = "accel")]
+pub struct QuantumCircuitTable {
+    slots: [KernelCircuitSlot; MAX_KERNEL_CIRCUITS],
+}
+
+#[cfg(feature = "accel")]
+impl QuantumCircuitTable {
+    pub const fn new() -> Self {
+        // SAFETY: Circuit::new() is const and safe.
+        Self {
+            slots: [
+                KernelCircuitSlot::empty(), KernelCircuitSlot::empty(),
+                KernelCircuitSlot::empty(), KernelCircuitSlot::empty(),
+                KernelCircuitSlot::empty(), KernelCircuitSlot::empty(),
+                KernelCircuitSlot::empty(), KernelCircuitSlot::empty(),
+            ],
+        }
+    }
+
+    /// Allocate a free slot, returning its index.
+    pub fn alloc(&mut self, max_qubits: u16) -> Option<usize> {
+        for i in 0..MAX_KERNEL_CIRCUITS {
+            if self.slots[i].state == KernelCircuitState::Free {
+                self.slots[i].state = KernelCircuitState::Building;
+                self.slots[i].circuit = quantum::circuit::Circuit::new(max_qubits);
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Get an active slot by index.
+    pub fn get_mut(&mut self, idx: usize) -> Option<&mut KernelCircuitSlot> {
+        if idx < MAX_KERNEL_CIRCUITS && self.slots[idx].state == KernelCircuitState::Building {
+            Some(&mut self.slots[idx])
+        } else {
+            None
+        }
+    }
+
+    /// Free a slot.
+    pub fn free(&mut self, idx: usize) {
+        if idx < MAX_KERNEL_CIRCUITS {
+            self.slots[idx].state = KernelCircuitState::Free;
+        }
+    }
+}

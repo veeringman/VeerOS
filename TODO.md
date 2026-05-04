@@ -2,6 +2,75 @@
 
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
+## [2026-05-04] Session Sync — VeerOS Host Advertisement & Quantum Discovery
+
+### New Feature Track: VeerOS Host Advertisement (mDNS-style) & EdgeFabric Discovery
+
+#### Overview
+VeerOS hosts (physical machines, VMs, folds) that are not directly reachable via known-IP registration should advertise themselves on the local network using an mDNS-style multicast announcement protocol. EdgeFabric Dashboard receives these advertisements and presents them in a dedicated **VeerOS Hosts** section. A special sub-category flags hosts with Quantum Processor capability (QPU integrated or simulator available). Users can open a shell to any discovered host via SSH or veer-connect depending on target type.
+
+#### A — Advertisement Protocol (VeerOS side)
+- [ ] Define `VeerOsAdvertisement` wire format (JSON over UDP multicast 224.0.0.251:5353 or custom port 5354)
+  - Fields: `host_id` (VAS node ID), `hostname`, `version`, `target_arch` (`aarch64-hvf`, `raspi5`, `esp32c6`, `x86`), `ip_addrs[]`, `capabilities[]` (enum: `ssh`, `veer_connect`, `quantum_simulator`, `quantum_hardware`, `fold_engine`, `ai_agent`), `quantum_info?` (qubits, backends[]), `ssh_port`, `veer_connect_port`, `ttl_sec`
+- [ ] Implement `VeerOsAdvertiser` in a new crate `crates/net/src/advertiser.rs` (UDP multicast sender)
+  - Sends announcement every 30 s; sends goodbye (`ttl=0`) on shutdown
+  - Works on both Linux (smoltcp multicast) and macOS host (std UDP socket)
+- [ ] Wire `VeerOsAdvertiser` into aarch64-hvf kernel guest (announce from guest IP)
+- [ ] Wire into `veer-vm` host tool (announce VM existence on behalf of guest when guest not network-capable)
+- [ ] Wire into raspi5, qemu-pc kernels
+- [ ] Wire into esp32c6 kernel (lightweight variant — no multicast, use broadcast or parent-agent relay)
+- [ ] Add `veer advertise [--once] [--ttl N]` CLI subcommand
+- [ ] Add `SYS_ADVERTISE` (0xA0) syscall stub for guest-kernel self-advertisement trigger
+
+#### B — Discovery Listener (ef-agent side)
+- [ ] Implement `VeerOsDiscoveryListener` in ef-agent (`crates/ef-agent/src/discovery.rs`)
+  - Listens on UDP multicast 224.0.0.251 port 5354 for `VeerOsAdvertisement` packets
+  - Maintains in-memory `DiscoveredHostRegistry` with TTL expiry
+  - On new/updated host: upsert into ef-db `discovered_hosts` table (host_id, hostname, ip, capabilities, quantum_info, last_seen, ttl_sec)
+  - On goodbye: mark host as `offline` in registry
+  - Expose `GET /veeros/discovery/hosts` → list of discovered hosts with quantum flag
+  - Expose `POST /veeros/discovery/hosts/{host_id}/forget` → remove from registry
+
+#### C — Database Schema (ef-db)
+- [ ] New migration: `discovered_hosts` table
+  - Columns: `id UUID PK`, `host_id TEXT UNIQUE`, `hostname TEXT`, `ip_addrs TEXT[]`, `target_arch TEXT`, `capabilities TEXT[]`, `quantum_info JSONB`, `ssh_port INT`, `veer_connect_port INT`, `agent_id UUID FK agents`, `status TEXT` (online/offline), `first_seen TIMESTAMPTZ`, `last_seen TIMESTAMPTZ`, `ttl_sec INT`
+- [ ] `ef_db::repo::discovered_host::DiscoveredHostRepo` with upsert, list, mark_offline, delete
+
+#### D — API (ef-api)
+- [ ] New route file `crates/ef-api/src/routes/discovery.rs`
+  - `GET /api/v1/discovery/hosts` — list all discovered VeerOS hosts (online + offline)
+  - `GET /api/v1/discovery/hosts?quantum=true` — filter to hosts with quantum capability
+  - `GET /api/v1/discovery/hosts/{host_id}` — single host detail
+  - `POST /api/v1/discovery/hosts/{host_id}/shell` — open shell; returns `{type: "ssh"|"veer_connect", command: "...", host, port}`
+  - `DELETE /api/v1/discovery/hosts/{host_id}` — forget host
+- [ ] Proxy discovery host list from registered agents: `GET /veeros/discovery/hosts` per agent, merge results
+- [ ] Heartbeat / re-query mechanism: ef-api polls agents every 60 s for updated host list
+
+#### E — EdgeFabric Dashboard UI
+- [ ] New page `crates/ef-dashboard/src/pages/discovered_hosts.rs` — **VeerOS Hosts** page
+  - Table: hostname, IP, arch, capabilities (pill badges), quantum indicator (atom icon if QPU), SSH/Connect button
+  - Filter bar: All | Quantum | SSH-only | veer-connect | Offline
+  - Auto-refresh every 30 s via reactive polling
+- [ ] Sidebar: add **VeerOS Hosts** nav item with atom badge for quantum count
+- [ ] Host detail panel: show full capability list, quantum info (qubits, backends), last-seen timestamp
+- [ ] "Open Shell" button:
+  - If target has SSH → launches browser-side terminal (or copies `ssh user@ip -p PORT` to clipboard)
+  - If target has veer-connect → generates `veer connect host_id` command / direct WebSocket terminal
+  - Display connection command in a code block with copy button
+- [ ] Quantum indicator: special **QPU** badge (gold atom icon) for hosts with `quantum_hardware` capability; blue **SIM** badge for `quantum_simulator`
+
+#### F — veer-connect Integration
+- [ ] `veer connect <host_id>` resolves host_id via local mDNS cache or ef-agent registry, then opens veer-connect WebSocket session
+- [ ] ef-agent relay: `POST /veeros/connect/{host_id}` → proxies veer-connect to discovered host
+
+#### G — Security
+- [ ] Advertisement packets must be signed with the host's Ed25519 identity key (from `crates/crypto`)
+- [ ] ef-agent verifies signature before registering host; unknown/unsigned hosts marked `unverified`
+- [ ] TLS-pinned veer-connect sessions to discovered hosts
+- [ ] Rate-limit advertisement ingestion (max 100 unique hosts per agent)
+
+---
+
 ## [2026-05-02] Session Sync — macOS AArch64 HVF VM Kit, Shell/Editor Fixes, Persistent Disk
 
 ### Closed in this session
@@ -1872,8 +1941,8 @@ _Kernel module, capability bit, syscall ABI, and dispatcher stubs landed._
 ### 8K-Runtime — Kernel Integration (Planned)
 _Wire the registry into BSPs, implement first concrete backends, add userlib wrappers._
 
-- [ ] **Instantiate `AcceleratorRegistry` in kernel BSPs** — static cell in qemu_virt, raspi5, and future x86-64 kernel; passed to dispatcher
-- [ ] **Wire syscall handlers to registry** — `SYS_ACCEL_COUNT` returns `registry.count()`; `SYS_ACCEL_INFO` copies device descriptor to userland buffer; submit/poll/cancel route to matched `AcceleratorRuntime`
+- [x] **Instantiate `AcceleratorRegistry` in kernel BSPs** — embedded in `DriverRegistry` static in `kernel-qemu-pc`; quantum simulator device registered at boot
+- [x] **Wire syscall handlers to registry** — `SYS_ACCEL_COUNT` returns `registry.count()`; `SYS_ACCEL_INFO` copies device descriptor to userland buffer; `SYS_QPU_SUBMIT` routes to `SimulatorBackend::execute_shots`
 - [ ] **Scheduler integration** — new `BlockReason::AccelWait(token)` variant; task blocks on `SYS_ACCEL_POLL` and wakes on completion IRQ or polling tick
 - [ ] **DMA buffer management** — contiguous physical buffer allocation for device I/O; coherency fence calls before/after ownership transfer
 - [ ] **Userlib `accelerator` module** — safe wrappers: `accel_count()`, `accel_info(idx)`, `accel_submit(dev, work)`, `accel_poll(dev, token)`, `accel_cancel(dev, token)`, `fpga_program(dev, bitstream)`, `qpu_submit(dev, circuit, qubits)`
@@ -1887,7 +1956,7 @@ _Vendor-specific drivers mapping to the generic `AcceleratorRuntime` trait._
 - [ ] **PCIe accelerator enumeration** — on x86-64 / ARM64 PCIe hosts, scan for accelerator BARs by PCI class code; auto-register discovered devices
 - [ ] **Google Coral Edge TPU driver** — USB-attached INT8 inference accelerator; register as `AcceleratorClass::Accelerator`; submit TFLite delegate jobs
 - [ ] **Hailo-8 M.2 driver** — 13 TOPS NPU on RPi 5 M.2 HAT+; PCIe BAR-mapped control; INT8 inference delegation
-- [ ] **Quantum simulator bridge** — register Phase 9 simulator as `AcceleratorClass::Quantum` + `QuantumModel::Simulator`; route `SYS_QPU_SUBMIT` to state-vector engine
+- [x] **Quantum simulator bridge** — `SimulatorBackend` embedded in `DriverRegistry`; registered as `AcceleratorClass::Quantum` + `QuantumModel::Simulator` (device id 0x0001, 12 qubits) in `kernel-qemu-pc` BSP; `SYS_QPU_SUBMIT` routes to state-vector engine
 - [ ] **Remote QPU proxy** — network-attached QPU exposed as local device via kernel channel; TLS-secured command/result relay
 - [ ] **CXL accelerator stubs** — CXL Type 2 device enumeration; shared host memory for coherent accelerator access (future x86-64 servers)
 
@@ -1907,44 +1976,44 @@ _Hardware quantum coprocessor interface + extensible simulator/emulator. Designe
 ### 9A — Quantum Abstraction Layer (`crates/quantum/`)
 _Architecture-neutral trait layer — same API for simulators, local QPU hardware, cloud QPUs, and FPGA emulators. Inspired by Qiskit/Cirq/Pennylane but `no_std`-first._
 
-- [ ] **`quantum` crate** — `no_std`, `no_alloc` core types and traits; zero cost when feature disabled; versioned circuit IR
-- [ ] **`Qubit` type** — opaque handle: `Qubit(u16)` index into QPU register file; lifetime-tracked (use-after-measure = compile error)
-- [ ] **`Gate` enum** — standard gate set:
+- [x] **`quantum` crate** — `no_std`, `no_alloc` core types and traits; zero cost when feature disabled; versioned circuit IR
+- [x] **`Qubit` type** — opaque handle: `Qubit(u16)` index into QPU register file; lifetime-tracked (use-after-measure = compile error)
+- [x] **`Gate` enum** — standard gate set:
   - Single-qubit: `H`, `X`, `Y`, `Z`, `S`, `Sdg`, `T`, `Tdg`, `Rx(θ)`, `Ry(θ)`, `Rz(θ)`, `U(θ,φ,λ)` (universal single-qubit)
   - Two-qubit: `CNOT`/`CX`, `CZ`, `CY`, `SWAP`, `iSWAP`, `ECR`, `Rxx(θ)`, `Ryy(θ)`, `Rzz(θ)` (Ising coupling gates)
   - Three-qubit: `Toffoli`/`CCX`, `Fredkin`/`CSWAP`, `CCZ`
   - Parameterized: all rotation gates take `FixedPoint<i32, 16>` angle (no FPU required on embedded)
-- [ ] **`Circuit` struct** — DAG-based circuit IR; `heapless::Vec<GateOp, MAX_CIRCUIT_OPS>` (configurable 256–4096 ops); supports barriers, classical registers, mid-circuit measurement
-- [ ] **`Measurement` type** — classical bit result: `Zero` | `One`; `ClassicalRegister([Measurement; N])` for batch readout
-- [ ] **`QuantumBackend` trait** — `allocate(n) -> Result<QubitRange>`, `apply(gate, qubits)`, `measure(qubit) -> Measurement`, `execute_circuit(&Circuit) -> ClassicalRegister`, `reset()`, `backend_info() -> BackendInfo`
-- [ ] **`BackendInfo` struct** — `name`, `backend_type` (Simulator/Hardware/Cloud/FPGA), `max_qubits`, `native_gates`, `connectivity_map`, `gate_fidelities`, `t1_t2_times`, `queue_depth`
-- [ ] **`QuantumError` enum** — `NotEnoughQubits`, `InvalidQubit`, `GateNotSupported`, `CircuitTooLarge`, `DecoherenceTimeout`, `HardwareError`, `CalibrationExpired`, `CloudTimeout`, `TranspileError`
-- [ ] **Circuit builder API** — fluent: `Circuit::new(4).h(0).cnot(0,1).rz(1, PI/4).barrier().measure_all()` — compiles to gate DAG
-- [ ] **Qubit topology** — `ConnectivityMap`: adjacency list of physical qubit connections; backends declare supported 2-qubit gate pairs
-- [ ] **Backend registry** — static dispatch: `QuantumBackend` implementations registered at compile time via feature flags; runtime selection via capability token
+- [x] **`Circuit` struct** — DAG-based circuit IR; `heapless::Vec<GateOp, MAX_CIRCUIT_OPS>` (configurable 256–4096 ops); supports barriers, classical registers, mid-circuit measurement
+- [x] **`Measurement` type** — classical bit result: `Zero` | `One`; `ClassicalRegister([Measurement; N])` for batch readout
+- [x] **`QuantumBackend` trait** — `allocate(n) -> Result<QubitRange>`, `apply(gate, qubits)`, `measure(qubit) -> Measurement`, `execute_circuit(&Circuit) -> ClassicalRegister`, `reset()`, `backend_info() -> BackendInfo`
+- [x] **`BackendInfo` struct** — `name`, `backend_type` (Simulator/Hardware/Cloud/FPGA), `max_qubits`, `native_gates`, `connectivity_map`, `gate_fidelities`, `t1_t2_times`, `queue_depth`
+- [x] **`QuantumError` enum** — `NotEnoughQubits`, `InvalidQubit`, `GateNotSupported`, `CircuitTooLarge`, `DecoherenceTimeout`, `HardwareError`, `CalibrationExpired`, `CloudTimeout`, `TranspileError`
+- [x] **Circuit builder API** — fluent: `Circuit::new(4).h(0).cnot(0,1).rz(1, PI/4).barrier().measure_all()` — compiles to gate DAG
+- [x] **Qubit topology** — `ConnectivityMap`: adjacency list of physical qubit connections; backends declare supported 2-qubit gate pairs
+- [x] **Backend registry** — static dispatch: `QuantumBackend` implementations registered at compile time via feature flags; runtime selection via capability token
 
 ### 9B — Quantum Simulator / Emulator
 _Full state-vector simulator + density matrix simulator for development, testing, and NISQ-era algorithm prototyping._
 
-- [ ] **State-vector simulator** — `2^n` complex amplitudes (`[Complex<f32>; 2^N]`); N ≤ 16 on embedded (64 KB), N ≤ 24 on RPi 5 (128 MB for 24 qubits), N ≤ 30+ on desktop
-- [ ] **`Complex<f32>` type** — `{ re: f32, im: f32 }` with `mul`, `add`, `norm_sq`, `conj`; no libm dependency; `Complex<f64>` for targets with FPU
+- [x] **State-vector simulator** — `2^n` complex amplitudes (`[Complex<f32>; 2^N]`); N ≤ 16 on embedded (64 KB), N ≤ 24 on RPi 5 (128 MB for 24 qubits), N ≤ 30+ on desktop
+- [x] **`Complex<f32>` type** — `{ re: f32, im: f32 }` with `mul`, `add`, `norm_sq`, `conj`; no libm dependency; `Complex<f64>` for targets with FPU
 - [ ] **Gate matrices** — compile-time 2×2 / 4×4 / 8×8 unitaries; const-evaluated for native gate set; runtime matrices for parameterized gates
-- [ ] **State-vector evolution** — apply gate by iterating amplitude pairs; single-qubit: O(2^n), two-qubit: O(2^n), optimized cache-friendly traversal
-- [ ] **Measurement simulation** — Born-rule probabilistic collapse; TRNG (`SYS_CRYPTO_RNG`) or seeded PRNG; mid-circuit measurement with conditional gates
+- [x] **State-vector evolution** — apply gate by iterating amplitude pairs; single-qubit: O(2^n), two-qubit: O(2^n), optimized cache-friendly traversal
+- [x] **Measurement simulation** — Born-rule probabilistic collapse; TRNG (`SYS_CRYPTO_RNG`) or seeded PRNG; mid-circuit measurement with conditional gates
 - [ ] **Density matrix simulator** — `2^n × 2^n` density matrix for mixed-state simulation; enables noise modeling, decoherence, partial trace
 - [ ] **Noise model framework** — pluggable noise channels:
   - Gate errors: depolarizing, bit-flip, phase-flip, amplitude damping, phase damping
   - Readout errors: asymmetric bit-flip on measurement (configurable per-qubit)
   - Thermal relaxation: T1/T2 time-based decoherence between gate operations
   - Custom noise: user-defined Kraus operators for exotic noise models
-- [ ] **`SimulatorBackend` struct** — implements `QuantumBackend`; configurable: state-vector (fast, noiseless) or density-matrix (slower, noisy)
+- [x] **`SimulatorBackend` struct** — implements `QuantumBackend`; configurable: state-vector (fast, noiseless) or density-matrix (slower, noisy)
 - [ ] **Stabilizer/Clifford fast path** — detect Clifford-only circuits (H, S, CNOT, measurement) and use Gottesman-Knill O(n²) simulator instead of exponential state vector
 - [ ] **Tensor network backend (future)** — for circuits with low entanglement, MPS/MPO-based simulation scales to 50+ qubits on limited RAM
 - [ ] **Qubit limit autodetection** — probe available heap at init, set `max_n = floor(log2(avail_bytes / 8))`
 - [ ] **Circuit execution engine** — iterate circuit DAG; apply gates, perform mid-circuit measurements, evaluate classical conditionals
 - [ ] **Deterministic mode** — fixed PRNG seed for reproducible results; essential for kernel-level testing
 - [ ] **Performance baseline** — targets: 12-qubit Hadamard < 1ms on rv32imc @ 160MHz; 20-qubit QFT < 100ms on Cortex-A76 (RPi 5)
-- [ ] **Shot-based execution** — run circuit N times (shots), return histogram of measurement outcomes; matches real QPU workflow
+- [x] **Shot-based execution** — run circuit N times (shots), return histogram of measurement outcomes; matches real QPU workflow
 
 ### 9C — Circuit Compilation + Transpilation
 _Transform abstract circuits into hardware-executable form — gate decomposition, qubit routing, optimization._
@@ -1960,13 +2029,13 @@ _Transform abstract circuits into hardware-executable form — gate decompositio
 ### 9D — Quantum Syscalls + Kernel Integration
 _Kernel-mediated access to quantum resources — simulator or real hardware, capability-controlled._
 
-- [ ] **`SYS_Q_ALLOC` syscall** — allocate N qubits from QPU/simulator; returns qubit handle base; requires `Quantum` capability (8A)
-- [ ] **`SYS_Q_GATE` syscall** — apply a gate: `syscall3(SYS_Q_GATE, gate_id, qubit0, qubit1)`
-- [ ] **`SYS_Q_MEASURE` syscall** — measure a qubit, collapse state, return classical bit; supports mid-circuit measurement
-- [ ] **`SYS_Q_CIRCUIT_SUBMIT` syscall** — submit `Circuit` buffer for batch execution; returns job handle
+- [x] **`SYS_Q_ALLOC` syscall** — allocate N qubits from QPU/simulator; returns qubit handle base; requires `Quantum` capability (8A)
+- [x] **`SYS_Q_GATE` syscall** — apply a gate: `syscall3(SYS_Q_GATE, gate_id, qubit0, qubit1)`
+- [x] **`SYS_Q_MEASURE` syscall** — measure a qubit, collapse state, return classical bit; supports mid-circuit measurement
+- [x] **`SYS_Q_CIRCUIT_SUBMIT` syscall** — submit `Circuit` buffer for batch execution; returns job handle
 - [ ] **`SYS_Q_RESULT` syscall** — poll/retrieve results of submitted circuit job (async-compatible with Phase 6F poll)
-- [ ] **`SYS_Q_RESET` syscall** — release qubits, reset simulator/QPU state, free resources
-- [ ] **`SYS_Q_STATUS` syscall** — query backend: qubit count, type, error rates, queue depth, calibration age
+- [x] **`SYS_Q_RESET` syscall** — release qubits, reset simulator/QPU state, free resources
+- [x] **`SYS_Q_STATUS` syscall** — query backend: qubit count, type, error rates, queue depth, calibration age
 - [ ] **`SYS_Q_TRANSPILE` syscall** — server-side transpile a circuit for a specific backend (useful for constrained clients)
 - [ ] **Quantum resource capability** — `ResourceKind::Quantum(qpu_id)` with `ALLOCATE`, `EXECUTE`, `TRANSPILE`, `ADMIN` rights
 - [ ] **Scheduler integration** — circuit execution blocks task (`Blocked(QpuWait)`); poll-compatible for async quantum workflows
@@ -1983,8 +2052,8 @@ _Extensible backend system — local coprocessors, FPGA emulators, and cloud qua
 - [ ] **Hot-swap backend** — runtime backend switching without recompile; `SYS_Q_STATUS` reports active backend; switchable via admin capability
 
 #### Cloud QPU Backends (`quantum-cloud` feature)
-- [ ] **Cloud backend trait** — `CloudQPU: QuantumBackend` — submits circuits over network, polls for results, handles queue/priority
-- [ ] **IBM Quantum bridge** — REST API client (Qiskit Runtime compatible); circuit → OpenQASM 3.0 → HTTP POST; TLS 1.3 (uses 8E)
+- [x] **Cloud backend trait** — `CloudQPU: QuantumBackend` — submits circuits over network, polls for results, handles queue/priority
+- [x] **IBM Quantum bridge** — `IbmQuantumBackend` in `crates/quantum/src/ibm.rs` (`quantum-cloud` feature); OpenQASM 3.0 serializer; transport stub (wires to Phase 8E TLS)
 - [ ] **Amazon Braket bridge** — submit circuits to AWS managed QPUs (IonQ, Rigetti, OQC) via Braket API
 - [ ] **Azure Quantum bridge** — submit to Azure Quantum (Quantinuum, IonQ, Pasqal) via REST
 - [ ] **Google Quantum bridge (future)** — Cirq-compatible circuit submission to Google Sycamore/Willow processors

@@ -368,13 +368,77 @@ pub const SYS_ACCEL_CANCEL: usize = 0xB4;
 pub const SYS_FPGA_PROGRAM: usize = 0xB5;
 
 #[cfg(feature = "accel")]
-/// Submit a quantum circuit payload.
-///   a0 = device id
-///   a1 = circuit payload pointer
-///   a2 = payload length
-///   a3 = requested qubits
-/// Returns: a0 = token low bits, a1 = token high bits (or `usize::MAX` on error).
+/// Submit a quantum circuit to the state-vector simulator.
+///   a0 = device_id (u16)
+///   a1 = ptr to `quantum::Circuit` struct
+///   a2 = n_shots (u32)
+///   a3 = ptr to output buffer for `(bitstring: u32, count: u32)` pairs
+///   a4 = output buffer size in bytes
+/// Returns: a0 = number of distinct outcomes written (`usize::MAX` on error)
+///          a1 = total shots executed
 pub const SYS_QPU_SUBMIT: usize = 0xB6;
+
+// ── High-level Quantum Syscalls (0xB8–0xBF) ─────────────────────────────
+
+#[cfg(feature = "accel")]
+/// Allocate a new quantum circuit handle (in-kernel slot).
+///   a0 = max_qubits requested
+/// Returns: a0 = circuit handle (0..MAX), `usize::MAX` on failure.
+pub const SYS_Q_ALLOC: usize = 0xB8;
+
+#[cfg(feature = "accel")]
+/// Append a gate to an in-kernel circuit.
+///   a0 = circuit handle
+///   a1 = gate opcode (quantum::Gate discriminant as u16)
+///   a2 = fixed-point angle arg (FixedQ16.0 as i32 cast to usize; 0 if unused)
+///   a3 = packed qubit indices (q0 in bits 0..15, q1 in bits 16..31, q2 in 32..47)
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_Q_GATE: usize = 0xB9;
+
+#[cfg(feature = "accel")]
+/// Append a measurement to an in-kernel circuit.
+///   a0 = circuit handle
+///   a1 = qubit index to measure
+/// Returns: a0 = classical bit index assigned, `usize::MAX` on error.
+pub const SYS_Q_MEASURE: usize = 0xBA;
+
+#[cfg(feature = "accel")]
+/// Submit an in-kernel circuit for execution.
+///   a0 = circuit handle
+///   a1 = device_id (u16) — target QPU
+///   a2 = n_shots (u32)
+///   a3 = ptr to output `(u32, u32)` pair array
+///   a4 = output buffer size in bytes
+/// Returns: a0 = number of distinct outcomes, a1 = total shots (or `usize::MAX` on error).
+pub const SYS_Q_CIRCUIT_SUBMIT: usize = 0xBB;
+
+#[cfg(feature = "accel")]
+/// Read results of a previously submitted circuit (async variant).
+///   a0 = completion token
+///   a1 = ptr to output buffer
+///   a2 = buffer size in bytes
+/// Returns: a0 = 0 (ready) | 1 (pending) | `usize::MAX` (error); a1 = outcomes written.
+pub const SYS_Q_RESULT: usize = 0xBC;
+
+#[cfg(feature = "accel")]
+/// Reset/free an in-kernel circuit handle.
+///   a0 = circuit handle
+/// Returns: a0 = 0 on success.
+pub const SYS_Q_RESET: usize = 0xBD;
+
+#[cfg(feature = "accel")]
+/// Query QPU backend status.
+///   a0 = device_id (u16)
+///   a1 = ptr to `AcceleratorDevice` output buffer
+/// Returns: a0 = 0 on success, `usize::MAX` on error.
+pub const SYS_Q_STATUS: usize = 0xBE;
+
+#[cfg(feature = "accel")]
+/// Transpile circuit for target backend (reserved — returns `usize::MAX` until Phase 9C).
+///   a0 = circuit handle
+///   a1 = device_id target
+/// Returns: a0 = 0 on success.
+pub const SYS_Q_TRANSPILE: usize = 0xBF;
 
 /// Login: validate credentials and create a session.
 ///   a0 = pointer to username string
