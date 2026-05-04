@@ -16,6 +16,13 @@ VMNET_MODE="${VMNET_MODE:-shared}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HOST_OS="$(uname -s)"
+HOST_ARCH="$(uname -m)"
+
+# Default to AArch64 guest boot on Apple Silicon hosts.
+VM_ARCH="${VM_ARCH:-}"
+if [[ -z "${VM_ARCH}" && "${HOST_OS}" == "Darwin" && "${HOST_ARCH}" == "arm64" ]]; then
+    VM_ARCH="aarch64"
+fi
 
 if [[ "$HOST_OS" == "Darwin" ]]; then
     case "${VEER_VM_MAC_TARGET:-native}" in
@@ -50,22 +57,40 @@ else
 fi
 
 DEFAULT_KERNEL=""
-for candidate in \
-    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-x86_64-pc" \
-    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-qemu-pc" \
-    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_SECONDARY/kernel-x86_64-pc" \
-    "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_SECONDARY/kernel-qemu-pc" \
-    "$REPO/build/veer-vm/kernel-x86_64-$KERNEL_PROFILE_PRIMARY.elf" \
-    "$REPO/build/veer-vm/kernel-x86_64-$KERNEL_PROFILE_SECONDARY.elf"
-do
-    if [[ -f "$candidate" ]]; then
-        DEFAULT_KERNEL="$candidate"
-        break
-    fi
-done
+if [[ "${VM_ARCH}" == "aarch64" ]]; then
+    for candidate in \
+        "$REPO/build/veer-vm/kernel-aarch64-$KERNEL_PROFILE_PRIMARY.elf" \
+        "$REPO/build/veer-vm/kernel-aarch64-$KERNEL_PROFILE_SECONDARY.elf" \
+        "$REPO/target/aarch64-unknown-none-softfloat/$KERNEL_PROFILE_PRIMARY/kernel-aarch64-virt" \
+        "$REPO/target/aarch64-unknown-none-softfloat/$KERNEL_PROFILE_SECONDARY/kernel-aarch64-virt"
+    do
+        if [[ -f "$candidate" ]]; then
+            DEFAULT_KERNEL="$candidate"
+            break
+        fi
+    done
+else
+    for candidate in \
+        "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-x86_64-pc" \
+        "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-qemu-pc" \
+        "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_SECONDARY/kernel-x86_64-pc" \
+        "$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_SECONDARY/kernel-qemu-pc" \
+        "$REPO/build/veer-vm/kernel-x86_64-$KERNEL_PROFILE_PRIMARY.elf" \
+        "$REPO/build/veer-vm/kernel-x86_64-$KERNEL_PROFILE_SECONDARY.elf"
+    do
+        if [[ -f "$candidate" ]]; then
+            DEFAULT_KERNEL="$candidate"
+            break
+        fi
+    done
+fi
 
 if [[ -z "$DEFAULT_KERNEL" ]]; then
-    DEFAULT_KERNEL="$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-x86_64-pc"
+    if [[ "${VM_ARCH}" == "aarch64" ]]; then
+        DEFAULT_KERNEL="$REPO/build/veer-vm/kernel-aarch64-$KERNEL_PROFILE_PRIMARY.elf"
+    else
+        DEFAULT_KERNEL="$REPO/target/x86_64-unknown-none/$KERNEL_PROFILE_PRIMARY/kernel-x86_64-pc"
+    fi
 fi
 
 KERNEL="${KERNEL:-$DEFAULT_KERNEL}"
@@ -113,8 +138,12 @@ fi
 
 # --- Launch veer-vm ---------------------------------------------------------
 if [[ "$HOST_OS" == "Darwin" ]]; then
-    say "starting veer-vm (kernel=$KERNEL vmnet=$VMNET_MODE)"
-    "$VEER_VM" --kernel "$KERNEL" --memory 128 --vmnet "$VMNET_MODE" &
+    say "starting veer-vm (kernel=$KERNEL arch=${VM_ARCH:-auto} vmnet=$VMNET_MODE)"
+    if [[ -n "${VM_ARCH}" ]]; then
+        "$VEER_VM" --arch "$VM_ARCH" --kernel "$KERNEL" --memory 128 --vmnet "$VMNET_MODE" &
+    else
+        "$VEER_VM" --kernel "$KERNEL" --memory 128 --vmnet "$VMNET_MODE" &
+    fi
 else
     say "starting veer-vm (kernel=$KERNEL tap=$TAP)"
     "$VEER_VM" --kernel "$KERNEL" --memory 128 --tap "$TAP" &
