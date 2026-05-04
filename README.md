@@ -20,6 +20,12 @@
 microcontrollers to cloud nodes — into one coherent computational surface, with
 intelligence, security, and orchestration built into the kernel by design.
 
+## Latest Updates (2026-05-04)
+
+- Updated VeerOS VM network smoke coverage for the current connect flow and host forwarding behavior.
+- Added shell terminal compatibility notes and routing analysis docs for VeerOS host access.
+- Clarified operator direction for host shell access: prefer `veer-connect` style shell routing for VeerOS hosts over generic SSH assumptions when host metadata advertises VeerOS capabilities.
+
 Where traditional operating systems understand processes, threads, and files,
 VeerOS introduces three new kernel primitives: **Intents** (declarative goals),
 **Agents** (autonomous execution units), and an **Execution Fabric**

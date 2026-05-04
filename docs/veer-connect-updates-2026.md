@@ -9,6 +9,24 @@
 - **Integration**: Used by `veeros-vm` for ESP32C6 remote shell and file access
 - **Progress feedback**: Shows upload/download progress and status
 
+## 2026-05-04 Integration Notes (EdgeFabric + VeerOS Hosts)
+
+- VeerOS discovered hosts should be routed to VeerOS shell transport (`veer-connect` style endpoint/port, commonly `2323`) when available.
+- Do not assume all discovered hosts should default to SSH on `22`; this can produce false-positive "host reachable" results while shell attach fails.
+- For dashboard/device UX, ensure host metadata includes explicit shell routing fields (host, port, agent id) so shell launch is deterministic.
+
+### Quick verification
+
+```bash
+# Verify forwarded shell port is open on host
+nc -zv <host> 2323
+
+# Open VeerOS shell
+veer-connect shell <host> 2323
+```
+
+If your deployment advertises a different shell port, use that discovered value directly.
+
 ## Example Usage
 ```
 veer-connect shell <host> <port>
