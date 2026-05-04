@@ -49,6 +49,8 @@ enum Cmd {
         cmd: QuantumCmd,
     },
     Connect(ConnectArgs),
+    /// Broadcast a VeerOS host advertisement over UDP multicast.
+    Advertise(AdvertiseArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -469,6 +471,7 @@ fn main() -> Result<()> {
         Cmd::Trace { cmd } => cmd_trace(cmd),
         Cmd::Quantum { cmd } => cmd_quantum(cmd),
         Cmd::Connect(args) => cmd_connect(args),
+        Cmd::Advertise(args) => cmd_advertise(args),
     }
 }
 
@@ -1782,6 +1785,120 @@ fn address_type_code(t: AddressType) -> &'static str {
         AddressType::Node => "nod",
         AddressType::Event => "evt",
     }
+}
+
+// ─── Advertise subcommand ────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+pub struct AdvertiseArgs {
+    /// VeerOS host identity string (defaults to hostname).
+    #[arg(long)]
+    host_id: Option<String>,
+    /// Hostname to advertise (defaults to system hostname).
+    #[arg(long)]
+    hostname: Option<String>,
+    /// IP address to advertise (defaults to auto-detect).
+    #[arg(long)]
+    ip: Option<String>,
+    /// Port for VeerOS shell access (default: 2323).
+    #[arg(long, default_value = "2323")]
+    port: u16,
+    /// Comma-separated capabilities to advertise (e.g. "shell,fold,quantum_simulator").
+    #[arg(long, default_value = "shell")]
+    capabilities: String,
+    /// Number of qubits if quantum-capable.
+    #[arg(long)]
+    quantum_qubits: Option<u32>,
+    /// Send once and exit (default: loop every 30 s).
+    #[arg(long)]
+    once: bool,
+    /// Interval between advertisements in seconds (default: 30).
+    #[arg(long, default_value = "30")]
+    ttl: u64,
+    /// Multicast address (default: 224.0.0.251).
+    #[arg(long, default_value = "224.0.0.251")]
+    multicast: String,
+    /// Multicast port (default: 5354).
+    #[arg(long, default_value = "5354")]
+    mcast_port: u16,
+}
+
+fn cmd_advertise(args: AdvertiseArgs) -> Result<()> {
+    use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let hostname = args.hostname
+        .unwrap_or_else(|| std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "veeros-host".to_string()));
+
+    let host_id = args.host_id.unwrap_or_else(|| format!("veeros-{}", hostname));
+
+    let ip = args.ip.unwrap_or_else(|| {
+        // Simple best-effort local IP detection
+        UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|_| "127.0.0.1".to_string())
+    });
+
+    let caps: Vec<String> = args.capabilities
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let quantum_capable = caps.iter().any(|c| c.starts_with("quantum"));
+
+    let multicast_addr: Ipv4Addr = args.multicast.parse()
+        .context("invalid multicast address")?;
+    let dest = SocketAddrV4::new(multicast_addr, args.mcast_port);
+
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .context("Failed to bind UDP socket for advertisement")?;
+    socket.set_multicast_ttl_v4(4)
+        .context("Failed to set multicast TTL")?;
+
+    loop {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let advert = serde_json::json!({
+            "host_id":      host_id,
+            "hostname":     hostname,
+            "ip":           ip,
+            "port":         args.port,
+            "os_version":   format!("VeerOS {}", env!("CARGO_PKG_VERSION")),
+            "capabilities": caps,
+            "quantum": if quantum_capable {
+                serde_json::json!({
+                    "qubits":   args.quantum_qubits,
+                    "backends": ["simulator"],
+                })
+            } else {
+                serde_json::Value::Null
+            },
+            "timestamp":    timestamp,
+        });
+
+        let payload = serde_json::to_vec(&advert)?;
+        socket.send_to(&payload, dest)
+            .context("Failed to send advertisement packet")?;
+
+        println!("Advertised: {hostname} ({ip}:{}) caps=[{}]",
+            args.port, caps.join(","));
+
+        if args.once {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(args.ttl));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
