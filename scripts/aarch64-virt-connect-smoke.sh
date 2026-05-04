@@ -3,7 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="${VEER_VM_MAC_PROFILE:-debug}"
+NET_MODE="${NET_MODE:-user}"
 VMNET_MODE="${VMNET_MODE:-shared}"
+RUN_ONCE="${RUN_ONCE:-1}"
+RUN_CONNECT="${RUN_CONNECT:-0}"
+HOSTFWD="${HOSTFWD:-tcp::2323-:2323}"
+CONNECT_HOST="${CONNECT_HOST:-127.0.0.1}"
 GUEST_IP="${GUEST_IP:-10.0.2.15}"
 SSH_PORT="${SSH_PORT:-2323}"
 
@@ -31,11 +36,28 @@ die() { printf '\033[1;31m[aarch64-connect]\033[0m %s\n' "$*" >&2; exit 1; }
 say "kernel      : ${KERNEL}"
 say "veer-vm     : ${VEER_VM}"
 say "veer-connect: ${VEER_CONNECT}"
-say "vmnet       : ${VMNET_MODE}"
-say "guest ssh   : ${GUEST_IP}:${SSH_PORT}"
+say "net mode    : ${NET_MODE}"
+if [[ "${NET_MODE}" == "vmnet" ]]; then
+    say "vmnet       : ${VMNET_MODE}"
+    say "guest ssh   : ${GUEST_IP}:${SSH_PORT}"
+else
+    say "hostfwd     : ${HOSTFWD}"
+    say "guest ssh   : ${CONNECT_HOST}:${SSH_PORT}"
+fi
+
+VM_ARGS=(--arch aarch64 --kernel "${KERNEL}" --memory 512)
+if [[ "${NET_MODE}" == "vmnet" ]]; then
+    VM_ARGS+=(--vmnet "${VMNET_MODE}")
+else
+    VM_ARGS+=(--net user --hostfwd "${HOSTFWD}")
+fi
+
+if [[ "${RUN_ONCE}" == "1" ]]; then
+    VM_ARGS+=(--hvf-run-once)
+fi
 
 set +e
-OUTPUT=$("${VEER_VM}" --arch aarch64 --kernel "${KERNEL}" --memory 512 --vmnet "${VMNET_MODE}" --hvf-run-once 2>&1)
+OUTPUT=$("${VEER_VM}" "${VM_ARGS[@]}" 2>&1)
 STATUS=$?
 set -e
 
@@ -50,11 +72,29 @@ if [[ ${STATUS} -ne 0 ]]; then
     exit "${STATUS}"
 fi
 
-say "guest started with vmnet-backed virtio-mmio host device"
+if [[ "${RUN_ONCE}" == "1" ]]; then
+    say "PASS: AArch64 one-shot run completed"
+    exit 0
+fi
+
+if [[ "${NET_MODE}" == "vmnet" ]]; then
+    say "guest started with vmnet-backed virtio-mmio host device"
+else
+    say "guest started with user-mode networking"
+fi
 
 # Give the guest a moment to bring up networking, then connect.
 say "waiting for guest VSC to come up..."
 sleep 3
 
-say "connecting via VSC on ${GUEST_IP}:${SSH_PORT}"
-"${VEER_CONNECT}" shell "${GUEST_IP}" "${SSH_PORT}"
+if [[ "${RUN_CONNECT}" != "1" ]]; then
+    say "RUN_CONNECT=0, skipping interactive veer-connect shell"
+    exit 0
+fi
+
+TARGET_HOST="${CONNECT_HOST}"
+if [[ "${NET_MODE}" == "vmnet" ]]; then
+    TARGET_HOST="${GUEST_IP}"
+fi
+say "connecting via VSC on ${TARGET_HOST}:${SSH_PORT}"
+"${VEER_CONNECT}" shell "${TARGET_HOST}" "${SSH_PORT}"
