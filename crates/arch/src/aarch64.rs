@@ -18,7 +18,7 @@ use super::SavedContext;
 // AArch64 exception vector table + context save / restore assembly
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(
     r#"
 // ─────────────────────────────────────────────────────────────────
