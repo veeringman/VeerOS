@@ -26,6 +26,7 @@ import hashlib
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey, X25519PublicKey,
 )
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 # ── Protocol constants ──────────────────────────────────────────────
@@ -33,6 +34,9 @@ VSC_MAGIC = b"VSC\x01"
 TAG_LEN = 16
 MAX_FRAME_PT = 256
 MAX_FRAME_CT = MAX_FRAME_PT + TAG_LEN
+
+# Mode bytes (must match VeerOS VSC server protocol).
+MODE_SHELL = 0x00
 
 # ── Crypto helpers ──────────────────────────────────────────────────
 
@@ -89,7 +93,7 @@ def handshake(sock: socket.socket) -> SecureChannel:
     client_pk = client_sk.public_key()
 
     # 3. Send client pubkey (32 bytes).
-    sock.sendall(client_pk.public_bytes_raw())
+    sock.sendall(client_pk.public_bytes(Encoding.Raw, PublicFormat.Raw))
 
     # 4. Derive shared secret.
     server_pk = X25519PublicKey.from_public_bytes(server_pk_bytes)
@@ -126,20 +130,38 @@ def send_frame(sock: socket.socket, ch: SecureChannel, data: bytes):
 def terminal_loop(sock: socket.socket, ch: SecureChannel):
     """Interactive terminal: read stdin → encrypt → send,
     recv → decrypt → print."""
-    old_settings = termios.tcgetattr(sys.stdin)
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    interactive_tty = os.isatty(stdin_fd) and os.isatty(stdout_fd)
+    old_settings = None
+
+    if interactive_tty:
+        old_settings = termios.tcgetattr(stdin_fd)
+
     try:
-        tty.setraw(sys.stdin.fileno())
+        if interactive_tty:
+            tty.setraw(stdin_fd)
         print("\r\n\033[32m[VSC] encrypted session established\033[0m\r\n", end="", flush=True)
 
-        while True:
-            rlist, _, _ = select.select([sys.stdin, sock], [], [], 0.1)
+        stdin_open = True
 
-            if sys.stdin in rlist:
-                data = os.read(sys.stdin.fileno(), 256)
+        while True:
+            read_fds = [sock]
+            if stdin_open:
+                read_fds.append(stdin_fd)
+            rlist, _, _ = select.select(read_fds, [], [], 0.1)
+
+            if stdin_open and stdin_fd in rlist:
+                data = os.read(stdin_fd, 256)
                 if not data:
-                    break
+                    stdin_open = False
+                    try:
+                        sock.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    continue
                 # Ctrl-] to disconnect (like telnet).
-                if b"\x1d" in data:
+                if interactive_tty and b"\x1d" in data:
                     print("\r\n\033[33m[VSC] disconnected\033[0m\r\n", end="", flush=True)
                     break
                 send_frame(sock, ch, data)
@@ -152,14 +174,18 @@ def terminal_loop(sock: socket.socket, ch: SecureChannel):
                         print("\r\n\033[31m[VSC] connection closed\033[0m\r\n", end="", flush=True)
                         break
                     pt = recv_frame(sock, ch)
-                    # Convert \n → \r\n for terminal display.
-                    out = pt.replace(b"\n", b"\r\n")
+                    if interactive_tty:
+                        # Convert \n → \r\n for terminal display.
+                        out = pt.replace(b"\n", b"\r\n")
+                    else:
+                        out = pt
                     os.write(sys.stdout.fileno(), out)
                 except (ConnectionError, ValueError):
                     print("\r\n\033[31m[VSC] connection lost\033[0m\r\n", end="", flush=True)
                     break
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        if interactive_tty and old_settings is not None:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_settings)
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -192,6 +218,10 @@ def main():
 
     print("[VSC] session encrypted (ChaCha20-Poly1305)")
     print("[VSC] press Ctrl-] to disconnect")
+
+    # The VSC server expects an initial encrypted mode frame.
+    # Shell mode is 0x00 (same behavior as veer-connect).
+    send_frame(sock, ch, bytes([MODE_SHELL]))
 
     sock.settimeout(None)
     sock.setblocking(False)
