@@ -6,6 +6,12 @@ Run the demo interactively:
 cargo run -p veeros-demo          # or: ./scripts/demo.sh
 ```
 
+Run with QUIC bridge smoke enabled:
+
+```bash
+cargo run -p veeros-demo --features quic-demo
+```
+
 ## Quick Demo (automated)
 
 ```bash
@@ -31,6 +37,57 @@ veeros> fabric
 ```
 
 The fabric pre-populates 4 heterogeneous nodes: a local x86 host, an ARM64 Raspberry Pi edge node, a RISC-V ESP32-C6 sensor, and a cloud GPU inference server.
+
+### 1b. QUIC Mesh Bridge Smoke (feature-gated)
+
+When started with `--features quic-demo`, the boot log includes a QUIC smoke status line and the shell exposes mesh smoke commands.
+
+```
+veeros> mesh status
+  mesh transport: host QUIC bridge smoke available
+  usage: mesh quic-smoke
+
+veeros> mesh quic-smoke
+  running QUIC mesh bridge smoke...
+  quic smoke: ok
+
+veeros> fabric
+  ...execution fabric status...
+```
+
+If built without `quic-demo`, `mesh quic-smoke` explains that the feature must be enabled at build time.
+
+### 1c. Controlled Fault Injection (Replan Trigger)
+
+```
+veeros> fabric fault inject rpi5-edge-01 degraded
+  fault update: node #1 (rpi5-edge-01) Healthy -> Degraded
+  replan signal: triggered (scheduler replans = ...)
+
+veeros> fabric fault status
+  fault table (fabric health):
+    #0  host-demo           Healthy
+    #1  rpi5-edge-01        Degraded
+    ...
+
+veeros> fabric fault clear rpi5-edge-01
+  fault update: node #1 (rpi5-edge-01) Degraded -> Healthy
+
+veeros> fabric snapshot
+  world snapshot: nodes=4 hash=0x...............
+
+veeros> fabric trace
+  decision trace (oldest -> newest):
+    ...plan/replan/snapshot decisions with reasons...
+
+veeros> fabric simulate latency-first pipeline rebalance realtime telemetry
+  simulate policy=latency-first class=Pipeline
+  required capability: compute
+  ranked candidates:
+    1. #0 (host-demo) score=...
+    2. #1 (rpi5-edge-01) score=...
+  winner: #0 (host-demo)
+```
 
 ### 2. Spawn and Manage Agents
 
@@ -133,6 +190,8 @@ veeros> demo
   demo deploy    Deploy a service (intent → agents → memory)
   demo pipeline  Data pipeline (multi-step intent decomposition)
   demo monitor   Spawn a monitoring agent swarm
+  demo living    Run fabric cognition loop (sense->plan->act->reflect)
+  demo incident  Run autonomous incident drill (fault->replan->audit)
   demo full      Run all scenarios end-to-end
 
 veeros> demo deploy
@@ -141,6 +200,28 @@ veeros> demo deploy
 veeros> demo full
   ...runs all three scenarios...
 ```
+
+### 5b. Living Fabric Cognition Loop (No LLM Backend)
+
+```
+veeros> demo living
+  ...senses fabric + mesh state...
+  ...injects a controlled node fault and triggers replan...
+  ...writes world model memory...
+  ...submits planning intent...
+  ...spawns execution agents...
+  ...emits deterministic world snapshot hash for audit/replay...
+  ...records explainable decision outcome...
+
+veeros> demo incident
+  ...baseline topology...
+  ...mission intent loaded...
+  ...fault injected, autonomous replan emitted...
+  ...decision trace + snapshot audit shown...
+  ...recovery completed...
+```
+
+This scenario demonstrates the intended VeerOS direction: LLM-like capability from distributed fabric cognition primitives (`sense -> plan -> act -> reflect`) without requiring a direct LLM runtime in the loop.
 
 ### 6. Man Pages
 

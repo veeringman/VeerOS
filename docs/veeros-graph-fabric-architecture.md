@@ -40,6 +40,13 @@ A mathematically-native, intent-driven, and trust-optimized communication fabric
 - **Fabric Transport**: Encrypted streams
 - **Fold Scheduler**: Workload placement
 
+### Transport Layering Note
+- Fabric targets QUIC-class behavior, not a QUIC-only implementation mandate.
+- The microkernel mesh and routing core remain transport-agnostic and `no_std`-compatible.
+- QUIC fits best as an optional user-space / host-side backend for WAN or hostile-network links.
+- Veer-specific framing, identity routing, resumable session state, and mesh discovery stay native to Fabric even when QUIC is used underneath.
+- This avoids forcing async std-only transport dependencies into the kernel while preserving a path to use mature QUIC stacks where they add real value.
+
 ---
 
 ## 5. Example Flow

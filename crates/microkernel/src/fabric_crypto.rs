@@ -26,13 +26,18 @@
 //! - Nonce: counter-based (u96 from u32 sequence number)
 //! - AAD: message header (type + version) for binding
 
-use crate::fabric_proto::{HEADER_LEN, MAX_PAYLOAD_LEN, TAG_LEN};
+use crate::fabric_proto::{
+    MsgHeader, MsgType, WireMsg, FABRIC_PROTO_VERSION, HEADER_LEN, MAX_PAYLOAD_LEN, TAG_LEN,
+};
 use crypto::Aead;
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
 /// Maximum messages before mandatory key rotation.
-pub const KEY_ROTATION_LIMIT: u32 = 1 << 20; // ~1 million messages
+pub const KEY_ROTATION_LIMIT: u32 = u32::MAX;
+
+/// Maximum session age before mandatory key rotation.
+pub const KEY_ROTATION_INTERVAL_TICKS: u64 = 3_600;
 
 /// Session key length (ChaCha20-Poly1305).
 pub const SESSION_KEY_LEN: usize = 32;
@@ -42,6 +47,31 @@ pub const NONCE_LEN: usize = 12;
 
 /// AEAD tag length (Poly1305).
 pub const AEAD_TAG_LEN: usize = 16;
+
+/// Maximum plaintext payload length once the AEAD tag is accounted for.
+pub const MAX_PLAINTEXT_LEN: usize = MAX_PAYLOAD_LEN - AEAD_TAG_LEN;
+
+/// Decrypted Fabric message payload.
+#[derive(Clone, Copy)]
+pub struct PlainMessage {
+    pub msg_type: MsgType,
+    pub payload: [u8; MAX_PLAINTEXT_LEN],
+    pub payload_len: usize,
+}
+
+impl PlainMessage {
+    pub const fn empty(msg_type: MsgType) -> Self {
+        Self {
+            msg_type,
+            payload: [0u8; MAX_PLAINTEXT_LEN],
+            payload_len: 0,
+        }
+    }
+
+    pub fn as_payload(&self) -> &[u8] {
+        &self.payload[..self.payload_len]
+    }
+}
 
 // ─── Session state ──────────────────────────────────────────────────────
 
@@ -61,6 +91,8 @@ pub struct FabricSession {
     pub rx_counter: u32,
     /// Total messages encrypted in this session.
     pub tx_total: u32,
+    /// Tick when this key epoch was established.
+    pub key_epoch_started_at: u64,
     /// Whether this session is active.
     pub active: bool,
     /// Crypto mode for this session.
@@ -79,6 +111,42 @@ pub enum CryptoSessionMode {
     PqcOnly = 2,
 }
 
+impl CryptoSessionMode {
+    fn supports_symmetric(self) -> bool {
+        matches!(self, CryptoSessionMode::Symmetric | CryptoSessionMode::Hybrid)
+    }
+
+    fn supports_hybrid(self) -> bool {
+        matches!(self, CryptoSessionMode::Hybrid)
+    }
+
+    fn supports_pqc_only(self) -> bool {
+        matches!(self, CryptoSessionMode::PqcOnly)
+    }
+
+    /// Negotiate the strongest common mode and reject classical downgrade.
+    pub fn negotiate(
+        local: CryptoSessionMode,
+        peer: CryptoSessionMode,
+    ) -> Result<CryptoSessionMode, FabricCryptoError> {
+        if local.supports_pqc_only() && peer.supports_pqc_only() {
+            return Ok(CryptoSessionMode::PqcOnly);
+        }
+        if local.supports_hybrid() && peer.supports_hybrid() {
+            return Ok(CryptoSessionMode::Hybrid);
+        }
+        if matches!(local, CryptoSessionMode::Symmetric)
+            && matches!(peer, CryptoSessionMode::Symmetric)
+        {
+            return Ok(CryptoSessionMode::Symmetric);
+        }
+        if local.supports_symmetric() && peer.supports_symmetric() {
+            return Err(FabricCryptoError::DowngradeRejected);
+        }
+        Err(FabricCryptoError::NoCommonCryptoMode)
+    }
+}
+
 impl FabricSession {
     pub const fn empty() -> Self {
         Self {
@@ -87,6 +155,7 @@ impl FabricSession {
             tx_counter: 0,
             rx_counter: 0,
             tx_total: 0,
+            key_epoch_started_at: 0,
             active: false,
             mode: CryptoSessionMode::Symmetric,
         }
@@ -101,6 +170,43 @@ impl FabricSession {
     ///
     /// Derives two keys: one for each direction, to prevent nonce reuse.
     pub fn derive(ikm: &[u8], our_id: &[u8; 32], peer_id: &[u8; 32], is_initiator: bool) -> Self {
+        Self::derive_at_with_mode(
+            ikm,
+            our_id,
+            peer_id,
+            is_initiator,
+            0,
+            CryptoSessionMode::Symmetric,
+        )
+    }
+
+    /// Derive session keys and stamp the start of the key epoch.
+    pub fn derive_at(
+        ikm: &[u8],
+        our_id: &[u8; 32],
+        peer_id: &[u8; 32],
+        is_initiator: bool,
+        current_tick: u64,
+    ) -> Self {
+        Self::derive_at_with_mode(
+            ikm,
+            our_id,
+            peer_id,
+            is_initiator,
+            current_tick,
+            CryptoSessionMode::Symmetric,
+        )
+    }
+
+    /// Derive session keys with an explicitly negotiated crypto mode.
+    pub fn derive_at_with_mode(
+        ikm: &[u8],
+        our_id: &[u8; 32],
+        peer_id: &[u8; 32],
+        is_initiator: bool,
+        current_tick: u64,
+        mode: CryptoSessionMode,
+    ) -> Self {
         let mut session = Self::empty();
 
         // tx_key = HKDF(ikm, our_id || peer_id, "veeros-tx-v1")
@@ -121,6 +227,8 @@ impl FabricSession {
         }
 
         session.active = true;
+        session.mode = mode;
+        session.key_epoch_started_at = current_tick;
         session
     }
 
@@ -170,6 +278,50 @@ impl FabricSession {
         }
     }
 
+    /// Encrypt a typed Fabric payload into a complete authenticated wire frame.
+    ///
+    /// Returns the frame plus the outbound sequence/counter used for this packet.
+    pub fn encrypt_wire_message(
+        &mut self,
+        msg_type: MsgType,
+        plaintext: &[u8],
+    ) -> Result<(WireMsg, u32), FabricCryptoError> {
+        if plaintext.len() > MAX_PLAINTEXT_LEN {
+            return Err(FabricCryptoError::PayloadTooLarge);
+        }
+        if !self.active {
+            return Err(FabricCryptoError::SessionInactive);
+        }
+        if self.tx_total >= KEY_ROTATION_LIMIT {
+            return Err(FabricCryptoError::KeyRotationRequired);
+        }
+
+        let seq = self.tx_counter;
+        let encrypted_len = plaintext.len() + AEAD_TAG_LEN;
+
+        let header = MsgHeader {
+            version: FABRIC_PROTO_VERSION,
+            msg_type,
+            payload_len: encrypted_len as u16,
+        };
+        let mut hdr_buf = [0u8; HEADER_LEN];
+        header.encode(&mut hdr_buf);
+
+        let mut msg = WireMsg::empty();
+        msg.buf[..HEADER_LEN].copy_from_slice(&hdr_buf);
+        msg.buf[HEADER_LEN..HEADER_LEN + plaintext.len()].copy_from_slice(plaintext);
+
+        let enc_total = self.encrypt(
+            &mut msg.buf[HEADER_LEN..HEADER_LEN + encrypted_len],
+            plaintext.len(),
+            &hdr_buf,
+        )?;
+
+        msg.len = HEADER_LEN + enc_total + TAG_LEN;
+        msg.sign(&self.tx_key, seq);
+        Ok((msg, seq))
+    }
+
     /// Decrypt a payload in-place using ChaCha20-Poly1305.
     ///
     /// `buf[..ciphertext_len]` contains ciphertext + AEAD tag.
@@ -207,21 +359,67 @@ impl FabricSession {
         }
     }
 
+    /// Verify and decrypt a complete Fabric wire frame into plaintext.
+    pub fn decrypt_wire_message(
+        &mut self,
+        msg: &WireMsg,
+        peer_counter: u32,
+    ) -> Result<PlainMessage, FabricCryptoError> {
+        if !self.active {
+            return Err(FabricCryptoError::SessionInactive);
+        }
+        if !msg.verify(&self.rx_key, peer_counter) {
+            return Err(FabricCryptoError::IntegrityFailed);
+        }
+
+        let header = msg.header().map_err(|_| FabricCryptoError::InvalidFrame)?;
+        if header.payload_len as usize > MAX_PAYLOAD_LEN || header.payload_len as usize < AEAD_TAG_LEN {
+            return Err(FabricCryptoError::InvalidFrame);
+        }
+
+        let ciphertext_len = header.payload_len as usize;
+        let mut decrypted = PlainMessage::empty(header.msg_type);
+        decrypted.payload[..ciphertext_len]
+            .copy_from_slice(&msg.buf[HEADER_LEN..HEADER_LEN + ciphertext_len]);
+
+        let plaintext_len = self.decrypt(
+            &mut decrypted.payload[..ciphertext_len],
+            ciphertext_len,
+            &msg.buf[..HEADER_LEN],
+            peer_counter,
+        )?;
+        decrypted.payload_len = plaintext_len;
+        Ok(decrypted)
+    }
+
     /// Check if session keys need rotation.
     pub fn needs_rotation(&self) -> bool {
         self.tx_total >= KEY_ROTATION_LIMIT
+    }
+
+    /// Check if session keys need rotation at the current tick.
+    pub fn needs_rotation_at(&self, current_tick: u64) -> bool {
+        self.tx_total >= KEY_ROTATION_LIMIT
+            || current_tick.saturating_sub(self.key_epoch_started_at) >= KEY_ROTATION_INTERVAL_TICKS
     }
 
     /// Rotate session keys using HKDF ratchet.
     ///
     /// new_key = HKDF(old_key, counter, "veeros-rotate-v1")
     pub fn rotate(&mut self) -> Result<(), FabricCryptoError> {
+        self.rotate_at(self.key_epoch_started_at)
+    }
+
+    /// Rotate session keys using an HKDF ratchet with fresh per-epoch salt.
+    pub fn rotate_at(&mut self, current_tick: u64) -> Result<(), FabricCryptoError> {
         if !self.active {
             return Err(FabricCryptoError::SessionInactive);
         }
 
         let info = b"veeros-fabric-rotate-v1";
-        let salt = self.tx_counter.to_le_bytes();
+        let mut salt = [0u8; 12];
+        salt[..4].copy_from_slice(&self.tx_counter.to_le_bytes());
+        salt[4..12].copy_from_slice(&current_tick.to_le_bytes());
 
         let mut new_tx = [0u8; SESSION_KEY_LEN];
         let mut new_rx = [0u8; SESSION_KEY_LEN];
@@ -237,6 +435,7 @@ impl FabricSession {
         self.tx_counter = 0;
         self.rx_counter = 0;
         self.tx_total = 0;
+        self.key_epoch_started_at = current_tick;
 
         Ok(())
     }
@@ -248,6 +447,7 @@ impl FabricSession {
         self.tx_counter = 0;
         self.rx_counter = 0;
         self.tx_total = 0;
+        self.key_epoch_started_at = 0;
         self.active = false;
     }
 }
@@ -300,6 +500,51 @@ impl FabricSessionTable {
         true
     }
 
+    /// Establish a new session for a peer with an explicit current tick.
+    pub fn establish_at(
+        &mut self,
+        peer_idx: usize,
+        ikm: &[u8],
+        our_id: &[u8; 32],
+        peer_id: &[u8; 32],
+        is_initiator: bool,
+        current_tick: u64,
+    ) -> bool {
+        if peer_idx >= self.sessions.len() {
+            return false;
+        }
+        self.sessions[peer_idx] =
+            FabricSession::derive_at(ikm, our_id, peer_id, is_initiator, current_tick);
+        true
+    }
+
+    /// Establish a new session using negotiated crypto mode.
+    pub fn establish_negotiated(
+        &mut self,
+        peer_idx: usize,
+        ikm: &[u8],
+        our_id: &[u8; 32],
+        peer_id: &[u8; 32],
+        is_initiator: bool,
+        current_tick: u64,
+        local_mode: CryptoSessionMode,
+        peer_mode: CryptoSessionMode,
+    ) -> Result<CryptoSessionMode, FabricCryptoError> {
+        if peer_idx >= self.sessions.len() {
+            return Err(FabricCryptoError::SessionInactive);
+        }
+        let negotiated = CryptoSessionMode::negotiate(local_mode, peer_mode)?;
+        self.sessions[peer_idx] = FabricSession::derive_at_with_mode(
+            ikm,
+            our_id,
+            peer_id,
+            is_initiator,
+            current_tick,
+            negotiated,
+        );
+        Ok(negotiated)
+    }
+
     /// Destroy a session (peer disconnected or revoked).
     pub fn destroy(&mut self, peer_idx: usize) {
         if peer_idx < self.sessions.len() {
@@ -324,10 +569,153 @@ pub enum FabricCryptoError {
     KeyRotationRequired,
     /// Output buffer too small.
     BufferTooSmall,
+    /// Plaintext payload exceeds encrypted frame capacity.
+    PayloadTooLarge,
     /// Encryption failed (internal AEAD error).
     EncryptionFailed,
     /// Decryption failed (authentication tag mismatch — tampered).
     DecryptionFailed,
+    /// Wire frame failed HMAC verification.
+    IntegrityFailed,
+    /// Wire frame header/payload layout is invalid.
+    InvalidFrame,
     /// Replay attack detected (counter too old).
     ReplayDetected,
+    /// Negotiation would downgrade a PQC-capable peer to symmetric-only crypto.
+    DowngradeRejected,
+    /// Peers have no compatible crypto mode.
+    NoCommonCryptoMode,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_id(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    #[test]
+    fn encrypt_and_decrypt_wire_message_roundtrip() {
+        let ikm = [0x42u8; 32];
+        let mut tx = FabricSession::derive(&ikm, &node_id(1), &node_id(2), true);
+        let mut rx = FabricSession::derive(&ikm, &node_id(2), &node_id(1), false);
+
+        let (wire, seq) = tx
+            .encrypt_wire_message(MsgType::NodeHeartbeat, b"fabric-heartbeat")
+            .unwrap();
+        let plain = rx.decrypt_wire_message(&wire, seq).unwrap();
+
+        assert_eq!(plain.msg_type, MsgType::NodeHeartbeat);
+        assert_eq!(plain.as_payload(), b"fabric-heartbeat");
+    }
+
+    #[test]
+    fn decrypt_wire_message_rejects_tampered_ciphertext() {
+        let ikm = [0x24u8; 32];
+        let mut tx = FabricSession::derive(&ikm, &node_id(3), &node_id(4), true);
+        let mut rx = FabricSession::derive(&ikm, &node_id(4), &node_id(3), false);
+
+        let (mut wire, seq) = tx.encrypt_wire_message(MsgType::Ack, b"ok").unwrap();
+        wire.buf[HEADER_LEN] ^= 0x01;
+
+        let err = rx.decrypt_wire_message(&wire, seq).unwrap_err();
+        assert_eq!(err, FabricCryptoError::IntegrityFailed);
+    }
+
+    #[test]
+    fn encrypt_wire_message_enforces_plaintext_capacity() {
+        let ikm = [0x11u8; 32];
+        let mut tx = FabricSession::derive(&ikm, &node_id(5), &node_id(6), true);
+        let payload = [0xAAu8; MAX_PLAINTEXT_LEN + 1];
+
+        let err = tx
+            .encrypt_wire_message(MsgType::MemorySync, &payload)
+            .unwrap_err();
+        assert_eq!(err, FabricCryptoError::PayloadTooLarge);
+    }
+
+    #[test]
+    fn session_requires_rotation_after_max_age() {
+        let ikm = [0x33u8; 32];
+        let session = FabricSession::derive_at(&ikm, &node_id(7), &node_id(8), true, 100);
+
+        assert!(!session.needs_rotation_at(100 + KEY_ROTATION_INTERVAL_TICKS - 1));
+        assert!(session.needs_rotation_at(100 + KEY_ROTATION_INTERVAL_TICKS));
+    }
+
+    #[test]
+    fn rotate_at_resets_epoch_and_changes_keys() {
+        let ikm = [0x55u8; 32];
+        let mut session = FabricSession::derive_at(&ikm, &node_id(9), &node_id(10), true, 12);
+        let old_tx = session.tx_key;
+        let old_rx = session.rx_key;
+        session.tx_counter = 77;
+        session.rx_counter = 13;
+        session.tx_total = 42;
+
+        session.rotate_at(900).unwrap();
+
+        assert_ne!(session.tx_key, old_tx);
+        assert_ne!(session.rx_key, old_rx);
+        assert_eq!(session.tx_counter, 0);
+        assert_eq!(session.rx_counter, 0);
+        assert_eq!(session.tx_total, 0);
+        assert_eq!(session.key_epoch_started_at, 900);
+        assert!(!session.needs_rotation_at(900));
+    }
+
+    #[test]
+    fn negotiate_prefers_strongest_common_mode() {
+        assert_eq!(
+            CryptoSessionMode::negotiate(CryptoSessionMode::Hybrid, CryptoSessionMode::Hybrid)
+                .unwrap(),
+            CryptoSessionMode::Hybrid
+        );
+        assert_eq!(
+            CryptoSessionMode::negotiate(CryptoSessionMode::PqcOnly, CryptoSessionMode::PqcOnly)
+                .unwrap(),
+            CryptoSessionMode::PqcOnly
+        );
+        assert_eq!(
+            CryptoSessionMode::negotiate(
+                CryptoSessionMode::Symmetric,
+                CryptoSessionMode::Symmetric,
+            )
+            .unwrap(),
+            CryptoSessionMode::Symmetric
+        );
+    }
+
+    #[test]
+    fn negotiate_rejects_classical_downgrade_for_pqc_capable_peers() {
+        let err = CryptoSessionMode::negotiate(
+            CryptoSessionMode::Hybrid,
+            CryptoSessionMode::Symmetric,
+        )
+        .unwrap_err();
+        assert_eq!(err, FabricCryptoError::DowngradeRejected);
+    }
+
+    #[test]
+    fn establish_negotiated_records_selected_mode() {
+        let ikm = [0x61u8; 32];
+        let mut table = FabricSessionTable::new();
+        let mode = table
+            .establish_negotiated(
+                0,
+                &ikm,
+                &node_id(1),
+                &node_id(2),
+                true,
+                77,
+                CryptoSessionMode::Hybrid,
+                CryptoSessionMode::Hybrid,
+            )
+            .unwrap();
+
+        assert_eq!(mode, CryptoSessionMode::Hybrid);
+        assert_eq!(table.get(0).unwrap().mode, CryptoSessionMode::Hybrid);
+        assert_eq!(table.get(0).unwrap().key_epoch_started_at, 77);
+    }
 }

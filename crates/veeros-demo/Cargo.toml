@@ -6,8 +6,23 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+quic-demo = [
+	"dep:veer_fabric_transport",
+	"dep:quinn",
+	"dep:rcgen",
+	"dep:rustls",
+	"dep:tokio",
+]
+
 [dependencies]
 arch = { path = "../arch" }
 shell = { path = "../shell" }
 microkernel = { path = "../microkernel", default-features = false }
 libc = "0.2"
+veer_fabric_transport = { path = "../veer_fabric_transport", optional = true, features = ["quic-backend"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
+rcgen = { version = "0.12", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }

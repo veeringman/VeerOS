@@ -98,6 +98,105 @@ impl MsgType {
     }
 }
 
+/// Zero-allocation typed view over a fabric payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FabricMsg<'a> {
+    NodeAnnounce(&'a [u8]),
+    NodeHeartbeat(&'a [u8]),
+    IntentForward(&'a [u8]),
+    AgentMigrate(&'a [u8]),
+    MemorySync(&'a [u8]),
+    MemoryQuery(&'a [u8]),
+    CapabilityProof(&'a [u8]),
+    Challenge(&'a [u8]),
+    ChallengeResponse(&'a [u8]),
+    KeyExchange(&'a [u8]),
+    Ack(&'a [u8]),
+    Nack(&'a [u8]),
+}
+
+impl<'a> FabricMsg<'a> {
+    /// Return the on-wire message type tag for this payload.
+    pub const fn msg_type(&self) -> MsgType {
+        match self {
+            Self::NodeAnnounce(_) => MsgType::NodeAnnounce,
+            Self::NodeHeartbeat(_) => MsgType::NodeHeartbeat,
+            Self::IntentForward(_) => MsgType::IntentForward,
+            Self::AgentMigrate(_) => MsgType::AgentMigrate,
+            Self::MemorySync(_) => MsgType::MemorySync,
+            Self::MemoryQuery(_) => MsgType::MemoryQuery,
+            Self::CapabilityProof(_) => MsgType::CapabilityProof,
+            Self::Challenge(_) => MsgType::Challenge,
+            Self::ChallengeResponse(_) => MsgType::ChallengeResponse,
+            Self::KeyExchange(_) => MsgType::KeyExchange,
+            Self::Ack(_) => MsgType::Ack,
+            Self::Nack(_) => MsgType::Nack,
+        }
+    }
+
+    /// Borrow the raw payload bytes for this message.
+    pub const fn payload(&self) -> &'a [u8] {
+        match self {
+            Self::NodeAnnounce(payload)
+            | Self::NodeHeartbeat(payload)
+            | Self::IntentForward(payload)
+            | Self::AgentMigrate(payload)
+            | Self::MemorySync(payload)
+            | Self::MemoryQuery(payload)
+            | Self::CapabilityProof(payload)
+            | Self::Challenge(payload)
+            | Self::ChallengeResponse(payload)
+            | Self::KeyExchange(payload)
+            | Self::Ack(payload)
+            | Self::Nack(payload) => payload,
+        }
+    }
+
+    /// Encode this typed message into a complete wire frame.
+    pub fn encode(&self) -> Result<WireMsg, ProtoError> {
+        WireMsg::build(self.msg_type(), self.payload())
+    }
+
+    /// Decode a typed message view from a parsed wire frame.
+    pub fn decode(wire: &'a WireMsg) -> Result<Self, ProtoError> {
+        let header = wire.header()?;
+        Self::from_parts(header.msg_type, wire.payload())
+    }
+
+    /// Decode a typed message view directly from bytes.
+    pub fn decode_bytes(buf: &'a [u8]) -> Result<Self, ProtoError> {
+        if buf.len() < HEADER_LEN + TAG_LEN {
+            return Err(ProtoError::BufferTooSmall);
+        }
+
+        let header = MsgHeader::decode(buf)?;
+        let total_len = HEADER_LEN + header.payload_len as usize + TAG_LEN;
+        if buf.len() < total_len {
+            return Err(ProtoError::BufferTooSmall);
+        }
+
+        let payload = &buf[HEADER_LEN..HEADER_LEN + header.payload_len as usize];
+        Self::from_parts(header.msg_type, payload)
+    }
+
+    fn from_parts(msg_type: MsgType, payload: &'a [u8]) -> Result<Self, ProtoError> {
+        Ok(match msg_type {
+            MsgType::NodeAnnounce => Self::NodeAnnounce(payload),
+            MsgType::NodeHeartbeat => Self::NodeHeartbeat(payload),
+            MsgType::IntentForward => Self::IntentForward(payload),
+            MsgType::AgentMigrate => Self::AgentMigrate(payload),
+            MsgType::MemorySync => Self::MemorySync(payload),
+            MsgType::MemoryQuery => Self::MemoryQuery(payload),
+            MsgType::CapabilityProof => Self::CapabilityProof(payload),
+            MsgType::Challenge => Self::Challenge(payload),
+            MsgType::ChallengeResponse => Self::ChallengeResponse(payload),
+            MsgType::KeyExchange => Self::KeyExchange(payload),
+            MsgType::Ack => Self::Ack(payload),
+            MsgType::Nack => Self::Nack(payload),
+        })
+    }
+}
+
 // ─── Message header ─────────────────────────────────────────────────────
 
 /// Parsed message header.
@@ -156,6 +255,52 @@ pub struct WireMsg {
     pub buf: [u8; MAX_MSG_LEN],
     /// Total valid bytes in buf.
     pub len: usize,
+}
+
+/// Per-peer sequence state used for replay-protected Fabric messaging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequenceState {
+    next_tx_seq: u32,
+    next_rx_seq: u32,
+}
+
+impl SequenceState {
+    pub const fn new() -> Self {
+        Self {
+            next_tx_seq: 0,
+            next_rx_seq: 0,
+        }
+    }
+
+    /// Sequence number that will be assigned to the next outbound message.
+    pub const fn next_tx_seq(&self) -> u32 {
+        self.next_tx_seq
+    }
+
+    /// Sequence number expected on the next inbound message.
+    pub const fn next_rx_seq(&self) -> u32 {
+        self.next_rx_seq
+    }
+
+    /// Sign a message using the current outbound sequence number and advance it.
+    pub fn sign_outgoing(&mut self, msg: &mut WireMsg, key: &[u8]) -> u32 {
+        let seq = self.next_tx_seq;
+        msg.sign(key, seq);
+        self.next_tx_seq = self.next_tx_seq.wrapping_add(1);
+        seq
+    }
+
+    /// Verify a message against the expected inbound sequence number.
+    pub fn verify_incoming(&mut self, msg: &WireMsg, key: &[u8], seq: u32) -> Result<(), ProtoError> {
+        if seq != self.next_rx_seq {
+            return Err(ProtoError::ReplayDetected);
+        }
+        if !msg.verify(key, seq) {
+            return Err(ProtoError::IntegrityFailed);
+        }
+        self.next_rx_seq = self.next_rx_seq.wrapping_add(1);
+        Ok(())
+    }
 }
 
 impl WireMsg {
@@ -573,4 +718,88 @@ pub enum ProtoError {
     ReplayDetected,
     /// Message from untrusted node.
     Untrusted,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fabric_msg_roundtrip_preserves_type_and_payload() {
+        let payload = [1u8, 2, 3, 4, 5, 6];
+        let msg = FabricMsg::IntentForward(&payload);
+
+        let wire = msg.encode().unwrap();
+        let decoded = FabricMsg::decode(&wire).unwrap();
+
+        assert_eq!(decoded, FabricMsg::IntentForward(&payload));
+        assert_eq!(decoded.msg_type(), MsgType::IntentForward);
+        assert_eq!(decoded.payload(), payload);
+    }
+
+    #[test]
+    fn fabric_msg_decode_bytes_uses_header_payload_length() {
+        let payload = [9u8, 8, 7, 6];
+        let mut wire = FabricMsg::Challenge(&payload).encode().unwrap();
+        wire.sign(b"fabric-test-key", 7);
+
+        let decoded = FabricMsg::decode_bytes(wire.as_bytes()).unwrap();
+        assert_eq!(decoded, FabricMsg::Challenge(&payload));
+    }
+
+    #[test]
+    fn fabric_msg_decode_bytes_rejects_truncated_frame() {
+        let payload = [0xAAu8; 3];
+        let wire = FabricMsg::Ack(&payload).encode().unwrap();
+
+        let err = FabricMsg::decode_bytes(&wire.as_bytes()[..HEADER_LEN + 1]).unwrap_err();
+        assert_eq!(err, ProtoError::BufferTooSmall);
+    }
+
+    #[test]
+    fn sequence_state_signs_and_accepts_monotonic_messages() {
+        let key = b"fabric-test-key";
+        let payload = [0x11u8, 0x22, 0x33];
+        let mut tx = SequenceState::new();
+        let mut rx = SequenceState::new();
+        let mut wire = FabricMsg::NodeHeartbeat(&payload).encode().unwrap();
+
+        let seq = tx.sign_outgoing(&mut wire, key);
+        assert_eq!(seq, 0);
+        assert_eq!(tx.next_tx_seq(), 1);
+
+        rx.verify_incoming(&wire, key, seq).unwrap();
+        assert_eq!(rx.next_rx_seq(), 1);
+    }
+
+    #[test]
+    fn sequence_state_rejects_replayed_messages() {
+        let key = b"fabric-test-key";
+        let payload = [0x44u8, 0x55];
+        let mut tx = SequenceState::new();
+        let mut rx = SequenceState::new();
+        let mut wire = FabricMsg::Ack(&payload).encode().unwrap();
+
+        let seq = tx.sign_outgoing(&mut wire, key);
+        rx.verify_incoming(&wire, key, seq).unwrap();
+
+        let err = rx.verify_incoming(&wire, key, seq).unwrap_err();
+        assert_eq!(err, ProtoError::ReplayDetected);
+    }
+
+    #[test]
+    fn sequence_state_does_not_advance_on_bad_integrity() {
+        let key = b"fabric-test-key";
+        let payload = [0x77u8, 0x88, 0x99];
+        let mut tx = SequenceState::new();
+        let mut rx = SequenceState::new();
+        let mut wire = FabricMsg::Nack(&payload).encode().unwrap();
+
+        let seq = tx.sign_outgoing(&mut wire, key);
+        wire.buf[HEADER_LEN] ^= 0xFF;
+
+        let err = rx.verify_incoming(&wire, key, seq).unwrap_err();
+        assert_eq!(err, ProtoError::IntegrityFailed);
+        assert_eq!(rx.next_rx_seq(), 0);
+    }
 }

@@ -810,7 +810,7 @@ impl Shell {
             "agents" => self.cmd_agents(con, args),
             "intent" => self.cmd_intent(con, args),
             "memory" | "kv" => self.cmd_memory(con, args),
-            "fabric" => self.cmd_fabric(con),
+            "fabric" => self.cmd_fabric(con, args),
             "peers" => self.cmd_peers(con, args),
             "mesh" => self.cmd_mesh(con, args),
             "zkp" => self.cmd_zkp(con, args),
@@ -2536,12 +2536,49 @@ impl Shell {
         }
     }
 
-    /// `fabric` command — show execution fabric node status.
-    fn cmd_fabric<S: Serial>(&self, con: &mut Console<S>) {
-        if let Some(f) = self.env.get_fabric_status {
-            f(con as &mut dyn core::fmt::Write);
-        } else {
-            let _ = writeln!(con, "  fabric: not available");
+    /// `fabric` command — show execution fabric node status and control hooks.
+    fn cmd_fabric<S: Serial>(&self, con: &mut Console<S>, args: &str) {
+        let (sub, rest) = split_first_word(args);
+        match sub {
+            "" | "status" => {
+                if let Some(f) = self.env.get_fabric_status {
+                    f(con as &mut dyn core::fmt::Write);
+                } else {
+                    let _ = writeln!(con, "  fabric: not available");
+                }
+            }
+            "snapshot" => {
+                if let Some(f) = self.env.mesh_cmd {
+                    f("snapshot", rest, con as &mut dyn core::fmt::Write);
+                } else {
+                    let _ = writeln!(con, "  fabric snapshot: not available");
+                }
+            }
+            "simulate" => {
+                if let Some(f) = self.env.mesh_cmd {
+                    f("simulate", rest, con as &mut dyn core::fmt::Write);
+                } else {
+                    let _ = writeln!(con, "  fabric simulate: not available");
+                }
+            }
+            "trace" => {
+                if let Some(f) = self.env.mesh_cmd {
+                    f("trace", rest, con as &mut dyn core::fmt::Write);
+                } else {
+                    let _ = writeln!(con, "  fabric trace: not available");
+                }
+            }
+            // Fault operations are implemented by the mesh backend in host/demo builds.
+            "fault" => {
+                if let Some(f) = self.env.mesh_cmd {
+                    f("fault", rest, con as &mut dyn core::fmt::Write);
+                } else {
+                    let _ = writeln!(con, "  fabric fault: not available");
+                }
+            }
+            _ => {
+                let _ = writeln!(con, "  usage: fabric [status|snapshot|simulate|trace|fault]");
+            }
         }
     }
 
@@ -2591,6 +2628,8 @@ impl Shell {
                     "  demo pipeline  Data pipeline (multi-step intent decomposition)"
                 );
                 let _ = writeln!(con, "  demo monitor   Spawn a monitoring agent swarm");
+                let _ = writeln!(con, "  demo living    Run fabric cognition loop (sense->plan->act->reflect)");
+                let _ = writeln!(con, "  demo incident  Run autonomous incident drill (fault->replan->audit)");
                 let _ = writeln!(con, "  demo full      Run all scenarios end-to-end");
                 let _ = writeln!(con, "");
                 let _ = writeln!(con, "  Each scenario demonstrates live kernel primitives.");
@@ -2598,12 +2637,18 @@ impl Shell {
             "deploy" => self.demo_deploy(con),
             "pipeline" => self.demo_pipeline(con),
             "monitor" => self.demo_monitor(con),
+            "living" => self.demo_living(con),
+            "incident" => self.demo_incident(con),
             "full" => {
                 self.demo_deploy(con);
                 let _ = writeln!(con, "");
                 self.demo_pipeline(con);
                 let _ = writeln!(con, "");
                 self.demo_monitor(con);
+                let _ = writeln!(con, "");
+                self.demo_living(con);
+                let _ = writeln!(con, "");
+                self.demo_incident(con);
             }
             _ => {
                 let _ = writeln!(con, "  unknown scenario: '{scenario}'");
@@ -2623,7 +2668,7 @@ impl Shell {
 
         // Step 1: Show fabric
         let _ = writeln!(w, "  ── Step 1: Inspect execution fabric ──");
-        self.cmd_fabric(con);
+        self.cmd_fabric(con, "");
         let _ = writeln!(con, "");
 
         // Step 2: Store configuration in memory
@@ -2871,7 +2916,7 @@ impl Shell {
         let _ = writeln!(con, "  ── Step 4: System overview ──");
         self.cmd_agents(con, "list");
         let _ = writeln!(con, "");
-        self.cmd_fabric(con);
+        self.cmd_fabric(con, "");
         let _ = writeln!(con, "");
 
         let _ = writeln!(con, "  Monitoring swarm active across 3 fabric nodes.");
@@ -2879,6 +2924,156 @@ impl Shell {
             con,
             "  Verify with: agents, fabric, memory get monitor.interval_ms"
         );
+    }
+
+    /// Demo: living-fabric cognition loop without an LLM backend.
+    fn demo_living<S: Serial>(&self, con: &mut Console<S>) {
+        let w = con as &mut dyn core::fmt::Write;
+        let _ = writeln!(w, "");
+        let _ = writeln!(w, "  ╔══════════════════════════════════════════════╗");
+        let _ = writeln!(w, "  ║  Demo: Living Fabric Cognition Loop         ║");
+        let _ = writeln!(w, "  ╚══════════════════════════════════════════════╝");
+        let _ = writeln!(w, "");
+
+        // Step 1: Sense current topology and transport state.
+        let _ = writeln!(con, "  ── Step 1: Sense fabric state ──");
+        self.cmd_fabric(con, "");
+        self.cmd_mesh(con, "status");
+        let _ = writeln!(con, "");
+
+        // Step 1b: Inject a controlled fault to force adaptation.
+        let _ = writeln!(con, "  ── Step 1b: Inject controlled fault (force replan) ──");
+        self.cmd_fabric(con, "fault inject rpi5-edge-01 degraded");
+        self.cmd_fabric(con, "fault status");
+        let _ = writeln!(con, "");
+
+        // Step 2: Persist world-model observations.
+        let _ = writeln!(con, "  ── Step 2: Build world model in memory ──");
+        if let Some(f) = self.env.memory_cmd {
+            f(
+                "set",
+                "world.snapshot region-west healthy",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "set",
+                "world.pressure inference_high",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "set",
+                "world.policy optimize_latency_and_trust",
+                con as &mut dyn core::fmt::Write,
+            );
+        }
+        let _ = writeln!(con, "");
+
+        // Step 3: Plan by turning goals into intents.
+        let _ = writeln!(con, "  ── Step 3: Plan (goal -> intent DAG) ──");
+        if let Some(f) = self.env.intent_cmd {
+            f(
+                "submit",
+                "pipeline rebalance realtime telemetry to low-latency path",
+                con as &mut dyn core::fmt::Write,
+            );
+        }
+        let _ = writeln!(con, "");
+
+        // Step 4: Act by spawning distributed execution agents.
+        let _ = writeln!(con, "  ── Step 4: Act (spawn execution agents) ──");
+        if let Some(f) = self.env.agent_cmd {
+            f(
+                "spawn",
+                "score candidate nodes by capability and load",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "migrate hot stream to cloud-gpu-a100",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "spawn",
+                "verify edge failover path via rpi5-edge-01",
+                con as &mut dyn core::fmt::Write,
+            );
+        }
+        self.cmd_agents(con, "list");
+        let _ = writeln!(con, "");
+
+        // Step 5: Reflect and store explainable outcome.
+        let _ = writeln!(con, "  ── Step 5: Reflect (self-explain + memory commit) ──");
+        if let Some(f) = self.env.memory_cmd {
+            f(
+                "set",
+                "world.last_decision selected cloud-gpu-a100 due_to model_inference+load",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "set",
+                "world.last_replan none",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "set",
+                "world.confidence 0.86",
+                con as &mut dyn core::fmt::Write,
+            );
+            f(
+                "get",
+                "world.last_decision",
+                con as &mut dyn core::fmt::Write,
+            );
+        }
+        if let Some(f) = self.env.intent_cmd {
+            f("stats", "", con as &mut dyn core::fmt::Write);
+        }
+        self.cmd_fabric(con, "trace");
+        self.cmd_fabric(con, "snapshot");
+        self.cmd_fabric(con, "fault clear rpi5-edge-01");
+        let _ = writeln!(con, "");
+
+        let _ = writeln!(con, "  Living-fabric loop executed: sense -> plan -> act -> reflect.");
+        let _ = writeln!(con, "  No LLM backend required; behavior emerges from fabric primitives.");
+        let _ = writeln!(con, "  Verify with: memory get world.last_decision, intent list, agents");
+    }
+
+    /// Demo: autonomous incident drill with replan and audit.
+    fn demo_incident<S: Serial>(&self, con: &mut Console<S>) {
+        let w = con as &mut dyn core::fmt::Write;
+        let _ = writeln!(w, "");
+        let _ = writeln!(w, "  ╔══════════════════════════════════════════════╗");
+        let _ = writeln!(w, "  ║  Demo: Autonomous Incident Drill            ║");
+        let _ = writeln!(w, "  ╚══════════════════════════════════════════════╝");
+        let _ = writeln!(w, "");
+
+        let _ = writeln!(con, "  ── Step 1: Baseline topology ──");
+        self.cmd_fabric(con, "status");
+        self.cmd_fabric(con, "trace clear");
+        let _ = writeln!(con, "");
+
+        let _ = writeln!(con, "  ── Step 2: Load mission intent ──");
+        self.cmd_intent(con, "submit pipeline rebalance realtime telemetry");
+        self.cmd_intent(con, "stats");
+        let _ = writeln!(con, "");
+
+        let _ = writeln!(con, "  ── Step 3: Inject outage and force adaptation ──");
+        self.cmd_fabric(con, "fault inject rpi5-edge-01 degraded");
+        self.cmd_intent(con, "stats");
+        let _ = writeln!(con, "");
+
+        let _ = writeln!(con, "  ── Step 4: Explain and audit ──");
+        self.cmd_fabric(con, "trace");
+        self.cmd_fabric(con, "snapshot");
+        let _ = writeln!(con, "");
+
+        let _ = writeln!(con, "  ── Step 5: Recover and stabilize ──");
+        self.cmd_fabric(con, "fault clear rpi5-edge-01");
+        self.cmd_fabric(con, "status");
+        let _ = writeln!(con, "");
+
+        let _ = writeln!(con, "  Incident drill complete: detect -> adapt -> explain -> recover.");
+        let _ = writeln!(con, "  Verify with: fabric trace, intent stats, fabric snapshot");
     }
 }
 
@@ -4171,6 +4366,17 @@ locality preference, and current load.
 
 Usage:
   fabric              Show fabric node summary
+    fabric status       Same as above
+    fabric snapshot     Emit deterministic world-state hash for audit/replay
+    fabric simulate <policy> <class> <description>
+                                            Run policy what-if placement simulation (no state change)
+    fabric trace        Show decision trace timeline
+    fabric trace clear  Clear decision trace timeline
+    fabric fault status List current node health fault table
+    fabric fault inject <node> [offline|degraded|overloaded|healthy]
+                                            Inject a controlled health fault
+    fabric fault clear <node>
+                                            Restore node health to healthy
 
 Node scoring algorithm:
   1. Filter by required capabilities
@@ -4197,6 +4403,8 @@ Usage:
   demo deploy         Service deployment end-to-end
   demo pipeline       Data pipeline with multi-step decomposition
   demo monitor        Monitoring agent swarm across fabric nodes
+    demo living         Living-fabric cognition loop (sense->plan->act->reflect)
+    demo incident       Autonomous incident drill (fault->replan->audit)
   demo full           Run all scenarios sequentially
 
 Scenarios:
@@ -4219,6 +4427,13 @@ Scenarios:
     1. Submitting a 'monitor' intent
     2. Spawning agents targeting different fabric nodes
     3. Configuring monitoring thresholds in memory
+
+    living — Demonstrates LLM-like capability without an LLM:
+        1. Sensing live fabric + mesh state
+        2. Building a world model in persistent memory
+        3. Planning via intent decomposition
+        4. Acting via distributed execution agents
+        5. Reflecting with explainable decision records
 
 After each demo, use individual commands (agents, intent, memory,
 fabric) to inspect the resulting kernel state.

@@ -247,13 +247,14 @@ pub unsafe fn dispatch(
         SYS_MEMORY_STORE | SYS_MEMORY_QUERY => ProcessCaps::MEMORY_ENGINE,
 
         // AI-Native Execution — Fabric + Intent Scheduler stats (read-only)
-        SYS_FABRIC_STATUS | SYS_INTENT_SCHED_STATS => ProcessCaps::TASK_BASIC,
+        SYS_FABRIC_STATUS => ProcessCaps::FABRIC_READ,
+        SYS_INTENT_SCHED_STATS => ProcessCaps::TASK_BASIC,
 
         // Distributed Fabric — Peer management (admin)
         SYS_PEER_REGISTER | SYS_PEER_VERIFY => ProcessCaps::FABRIC_ADMIN,
 
         // Distributed Fabric — Peer status (read-only)
-        SYS_PEER_STATUS | SYS_MESH_STATUS | SYS_FABRIC_SESSION_COUNT => ProcessCaps::TASK_BASIC,
+        SYS_PEER_STATUS | SYS_MESH_STATUS | SYS_FABRIC_SESSION_COUNT => ProcessCaps::FABRIC_READ,
 
         // Distributed Fabric — ZKP proofs
         SYS_ZKP_PROVE | SYS_ZKP_VERIFY => ProcessCaps::ZKP,

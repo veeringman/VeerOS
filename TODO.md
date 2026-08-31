@@ -71,6 +71,50 @@ VeerOS hosts (physical machines, VMs, folds) that are not directly reachable via
 
 ---
 
+## [2026-05-16] Session Sync — Living Fabric Cognition (LLM-like capability without LLM)
+
+### New Feature Track: Fabric Cognition / Living Intelligence Loop
+
+#### Vision
+VeerOS fabric should exhibit LLM-like capability at planetary scale through distributed sensing, planning, action, memory, and self-explanation, without depending on a centralized token-prediction model.
+
+#### A — Global World Model
+- [ ] Define `FabricWorldState` schema (node health, capabilities, locality, trust, policy version, intent pressure, anomaly flags)
+- [ ] Add world-state snapshot export/import wire format (signed, versioned, delta-capable)
+- [ ] Add deterministic snapshot hashing for audit/replay
+
+#### B — Cognition Loop Runtime (Per Region + Global)
+- [ ] Implement `sense -> plan -> act -> reflect` loop with fixed tick cadence and bounded budgets
+- [ ] Add re-plan triggers: node failure, policy change, latency breach, trust downgrade
+- [ ] Add explainability records for each decision (`why node X`, `why replan`, `why deny`)
+
+#### C — Planet-Scale Memory
+- [ ] Introduce hierarchical memory tiers: local episodic, regional semantic, global policy memory
+- [ ] Define replication/conflict policy (CRDT or policy-driven merge) for offline/partition tolerance
+- [ ] Add confidence aging and source-weighted memory consolidation
+
+#### D — Capability-Native Conversational Interface (No LLM Required)
+- [ ] Add intent-compiler path from natural operator goals to deterministic intent DAGs
+- [ ] Add dialogue state machine over memory + scheduler state (clarify, commit, execute, summarize)
+- [ ] Add reversible action plans with audit-friendly summaries
+
+#### E — Governance and Safety at Planetary Scope
+- [ ] Federated policy rollouts with staged blast-radius limits
+- [ ] Trust/reputation feedback loop from execution outcomes and attestation signals
+- [ ] Global safety rails: quota ceilings, kill-switches, bounded autonomy windows
+
+#### F — Immediate Build Slice (start now)
+- [x] Add live shell scenario `demo living` to showcase cognition loop primitives on current runtime
+- [x] Add `intent stats` explainability extension (decision reason + selected capability constraints)
+- [x] Add first fault-injection command for controlled re-planning demo (`fabric fault inject ...`, `fabric fault clear ...`)
+- [x] Add deterministic world snapshot hash command for audit/replay (`fabric snapshot`)
+- [x] Add autonomous replan trigger on injected node degradation/offline with live placement updates
+- [x] Add decision trace timeline (`fabric trace`) for plan/replan/snapshot events
+- [x] Add policy what-if simulator (`fabric simulate <policy> <class> <description>`) for placement comparison
+- [x] Add one-command autonomous incident drill scenario (`demo incident`)
+
+---
+
 ## [2026-05-02] Session Sync — macOS AArch64 HVF VM Kit, Shell/Editor Fixes, Persistent Disk
 
 ### Closed in this session
@@ -2754,57 +2798,57 @@ _Transform the local-only execution fabric into a real distributed system spanni
 ### 15A — Fabric Wire Protocol (`microkernel::fabric_proto`)
 _Binary wire format for all fabric operations. Fixed-size, `no_alloc`, parseable on a 32-bit MCU._
 
-- [ ] **`FabricMsg` enum** — message types: `NodeAnnounce`, `NodeHeartbeat`, `IntentForward`, `AgentMigrate`, `MemorySync`, `MemoryQuery`, `CapabilityProof`, `Challenge`, `ChallengeResponse`, `Ack`, `Nack`
-- [ ] **Binary encoding** — `[u8; N]` serialization with type-tag + length + payload; no serde, no alloc
-- [ ] **Message framing** — 4-byte header (magic `0xVE`, version, msg_type, payload_len) + payload + HMAC-SHA256 integrity tag
-- [ ] **Version negotiation** — protocol version in header; receivers reject unknown versions
-- [ ] **Sequence numbers** — monotonic u32 per-peer for replay protection
-- [ ] **Max message size** — 512 bytes (fits in single UDP datagram or BLE packet)
+- [x] **`FabricMsg` enum** — message types: `NodeAnnounce`, `NodeHeartbeat`, `IntentForward`, `AgentMigrate`, `MemorySync`, `MemoryQuery`, `CapabilityProof`, `Challenge`, `ChallengeResponse`, `Ack`, `Nack`
+- [x] **Binary encoding** — `[u8; N]` serialization with type-tag + length + payload; no serde, no alloc
+- [x] **Message framing** — 5-byte header (magic `0xEE`, version, msg_type, payload_len) + payload + HMAC-SHA256 integrity tag
+- [x] **Version negotiation** — protocol version in header; receivers reject unknown versions
+- [x] **Sequence numbers** — monotonic u32 per-peer for replay protection
+- [x] **Max message size** — 512 bytes (fits in single UDP datagram or BLE packet)
 
 ### 15B — Zero Trust Node Identity (`microkernel::node_identity`)
 _Every node has a cryptographic identity. No implicit trust based on network location._
 
 - [ ] **Node keypair** — Ed25519 (classical) + ML-DSA-65 (PQC hybrid) per-node identity keypair, generated at first boot, stored in persistent memory
 - [ ] **Node ID** — SHA-256 hash of public key = 32-byte globally unique node identifier
-- [ ] **Attestation certificate** — self-signed statement: `{node_id, arch, capabilities, zone, timestamp, signature}` — nodes present this on join
-- [ ] **Mutual authentication** — challenge-response: A sends nonce → B signs nonce+A's_node_id → A verifies; then reverse. Both sides authenticated before any data flows
-- [ ] **Session key derivation** — after mutual auth, derive per-session ChaCha20-Poly1305 key via HKDF(shared_nonce, node_ids, "veeros-fabric-session-v1")
-- [ ] **Capability-based authorization** — `ProcessCaps::FABRIC_ADMIN` for join/remove, `ProcessCaps::FABRIC_READ` for queries, `ProcessCaps::FABRIC_MIGRATE` for agent migration
-- [ ] **Trust levels** — `TrustLevel` enum: `Untrusted` (just joined, challenge pending), `Verified` (mutual auth passed), `Attested` (ZKP capability proof verified), `Revoked`
-- [ ] **Certificate revocation** — node can broadcast revocation of another node's cert; peers stop accepting messages from revoked nodes
+- [x] **Attestation certificate** — self-signed statement: `{node_id, arch, capabilities, zone, timestamp, signature}` — nodes present this on join
+- [x] **Mutual authentication** — challenge-response: A sends nonce → B signs nonce+A's_node_id → A verifies; then reverse. Both sides authenticated before any data flows
+- [x] **Session key derivation** — after mutual auth, derive per-session ChaCha20-Poly1305 key via HKDF(shared_nonce, node_ids, "veeros-fabric-session-v1")
+- [x] **Capability-based authorization** — `ProcessCaps::FABRIC_ADMIN` for join/remove, `ProcessCaps::FABRIC_READ` for queries, `ProcessCaps::FABRIC_MIGRATE` for agent migration
+- [x] **Trust levels** — `TrustLevel` enum: `Untrusted` (just joined, challenge pending), `Verified` (mutual auth passed), `Attested` (ZKP capability proof verified), `Revoked`
+- [x] **Certificate revocation** — node can broadcast revocation of another node's cert; peers stop accepting messages from revoked nodes
 
 ### 15C — Zero Knowledge Capability Proofs (`microkernel::zkp`)
 _Nodes prove they have capabilities without revealing full resource profiles. Agents prove goal completion without leaking processed data._
 
 - [ ] **Schnorr-based ZKP** — efficient, `no_std`-friendly Σ-protocol over SHA-256 commitments
-- [ ] **Capability commitment** — node commits to capability bitmask: `C = H(capabilities || salt)`, reveals `C` publicly
-- [ ] **Selective disclosure** — prove "I have GPU capability" without revealing full bitmask: construct Merkle proof over individual capability bits
-- [ ] **Agent completion proof** — agent proves it reached `Completed` state with specific output hash, without revealing the data: `proof = ZKP{H(output) == claimed_hash}`
-- [ ] **Memory entry proofs** — prove a persistent memory entry exists with a certain tag/scope without revealing the value
-- [ ] **Proof verification** — deterministic verifier in `< 200 lines`, runs on riscv32imc within tick budget
-- [ ] **Challenge-proof protocol** — integrated into fabric join handshake: after mutual auth, verifier challenges prover's claimed capabilities via ZKP before granting `Attested` trust level
+- [x] **Capability commitment** — node commits to capability bitmask: `C = H(capabilities || salt)`, reveals `C` publicly
+- [x] **Selective disclosure** — prove "I have GPU capability" without revealing full bitmask: construct Merkle proof over individual capability bits
+- [x] **Agent completion proof** — agent proves it reached `Completed` state with specific output hash, without revealing the data: `proof = ZKP{H(output) == claimed_hash}`
+- [x] **Memory entry proofs** — prove a persistent memory entry exists with a certain tag/scope without revealing the value
+- [x] **Proof verification** — deterministic verifier in `< 200 lines`, runs on riscv32imc within tick budget
+- [x] **Challenge-proof protocol** — integrated into fabric join handshake: after mutual auth, verifier challenges prover's claimed capabilities via ZKP before granting `Attested` trust level
 
 ### 15D — PQC-Hybrid Fabric Encryption (`microkernel::fabric_crypto`)
 _All inter-node communication encrypted with PQC-hybrid AEAD. Defense against harvest-now-decrypt-later attacks._
 
 - [ ] **Session establishment** — X25519 + ML-KEM-768 hybrid KEM for key exchange (uses existing `crypto::hybrid` combiner)
-- [ ] **Channel encryption** — every `FabricMsg` payload encrypted with ChaCha20-Poly1305 using session key + per-message nonce (counter-based)
-- [ ] **Key rotation** — session keys rotated every 2^32 messages or 1 hour (whichever first); re-derive via HKDF with new salt
-- [ ] **Forward secrecy** — previous session keys zeroized after rotation; compromise of current key doesn't reveal past traffic
-- [ ] **Per-message authentication** — HMAC-SHA256 over (header + encrypted_payload + sequence_number); prevents tampering + replay
-- [ ] **Downgrade prevention** — if node advertises PQC capability, classical-only sessions are rejected
-- [ ] **Crypto agility** — `CryptoMode` (Classical/Hybrid/PqcOnly) negotiated at session start; allows gradual fleet-wide migration
+- [x] **Channel encryption** — every `FabricMsg` payload encrypted with ChaCha20-Poly1305 using session key + per-message nonce (counter-based)
+- [x] **Key rotation** — session keys rotated every 2^32 messages or 1 hour (whichever first); re-derive via HKDF with new salt
+- [x] **Forward secrecy** — previous session keys zeroized after rotation; compromise of current key doesn't reveal past traffic
+- [x] **Per-message authentication** — HMAC-SHA256 over (header + encrypted_payload + sequence_number); prevents tampering + replay
+- [x] **Downgrade prevention** — if node advertises PQC capability, classical-only sessions are rejected
+- [x] **Crypto agility** — `CryptoMode` (Classical/Hybrid/PqcOnly) negotiated at session start; allows gradual fleet-wide migration
 
 ### 15E — Mesh Transport (`microkernel::mesh`)
 _Decentralized node discovery and message routing. No central broker._
 
-- [ ] **Discovery protocol** — periodic `NodeAnnounce` broadcast (multicast on LAN, BLE advertisement on IoT, gossip on WAN)
-- [ ] **Gossip protocol** — each node shares its neighbor table with peers; convergence in O(log N) rounds
-- [ ] **Peer table** — `PeerTable` struct: per-peer state (node_id, trust_level, session_key, last_seen, rtt_us, address)
-- [ ] **Message routing** — if destination not a direct peer, forward via lowest-RTT path (greedy geographic routing)
+- [x] **Discovery protocol** — periodic `NodeAnnounce` broadcast (multicast on LAN, BLE advertisement on IoT, gossip on WAN)
+- [x] **Gossip protocol** — each node shares its neighbor table with peers; convergence in O(log N) rounds
+- [x] **Peer table** — `PeerTable` struct: per-peer state (node_id, trust_level, session_key, last_seen, rtt_us, address)
+- [x] **Message routing** — if destination not a direct peer, forward via lowest-RTT path (greedy geographic routing)
 - [ ] **Transport abstraction** — `MeshTransport` trait with `send(node_id, msg)` / `recv() → (node_id, msg)` — implemented over TCP, UDP, BLE, UART, SPI
-- [ ] **Backpressure** — per-peer send queue (8 messages); drop lowest-priority messages on overflow
-- [ ] **Partition tolerance** — nodes continue operating locally during network partition; auto-rejoin and re-sync on reconnection
+- [x] **Backpressure** — per-peer send queue (8 messages); drop lowest-priority messages on overflow
+- [x] **Partition tolerance** — nodes continue operating locally during network partition; auto-rejoin and re-sync on reconnection
 - [ ] **NAT traversal** — optional STUN-like hole punching for nodes behind NAT (WAN deployments)
 
 ### 15F — Agent Serialization & Migration
@@ -2842,7 +2886,7 @@ _The Intent Scheduler places agents on the best node — including remote nodes.
 - [ ] **`dist-cluster` feature** — gates all distributed code; `dist-minimal` stays single-node with zero overhead
 - [ ] **New modules in `lib.rs`** — `fabric_proto`, `node_identity`, `zkp`, `fabric_crypto`, `mesh`
 - [ ] **New syscalls** — `SYS_NODE_ID` (0xE0), `SYS_PEER_COUNT` (0xE1), `SYS_MESH_SEND` (0xE2), `SYS_MESH_RECV` (0xE3), `SYS_AGENT_SNAPSHOT` (0xE4), `SYS_AGENT_RESTORE` (0xE5), `SYS_ZKP_PROVE` (0xE6), `SYS_ZKP_VERIFY` (0xE7)
-- [ ] **ProcessCaps** — `FABRIC_ADMIN` (bit 23), `FABRIC_MIGRATE` (bit 24), `ZKP` (bit 25)
+- [ ] **ProcessCaps** — `FABRIC_READ` (alias of `FABRIC`, bit 22), `FABRIC_ADMIN` (bit 23), `FABRIC_MIGRATE` (bit 24), `ZKP` (bit 25)
 - [ ] **All 5 kernel targets** — static instances + dispatch wiring for new subsystems
 
 ---

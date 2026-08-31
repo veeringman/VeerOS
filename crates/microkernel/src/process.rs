@@ -107,6 +107,8 @@ bitflags! {
         const MEMORY_ENGINE   = 1 << 21;
         /// Fabric: query node topology and placement.
         const FABRIC          = 1 << 22;
+        /// Fabric read-only queries: topology, peer status, mesh/session stats.
+        const FABRIC_READ     = Self::FABRIC.bits();
 
         // ── Distributed Fabric ────────────────────────────────────
         /// Fabric admin: peer registration, trust management, session setup.

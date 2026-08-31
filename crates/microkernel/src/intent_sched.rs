@@ -75,6 +75,12 @@ pub struct IntentSchedStats {
     pub agents_failed: u64,
     /// Total re-plans triggered.
     pub replans: u64,
+    /// Most recent placement target (index in fabric table), or usize::MAX when none selected.
+    pub last_selected_node: usize,
+    /// Most recent required capability used for placement.
+    pub last_required_cap: Option<NodeCapability>,
+    /// Human-readable reason for the last scheduler decision.
+    pub last_decision_reason: &'static str,
     /// Last tick the scheduler ran.
     pub last_tick: u64,
 }
@@ -89,6 +95,9 @@ impl IntentSchedStats {
             agents_completed: 0,
             agents_failed: 0,
             replans: 0,
+            last_selected_node: usize::MAX,
+            last_required_cap: None,
+            last_decision_reason: "none",
             last_tick: 0,
         }
     }
@@ -201,7 +210,15 @@ impl IntentScheduler {
                 // Select placement node.
                 let constraint =
                     self.build_placement_constraint(&plan.steps[s].goal, &intents.intents[i]);
-                let _node = fabric.select_node(&constraint);
+                let selected_node = fabric.select_node(&constraint);
+                self.stats.last_required_cap = constraint.required_cap;
+                if let Some(node_idx) = selected_node {
+                    self.stats.last_selected_node = node_idx;
+                    self.stats.last_decision_reason = "best_score_under_constraints";
+                } else {
+                    self.stats.last_selected_node = usize::MAX;
+                    self.stats.last_decision_reason = "no_eligible_node_fallback_local";
+                }
 
                 // Spawn agent for this step.
                 // For now, agents execute on the local node (remote dispatch
@@ -246,6 +263,26 @@ impl IntentScheduler {
         intent: &crate::intent::IntentDescriptor,
     ) -> PlacementConstraint {
         let mut pc = PlacementConstraint::any();
+
+        // Seed capability requirements from intent class.
+        pc.required_cap = match intent.class {
+            IntentClass::Compute | IntentClass::Deploy | IntentClass::Pipeline | IntentClass::Admin => {
+                Some(NodeCapability::Compute)
+            }
+            IntentClass::Monitor | IntentClass::Communicate => Some(NodeCapability::Network),
+            IntentClass::Data => Some(NodeCapability::BlockStorage),
+            IntentClass::Custom => None,
+        };
+
+        // Goal text can further specialize the requirement.
+        let desc = core::str::from_utf8(goal.desc_bytes()).unwrap_or("");
+        if desc.contains("inference") || desc.contains("model") {
+            pc.required_cap = Some(NodeCapability::ModelInference);
+        } else if desc.contains("sensor") {
+            pc.required_cap = Some(NodeCapability::Sensors);
+        } else if desc.contains("gpu") {
+            pc.required_cap = Some(NodeCapability::GpuCompute);
+        }
 
         // Map intent constraints to placement constraints.
         for ci in 0..intent.constraint_count {
@@ -318,8 +355,10 @@ impl IntentScheduler {
 
             if replanned {
                 self.stats.replans += 1;
+                self.stats.last_decision_reason = "budget_deadline_exceeded_replan";
             } else {
                 self.stats.agents_failed += 1;
+                self.stats.last_decision_reason = "budget_deadline_exceeded_fail";
             }
         }
 
