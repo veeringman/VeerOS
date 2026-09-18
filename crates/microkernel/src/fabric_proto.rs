@@ -332,6 +332,22 @@ impl WireMsg {
         Ok(msg)
     }
 
+    /// Parse a complete wire message from a byte slice.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, ProtoError> {
+        if data.len() < HEADER_LEN + TAG_LEN || data.len() > MAX_MSG_LEN {
+            return Err(ProtoError::BufferTooSmall);
+        }
+        let header = MsgHeader::decode(data)?;
+        let expected = HEADER_LEN + header.payload_len as usize + TAG_LEN;
+        if data.len() < expected {
+            return Err(ProtoError::BufferTooSmall);
+        }
+        let mut msg = Self::empty();
+        msg.buf[..expected].copy_from_slice(&data[..expected]);
+        msg.len = expected;
+        Ok(msg)
+    }
+
     /// Get the header.
     pub fn header(&self) -> Result<MsgHeader, ProtoError> {
         MsgHeader::decode(&self.buf)
@@ -440,6 +456,57 @@ impl AnnouncePayload {
         buf[45] = name_len as u8;
         buf[46..46 + name_len].copy_from_slice(&name[..name_len]);
         total
+    }
+
+    /// Encode an announce payload that also carries the sender Ed25519 public key.
+    pub fn encode_with_pubkey(
+        node_id: &NodeId,
+        arch: u8,
+        zone: u8,
+        capabilities: u32,
+        cpu_cores: u8,
+        cpu_mhz: u16,
+        ram_kib: u32,
+        name: &[u8],
+        public_key: &[u8; 32],
+        buf: &mut [u8],
+    ) -> usize {
+        let name_len = name.len().min(24);
+        let total = Self::MIN_LEN + name_len + 32;
+        if buf.len() < total {
+            return 0;
+        }
+        let written = Self::encode(
+            node_id,
+            arch,
+            zone,
+            capabilities,
+            cpu_cores,
+            cpu_mhz,
+            ram_kib,
+            name,
+            buf,
+        );
+        if written == 0 {
+            return 0;
+        }
+        buf[written..written + 32].copy_from_slice(public_key);
+        total
+    }
+
+    /// Decode the optional Ed25519 public key appended after the name field.
+    pub fn public_key(payload: &[u8]) -> Option<[u8; 32]> {
+        if payload.len() < Self::MIN_LEN {
+            return None;
+        }
+        let name_len = payload[45] as usize;
+        let offset = Self::MIN_LEN + name_len;
+        if payload.len() < offset + 32 {
+            return None;
+        }
+        let mut pk = [0u8; 32];
+        pk.copy_from_slice(&payload[offset..offset + 32]);
+        Some(pk)
     }
 
     /// Decode sender node_id from an announce payload.
@@ -718,6 +785,8 @@ pub enum ProtoError {
     ReplayDetected,
     /// Message from untrusted node.
     Untrusted,
+    /// Physical transport failed, or the peer has no mapped address.
+    Transport,
 }
 
 #[cfg(test)]

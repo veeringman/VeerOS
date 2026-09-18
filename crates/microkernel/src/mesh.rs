@@ -87,6 +87,9 @@ pub const MESH_HEADER_LEN: usize = NODE_ID_LEN + 1;
 /// Maximum bytes in one mesh frame including the routing header.
 pub const MAX_MESH_MSG_LEN: usize = MAX_MSG_LEN + MESH_HEADER_LEN;
 
+/// Destination ID meaning "every listener" (used for first-contact announces).
+pub const MESH_BROADCAST_ID: NodeId = [0xFF; NODE_ID_LEN];
+
 /// Fixed-buffer message carried by transport adapters.
 #[derive(Clone, Copy)]
 pub struct TransportMsg {
@@ -592,6 +595,54 @@ impl MeshRouter {
         WireMsg::build(MsgType::NodeAnnounce, &payload[..payload_len])
     }
 
+    /// Build a `NodeAnnounce` that includes the local Ed25519 public key.
+    pub fn build_announce_with_pubkey(
+        &mut self,
+        arch: u8,
+        zone: u8,
+        capabilities: u32,
+        cpu_cores: u8,
+        cpu_mhz: u16,
+        ram_kib: u32,
+        name: &[u8],
+        public_key: &[u8; 32],
+        tick: u64,
+    ) -> Result<WireMsg, ProtoError> {
+        let mut payload = [0u8; MAX_PAYLOAD_LEN];
+        let payload_len = AnnouncePayload::encode_with_pubkey(
+            &self.local_id,
+            arch,
+            zone,
+            capabilities,
+            cpu_cores,
+            cpu_mhz,
+            ram_kib,
+            name,
+            public_key,
+            &mut payload,
+        );
+        if payload_len == 0 {
+            return Err(ProtoError::BufferTooSmall);
+        }
+
+        self.stats.last_announce = tick;
+        WireMsg::build(MsgType::NodeAnnounce, &payload[..payload_len])
+    }
+
+    /// Wrap a fabric wire message in a mesh routing frame for `dest`.
+    pub fn encode_outbound(
+        &self,
+        dest: &NodeId,
+        msg: &WireMsg,
+        hops: u8,
+    ) -> Result<TransportMsg, ProtoError> {
+        let mut buf = [0u8; MAX_MESH_MSG_LEN];
+        let msg_len = msg.wire_len();
+        let len = Self::encode_mesh_frame(dest, hops, &msg.as_bytes()[..msg_len], &mut buf)
+            .ok_or(ProtoError::PayloadTooLarge)?;
+        TransportMsg::from_slice(&buf[..len])
+    }
+
     /// Build a `NodeHeartbeat` frame and stamp heartbeat time.
     pub fn build_heartbeat(
         &mut self,
@@ -891,7 +942,7 @@ impl MeshRouter {
             }
         };
 
-        if dest == self.local_id {
+        if dest == self.local_id || dest == MESH_BROADCAST_ID {
             return Some(payload);
         }
 
@@ -1333,5 +1384,16 @@ mod tests {
         let (from, delivered) = mesh.recv_from(&mut transport, 2).unwrap();
         assert_eq!(from, sender);
         assert_eq!(delivered.as_slice(), wire.as_bytes());
+    }
+
+    #[test]
+    fn receive_delivers_broadcast_announce_to_local_listener() {
+        let mut mesh = MeshRouter::new();
+        let local = node_id(31);
+        mesh.init(&local);
+        let wire = WireMsg::build(MsgType::NodeAnnounce, &[]).unwrap();
+        let frame = mesh.encode_outbound(&MESH_BROADCAST_ID, &wire, MAX_HOPS).unwrap();
+        let delivered = mesh.receive(&node_id(32), frame.as_slice(), 1).unwrap();
+        assert_eq!(delivered, wire.as_bytes());
     }
 }

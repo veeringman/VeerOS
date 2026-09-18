@@ -255,3 +255,22 @@ allows `ioctl` — KVM works fine). Guest serial output is captured to
   `reset` in their shell if the terminal is left in raw mode.
 - Single vCPU, no SMP.
 - No virtio yet; block/net I/O is not available.
+
+## Syntheon sandbox backend (guest contract)
+
+Syntheon's `ExecutionSandbox` (`isolation: "microvm"`) drives `veer-vm`
+as a workload runner over the serial console (same bridging pattern
+EdgeFabric uses):
+
+1. Host spawns `veer-vm --kernel <image> --memory N --cpus C --arch <arch>`.
+2. Host writes comment lines (`# SYNTHEON_GRANT_ID=…`, `# SYNTHEON_GOAL_ID=…`),
+   then `<command> <args>`, then `echo __SYNTHEON_RC=$?__` to guest stdin.
+3. Host captures UART stdout; the `__SYNTHEON_RC=<n>__` sentinel is the
+   exit code. Guest halt without sentinel falls back to the process exit
+   code; a timeout kills the VM (`TIMEOUT`).
+
+Guest image requirements: boot into a serial shell that executes stdin
+lines and supports `echo` (the VeerOS shell qualifies). Staged files
+land in the host work dir; guest filesystem visibility needs explicit
+wiring (`--disk` via `extraArgs`). No `--tap`/`--vmnet`/`--net` flags
+are passed by default, so `deny` network policy is structural.

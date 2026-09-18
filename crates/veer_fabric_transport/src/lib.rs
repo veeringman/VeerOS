@@ -4,6 +4,10 @@
 //! - encrypted packets (ChaCha20-Poly1305)
 //! - multiplexed logical streams
 //! - resumable session snapshot/restore
+//! - host UDP/TCP adapters for the microkernel `MeshTransport` trait
+
+pub mod identity_fs;
+pub mod mesh_io;
 
 use std::collections::{HashMap, VecDeque};
 

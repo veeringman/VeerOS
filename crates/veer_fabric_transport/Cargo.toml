@@ -12,7 +12,8 @@ default = []
 quic-backend = ["dep:quinn", "dep:tokio"]
 
 [dependencies]
-crypto = { path = "../crypto", default-features = false, features = ["chacha20"] }
+crypto = { path = "../crypto", default-features = false, features = ["chacha20", "sha256"] }
+microkernel = { path = "../microkernel", default-features = false, features = ["dist-cluster"] }
 serde = { version = "1", features = ["derive"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
 tokio = { version = "1", features = ["io-util", "rt", "macros"], optional = true }

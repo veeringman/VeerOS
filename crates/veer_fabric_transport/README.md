@@ -89,7 +89,28 @@ as the wire backend under Veer-specific Fabric framing and routing.
 
 `QuicMeshBridge` is the concrete QUIC implementation of that trait today.
 
-Runnable local loopback example:
+## Host UDP / TCP mesh adapters
+
+`mesh_io::UdpMeshTransport` and `mesh_io::TcpMeshTransport` implement the
+microkernel `MeshTransport` trait on real sockets so mesh frames leave the
+process. Persistent Ed25519 node identity lives in `identity_fs::FileIdentityStore`
+(`node_id = SHA-256(public_key)`).
+
+```bash
+# in-process socket ping
+cargo test -p veer_fabric_transport mesh_io -- --nocapture
+
+# two terminals
+cargo run -p veer_fabric_transport --example mesh_udp_ping -- \
+  --listen 127.0.0.1:7001 --peer 127.0.0.1:7002 --name a
+cargo run -p veer_fabric_transport --example mesh_udp_ping -- \
+  --listen 127.0.0.1:7002 --peer 127.0.0.1:7001 --name b
+
+# single-process loopback
+cargo run -p veer_fabric_transport --example mesh_udp_ping -- --self-test
+```
+
+Runnable local QUIC loopback example:
 
 ```bash
 cargo run -p veer_fabric_transport --features quic-backend --example quic_mesh_bridge_demo

@@ -30,8 +30,9 @@
 //! # PQC-Hybrid support
 //!
 //! The identity system is designed for hybrid classical + post-quantum:
-//! - Phase 1 (now): HMAC-SHA256 symmetric authentication + SHA-256 commitments
-//! - Phase 2: Ed25519 + ML-DSA-65 dual signatures on attestation certs
+//! - Phase 1: HMAC-SHA256 symmetric authentication (PSK / tests)
+//! - Phase 2 (now): Ed25519 keypair, `node_id = SHA-256(public_key)`, signed certs
+//! - Phase 2b: ML-DSA-65 seed slot is reserved in the persist record (zeros until `crypto/ml-dsa`)
 //! - Phase 3: ML-DSA-65 only
 
 use crate::fabric_crypto::CryptoSessionMode;
@@ -56,8 +57,160 @@ pub const MAX_PSK_LEN: usize = 32;
 /// Challenge nonce size.
 pub const NONCE_LEN: usize = 32;
 
-/// Attestation certificate max size.
-pub const MAX_CERT_LEN: usize = 128;
+/// Attestation certificate max size (HMAC = 79, Ed25519 = 143).
+pub const MAX_CERT_LEN: usize = 160;
+
+/// Persistent identity record magic (`VOID` = VeerOS identity).
+pub const IDENTITY_MAGIC: [u8; 4] = *b"VOID";
+
+/// Persistent identity record version.
+pub const IDENTITY_VERSION: u8 = 1;
+
+/// Fixed persist record: magic + version + Ed25519 seed + pk + ML-DSA seed + node_id.
+pub const IDENTITY_RECORD_LEN: usize = 4 + 1 + 32 + 32 + 32 + 32;
+
+/// Length of an Ed25519-signed attestation certificate.
+pub const ED25519_CERT_LEN: usize = 47 + 32 + 64;
+
+/// Load/save a bounded identity record. Kernel uses RAM or flash; host uses a file.
+pub trait IdentityStore {
+    fn load(&self, buf: &mut [u8]) -> Option<usize>;
+    fn save(&mut self, data: &[u8]) -> bool;
+}
+
+/// In-memory identity store for tests and first-boot generation.
+#[derive(Clone, Copy)]
+pub struct MemoryIdentityStore {
+    pub data: [u8; IDENTITY_RECORD_LEN],
+    pub len: usize,
+}
+
+impl MemoryIdentityStore {
+    pub const fn new() -> Self {
+        Self {
+            data: [0u8; IDENTITY_RECORD_LEN],
+            len: 0,
+        }
+    }
+}
+
+impl IdentityStore for MemoryIdentityStore {
+    fn load(&self, buf: &mut [u8]) -> Option<usize> {
+        if self.len == 0 || buf.len() < self.len {
+            return None;
+        }
+        buf[..self.len].copy_from_slice(&self.data[..self.len]);
+        Some(self.len)
+    }
+
+    fn save(&mut self, data: &[u8]) -> bool {
+        if data.len() > IDENTITY_RECORD_LEN {
+            return false;
+        }
+        self.data = [0u8; IDENTITY_RECORD_LEN];
+        self.data[..data.len()].copy_from_slice(data);
+        self.len = data.len();
+        true
+    }
+}
+
+/// Local node signing material.
+///
+/// ML-DSA-65 is not implemented in `crypto` yet. The 32-byte seed is stored so
+/// a later hybrid signer can fill it without changing the persist format.
+#[derive(Clone, Copy)]
+pub struct NodeKeypair {
+    pub ed25519_seed: [u8; 32],
+    pub ed25519_pk: [u8; 32],
+    pub ml_dsa_seed: [u8; 32],
+}
+
+impl NodeKeypair {
+    pub const fn empty() -> Self {
+        Self {
+            ed25519_seed: [0u8; 32],
+            ed25519_pk: [0u8; 32],
+            ml_dsa_seed: [0u8; 32],
+        }
+    }
+
+    /// Derive the Ed25519 public key from a seed. ML-DSA remains reserved zeros.
+    pub fn from_ed25519_seed(seed: [u8; 32]) -> Self {
+        Self {
+            ed25519_seed: seed,
+            ed25519_pk: crypto::ed25519::ed25519_public_key(&seed),
+            ml_dsa_seed: [0u8; 32],
+        }
+    }
+
+    /// `node_id = SHA-256(ed25519_public_key)`.
+    pub fn node_id(&self) -> NodeId {
+        use crypto::Hash;
+        let digest = crypto::sha256::Sha256::digest(&self.ed25519_pk);
+        let mut id = [0u8; NODE_ID_LEN];
+        id.copy_from_slice(&digest.bytes[..NODE_ID_LEN]);
+        id
+    }
+
+    pub fn encode_record(&self) -> [u8; IDENTITY_RECORD_LEN] {
+        let mut out = [0u8; IDENTITY_RECORD_LEN];
+        out[..4].copy_from_slice(&IDENTITY_MAGIC);
+        out[4] = IDENTITY_VERSION;
+        out[5..37].copy_from_slice(&self.ed25519_seed);
+        out[37..69].copy_from_slice(&self.ed25519_pk);
+        out[69..101].copy_from_slice(&self.ml_dsa_seed);
+        out[101..133].copy_from_slice(&self.node_id());
+        out
+    }
+
+    pub fn decode_record(buf: &[u8]) -> Option<Self> {
+        if buf.len() < IDENTITY_RECORD_LEN {
+            return None;
+        }
+        if buf[..4] != IDENTITY_MAGIC || buf[4] != IDENTITY_VERSION {
+            return None;
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&buf[5..37]);
+        let kp = Self::from_ed25519_seed(seed);
+        if kp.ed25519_pk != buf[37..69] {
+            return None;
+        }
+        let mut stored_id = [0u8; NODE_ID_LEN];
+        stored_id.copy_from_slice(&buf[101..133]);
+        if stored_id != kp.node_id() {
+            return None;
+        }
+        let mut ml = [0u8; 32];
+        ml.copy_from_slice(&buf[69..101]);
+        Some(Self {
+            ml_dsa_seed: ml,
+            ..kp
+        })
+    }
+
+    /// Load a persisted keypair, or generate one from `entropy` and save it.
+    pub fn load_or_generate<S: IdentityStore>(store: &mut S, entropy: [u8; 32]) -> Option<Self> {
+        let mut buf = [0u8; IDENTITY_RECORD_LEN];
+        if let Some(len) = store.load(&mut buf) {
+            if let Some(kp) = Self::decode_record(&buf[..len]) {
+                return Some(kp);
+            }
+        }
+        let kp = Self::from_ed25519_seed(entropy);
+        if !store.save(&kp.encode_record()) {
+            return None;
+        }
+        Some(kp)
+    }
+}
+
+fn signed_challenge_msg(nonce: &[u8; NONCE_LEN], challenger: &NodeId) -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    msg[..NONCE_LEN].copy_from_slice(nonce);
+    msg[NONCE_LEN..].copy_from_slice(challenger);
+    msg
+}
 
 // ─── Trust levels ───────────────────────────────────────────────────────
 
@@ -121,6 +274,8 @@ pub struct PeerIdentity {
     pub capability_root: [u8; HASH_LEN],
     /// Peer's advertised crypto capability level.
     pub crypto_mode: CryptoSessionMode,
+    /// Peer's Ed25519 public key (zeros until learned from announce/cert).
+    pub public_key: [u8; 32],
 }
 
 impl PeerIdentity {
@@ -144,6 +299,7 @@ impl PeerIdentity {
             capabilities: 0,
             capability_root: [0u8; HASH_LEN],
             crypto_mode: CryptoSessionMode::Symmetric,
+            public_key: [0u8; 32],
         }
     }
 }
@@ -168,6 +324,7 @@ pub struct AttestationCert {
 
 impl AttestationCert {
     pub const SIGNED_LEN: usize = 79;
+    pub const ED25519_LEN: usize = ED25519_CERT_LEN;
 
     pub const fn empty() -> Self {
         Self {
@@ -176,7 +333,7 @@ impl AttestationCert {
         }
     }
 
-    /// Build a self-signed attestation certificate.
+    /// Build a self-signed HMAC attestation certificate (PSK / test path).
     pub fn build(
         node_id: &NodeId,
         arch: u8,
@@ -201,6 +358,33 @@ impl AttestationCert {
         cert
     }
 
+    /// Build an Ed25519-signed attestation certificate.
+    ///
+    /// Layout: HMAC fields [0..47] + public key [47..79] + signature [79..143].
+    pub fn build_ed25519(
+        node_id: &NodeId,
+        arch: u8,
+        capabilities: u32,
+        zone: u8,
+        timestamp: u64,
+        crypto_mode: CryptoSessionMode,
+        public_key: &[u8; 32],
+        seed: &[u8; 32],
+    ) -> Self {
+        let mut cert = Self::empty();
+        cert.data[..32].copy_from_slice(node_id);
+        cert.data[32] = arch;
+        cert.data[33..37].copy_from_slice(&capabilities.to_le_bytes());
+        cert.data[37] = zone;
+        cert.data[38..46].copy_from_slice(&timestamp.to_le_bytes());
+        cert.data[46] = crypto_mode as u8;
+        cert.data[47..79].copy_from_slice(public_key);
+        let sig = crypto::ed25519::ed25519_sign(&cert.data[..79], seed, public_key);
+        cert.data[79..143].copy_from_slice(&sig);
+        cert.len = Self::ED25519_LEN;
+        cert
+    }
+
     /// Verify a certificate's HMAC signature.
     pub fn verify(&self, secret: &[u8; 32]) -> bool {
         if self.len < Self::SIGNED_LEN {
@@ -212,6 +396,28 @@ impl AttestationCert {
             diff |= self.data[47 + i] ^ expected.bytes[i];
         }
         diff == 0
+    }
+
+    /// Verify an Ed25519-signed certificate against the embedded public key.
+    pub fn verify_ed25519(&self) -> bool {
+        if self.len < Self::ED25519_LEN {
+            return false;
+        }
+        let mut public_key = [0u8; 32];
+        public_key.copy_from_slice(&self.data[47..79]);
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&self.data[79..143]);
+        crypto::ed25519::ed25519_verify(&self.data[..79], &sig, &public_key)
+    }
+
+    /// Extract the Ed25519 public key from a signed certificate.
+    pub fn public_key(&self) -> Option<[u8; 32]> {
+        if self.len < Self::ED25519_LEN {
+            return None;
+        }
+        let mut pk = [0u8; 32];
+        pk.copy_from_slice(&self.data[47..79]);
+        Some(pk)
     }
 
     /// Extract node_id from certificate.
@@ -243,8 +449,12 @@ impl AttestationCert {
 pub struct NodeIdentityManager {
     /// Our node ID.
     pub local_id: NodeId,
-    /// Our secret key (symmetric, pre-shared for Phase 1).
+    /// Our secret key (symmetric, pre-shared for Phase 1 HMAC path).
     pub local_secret: [u8; 32],
+    /// Ed25519 (+ reserved ML-DSA) signing material when using public-key identity.
+    pub local_keypair: NodeKeypair,
+    /// True when `local_id` was derived from the Ed25519 public key.
+    pub signed_identity: bool,
     /// Our attestation certificate.
     pub local_cert: AttestationCert,
     /// Peer identity table.
@@ -262,6 +472,8 @@ impl NodeIdentityManager {
         Self {
             local_id: [0u8; NODE_ID_LEN],
             local_secret: [0u8; 32],
+            local_keypair: NodeKeypair::empty(),
+            signed_identity: false,
             local_cert: AttestationCert::empty(),
             peers: [PeerIdentity::empty(); MAX_PEERS],
             peer_count: 0,
@@ -272,7 +484,8 @@ impl NodeIdentityManager {
 
     /// Initialize the local node identity.
     ///
-    /// Generates node_id = SHA-256(secret) and builds attestation cert.
+    /// HMAC path: `node_id = SHA-256(secret)`. Prefer [`init_from_keypair`]
+    /// for persistent Ed25519 identities.
     pub fn init_local(
         &mut self,
         secret: [u8; 32],
@@ -305,9 +518,10 @@ impl NodeIdentityManager {
 
         self.local_secret = secret;
         self.local_crypto_mode = crypto_mode;
+        self.signed_identity = false;
+        self.local_keypair = NodeKeypair::empty();
 
-        // node_id = SHA-256(secret) — in production this would be
-        // SHA-256(public_key), but Phase 1 uses symmetric keys.
+        // HMAC path keeps `node_id = SHA-256(secret)` for existing tests.
         let digest = crypto::sha256::Sha256::digest(&secret);
         self.local_id.copy_from_slice(&digest.bytes[..32]);
 
@@ -321,6 +535,59 @@ impl NodeIdentityManager {
             crypto_mode,
             &self.local_secret,
         );
+    }
+
+    /// Initialize from a persisted (or freshly generated) Ed25519 keypair.
+    ///
+    /// `node_id = SHA-256(public_key)`. Attestation is Ed25519-signed.
+    pub fn init_from_keypair(
+        &mut self,
+        keypair: NodeKeypair,
+        arch: u8,
+        capabilities: u32,
+        zone: u8,
+        tick: u64,
+        crypto_mode: CryptoSessionMode,
+    ) {
+        self.local_keypair = keypair;
+        self.local_secret = keypair.ed25519_seed;
+        self.local_crypto_mode = crypto_mode;
+        self.signed_identity = true;
+        self.local_id = keypair.node_id();
+        self.local_cert = AttestationCert::build_ed25519(
+            &self.local_id,
+            arch,
+            capabilities,
+            zone,
+            tick,
+            crypto_mode,
+            &keypair.ed25519_pk,
+            &keypair.ed25519_seed,
+        );
+    }
+
+    /// Load a keypair from `store` or generate one from `entropy`, then init.
+    pub fn init_persistent<S: IdentityStore>(
+        &mut self,
+        store: &mut S,
+        entropy: [u8; 32],
+        arch: u8,
+        capabilities: u32,
+        zone: u8,
+        tick: u64,
+    ) -> bool {
+        let Some(kp) = NodeKeypair::load_or_generate(store, entropy) else {
+            return false;
+        };
+        self.init_from_keypair(
+            kp,
+            arch,
+            capabilities,
+            zone,
+            tick,
+            CryptoSessionMode::Symmetric,
+        );
+        true
     }
 
     /// Look up a peer by node_id. Returns index or None.
@@ -426,7 +693,7 @@ impl NodeIdentityManager {
         if diff == 0 {
             self.peers[peer_idx].last_seen = tick;
             self.peers[peer_idx].peer_verified = true;
-            self.try_activate_session(peer_idx, psk, tick);
+            self.try_activate_session(peer_idx, tick);
             true
         } else {
             self.peers[peer_idx].failed_auths += 1;
@@ -466,8 +733,91 @@ impl NodeIdentityManager {
         let tag = crypto::hmac_sha256(psk, &input);
         let mut resp = [0u8; 32];
         resp.copy_from_slice(&tag.bytes[..32]);
-        self.try_activate_session(peer_idx, psk, tick);
+        self.try_activate_session(peer_idx, tick);
         Some(resp)
+    }
+
+    /// Record a peer's Ed25519 public key learned from announce or certificate.
+    pub fn set_peer_public_key(&mut self, peer_idx: usize, public_key: &[u8; 32]) -> bool {
+        if peer_idx >= MAX_PEERS || !self.peers[peer_idx].active {
+            return false;
+        }
+        self.peers[peer_idx].public_key = *public_key;
+        true
+    }
+
+    /// Sign a challenge with the local Ed25519 keypair.
+    pub fn create_signed_challenge_response(
+        &mut self,
+        peer_idx: usize,
+        their_nonce: &[u8; 32],
+        their_node_id: &NodeId,
+        tick: u64,
+    ) -> Option<[u8; 64]> {
+        if !self.signed_identity {
+            return None;
+        }
+        if peer_idx >= MAX_PEERS || !self.peers[peer_idx].active {
+            return None;
+        }
+        if self.peers[peer_idx].trust == TrustLevel::Revoked {
+            return None;
+        }
+
+        self.peers[peer_idx].their_nonce.copy_from_slice(their_nonce);
+        self.peers[peer_idx].local_response_sent = true;
+        self.peers[peer_idx].last_seen = tick;
+        if self.peers[peer_idx].trust == TrustLevel::Untrusted {
+            self.peers[peer_idx].trust = TrustLevel::Challenged;
+        }
+
+        let msg = signed_challenge_msg(their_nonce, their_node_id);
+        let sig = crypto::ed25519::ed25519_sign(
+            &msg,
+            &self.local_keypair.ed25519_seed,
+            &self.local_keypair.ed25519_pk,
+        );
+        self.try_activate_session(peer_idx, tick);
+        Some(sig)
+    }
+
+    /// Verify a peer's Ed25519 challenge response.
+    pub fn verify_signed_challenge_response(
+        &mut self,
+        peer_idx: usize,
+        response: &[u8],
+        tick: u64,
+    ) -> bool {
+        if peer_idx >= MAX_PEERS || !self.peers[peer_idx].active {
+            return false;
+        }
+        if self.peers[peer_idx].trust == TrustLevel::Revoked {
+            return false;
+        }
+        if response.len() < 64 {
+            self.peers[peer_idx].failed_auths += 1;
+            if self.peers[peer_idx].failed_auths >= self.max_failed_auths {
+                self.peers[peer_idx].trust = TrustLevel::Revoked;
+            }
+            return false;
+        }
+
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&response[..64]);
+        let msg = signed_challenge_msg(&self.peers[peer_idx].our_nonce, &self.local_id);
+        let pk = self.peers[peer_idx].public_key;
+        if pk.iter().all(|b| *b == 0) || !crypto::ed25519::ed25519_verify(&msg, &sig, &pk) {
+            self.peers[peer_idx].failed_auths += 1;
+            if self.peers[peer_idx].failed_auths >= self.max_failed_auths {
+                self.peers[peer_idx].trust = TrustLevel::Revoked;
+            }
+            return false;
+        }
+
+        self.peers[peer_idx].last_seen = tick;
+        self.peers[peer_idx].peer_verified = true;
+        self.try_activate_session(peer_idx, tick);
+        true
     }
 
     /// Revoke a peer — immediately reject all future messages.
@@ -618,7 +968,7 @@ impl NodeIdentityManager {
         }
     }
 
-    fn try_activate_session(&mut self, peer_idx: usize, psk: &[u8; 32], tick: u64) {
+    fn try_activate_session(&mut self, peer_idx: usize, tick: u64) {
         let peer = &mut self.peers[peer_idx];
         if !peer.peer_verified || !peer.local_response_sent {
             peer.trust = TrustLevel::Challenged;
@@ -787,5 +1137,76 @@ mod tests {
 
         assert!(mgr.set_peer_crypto_mode(peer_idx, CryptoSessionMode::PqcOnly));
         assert_eq!(mgr.peers[peer_idx].crypto_mode, CryptoSessionMode::PqcOnly);
+    }
+
+    #[test]
+    fn ed25519_node_id_is_sha256_of_public_key() {
+        use crypto::Hash;
+        let kp = NodeKeypair::from_ed25519_seed([0x11u8; 32]);
+        let digest = crypto::sha256::Sha256::digest(&kp.ed25519_pk);
+        assert_eq!(kp.node_id()[..], digest.bytes[..32]);
+        assert_ne!(kp.ed25519_pk, [0u8; 32]);
+    }
+
+    #[test]
+    fn identity_record_roundtrip_and_tamper_detect() {
+        let kp = NodeKeypair::from_ed25519_seed([0x22u8; 32]);
+        let record = kp.encode_record();
+        let decoded = NodeKeypair::decode_record(&record).unwrap();
+        assert_eq!(decoded.ed25519_seed, kp.ed25519_seed);
+        assert_eq!(decoded.ed25519_pk, kp.ed25519_pk);
+        assert_eq!(decoded.node_id(), kp.node_id());
+
+        let mut bad = record;
+        bad[40] ^= 0xFF;
+        assert!(NodeKeypair::decode_record(&bad).is_none());
+    }
+
+    #[test]
+    fn persistent_identity_is_stable_across_reloads() {
+        let mut store = MemoryIdentityStore::new();
+        let mut first = NodeIdentityManager::new();
+        assert!(first.init_persistent(&mut store, [0x33u8; 32], 2, 0x55, 1, 1));
+        assert!(first.signed_identity);
+        assert!(first.local_cert.verify_ed25519());
+
+        let mut second = NodeIdentityManager::new();
+        assert!(second.init_persistent(&mut store, [0xFFu8; 32], 2, 0x55, 1, 2));
+        assert_eq!(first.local_id, second.local_id);
+        assert_eq!(first.local_keypair.ed25519_pk, second.local_keypair.ed25519_pk);
+    }
+
+    #[test]
+    fn signed_mutual_auth_does_not_need_psk() {
+        let mut store_a = MemoryIdentityStore::new();
+        let mut store_b = MemoryIdentityStore::new();
+        let mut left = NodeIdentityManager::new();
+        let mut right = NodeIdentityManager::new();
+        assert!(left.init_persistent(&mut store_a, [0x41u8; 32], 2, 1, 1, 1));
+        assert!(right.init_persistent(&mut store_b, [0x42u8; 32], 2, 1, 1, 1));
+
+        let left_peer = left.register_peer(&right.local_id, 2).unwrap();
+        let right_peer = right.register_peer(&left.local_id, 2).unwrap();
+        assert!(left.set_peer_public_key(left_peer, &right.local_keypair.ed25519_pk));
+        assert!(right.set_peer_public_key(right_peer, &left.local_keypair.ed25519_pk));
+
+        let left_nonce = left.generate_challenge(left_peer, &[3u8; 32]).unwrap();
+        let left_resp = right
+            .create_signed_challenge_response(right_peer, &left_nonce, &left.local_id, 3)
+            .unwrap();
+        assert!(left.verify_signed_challenge_response(left_peer, &left_resp, 4));
+
+        let right_nonce = right.generate_challenge(right_peer, &[4u8; 32]).unwrap();
+        let right_resp = left
+            .create_signed_challenge_response(left_peer, &right_nonce, &right.local_id, 5)
+            .unwrap();
+        assert!(right.verify_signed_challenge_response(right_peer, &right_resp, 6));
+
+        assert_eq!(left.peers[left_peer].trust, TrustLevel::Verified);
+        assert_eq!(right.peers[right_peer].trust, TrustLevel::Verified);
+        assert_eq!(
+            left.peers[left_peer].session_key,
+            right.peers[right_peer].session_key
+        );
     }
 }
