@@ -206,10 +206,27 @@ pub unsafe extern "C" fn puts(_s: *const c_char) -> c_int {
     0
 }
 
+// 0.2.0 C6 blobs call these via libprintf.a; the old umbrella crate
+// provided no-op stubs. Keep them so linking the gold blobs succeeds.
+#[cfg(feature = "c6")]
+mod blob_printf {
+    #[no_mangle]
+    pub unsafe extern "C" fn phy_printf(_s: *const u8, _args: *const ()) {}
+    #[no_mangle]
+    pub unsafe extern "C" fn rtc_printf(_s: *const u8, _args: *const ()) {}
+    #[no_mangle]
+    pub unsafe extern "C" fn coexist_printf(_s: *const u8, _args: *const ()) {}
+    #[no_mangle]
+    pub unsafe extern "C" fn net80211_printf(_s: *const u8, _args: *const ()) {}
+    #[no_mangle]
+    pub unsafe extern "C" fn pp_printf(_s: *const u8, _args: *const ()) {}
+    #[no_mangle]
+    pub unsafe extern "C" fn syslog(_priority: u32, _format: *const u8, _args: *const ()) {}
+}
+
 // The blobs call snprintf/sprintf/vsnprintf primarily for logging.
 // On stable Rust for riscv32, C-variadic functions are not supported,
 // so we provide stub implementations that just null-terminate the buffer.
-// The esp-wifi-sys crate also provides its own printf stub.
 
 #[no_mangle]
 pub unsafe extern "C" fn snprintf(

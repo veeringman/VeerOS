@@ -2,6 +2,27 @@
 
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
+## [2026-09-18] Session Sync — Persistent Node Identity + Host MeshTransport
+
+### Closed in this session
+- [x] Ed25519 node keypair with `node_id = SHA-256(public_key)` and persist record (`VOID` v1)
+- [x] Identity store trait + memory backend in the microkernel; file backend on host (`identity_fs`)
+- [x] Ed25519-signed attestation + signed challenge-response (no PSK)
+- [x] ML-DSA-65 seed slot reserved in the persist record (zeros until `crypto/ml-dsa`)
+- [x] Host `MeshTransport` adapters over UDP and TCP (`mesh_io`) so frames leave the process
+- [x] Broadcast dest (`0xFF..FF`) for first-contact announces
+- [x] Two-socket tests + `mesh_udp_ping` two-process example (`--self-test` for loopback)
+
+### Still open from this slice
+- [ ] BLE / UART / SPI `MeshTransport` implementations
+- [ ] Hybrid KEM session setup (X25519 + ML-KEM-768)
+- [ ] Kernel `dist-cluster` syscalls wired on all board targets
+- [ ] Agent migration / memory sync / remote intent spawn (15F–H)
+
+EC2 (eGenie-style) is available for Linux KVM / multi-host mesh if needed; this slice is local-loopback.
+
+---
+
 ## [2026-05-04] Session Sync — VeerOS Host Advertisement & Quantum Discovery
 
 ### New Feature Track: VeerOS Host Advertisement (mDNS-style) & EdgeFabric Discovery
@@ -2808,8 +2829,8 @@ _Binary wire format for all fabric operations. Fixed-size, `no_alloc`, parseable
 ### 15B — Zero Trust Node Identity (`microkernel::node_identity`)
 _Every node has a cryptographic identity. No implicit trust based on network location._
 
-- [ ] **Node keypair** — Ed25519 (classical) + ML-DSA-65 (PQC hybrid) per-node identity keypair, generated at first boot, stored in persistent memory
-- [ ] **Node ID** — SHA-256 hash of public key = 32-byte globally unique node identifier
+- [x] **Node keypair** — Ed25519 per-node identity generated at first boot and persisted; ML-DSA-65 seed slot reserved (zeros until `crypto/ml-dsa`)
+- [x] **Node ID** — SHA-256 hash of Ed25519 public key = 32-byte globally unique node identifier
 - [x] **Attestation certificate** — self-signed statement: `{node_id, arch, capabilities, zone, timestamp, signature}` — nodes present this on join
 - [x] **Mutual authentication** — challenge-response: A sends nonce → B signs nonce+A's_node_id → A verifies; then reverse. Both sides authenticated before any data flows
 - [x] **Session key derivation** — after mutual auth, derive per-session ChaCha20-Poly1305 key via HKDF(shared_nonce, node_ids, "veeros-fabric-session-v1")
@@ -2846,7 +2867,7 @@ _Decentralized node discovery and message routing. No central broker._
 - [x] **Gossip protocol** — each node shares its neighbor table with peers; convergence in O(log N) rounds
 - [x] **Peer table** — `PeerTable` struct: per-peer state (node_id, trust_level, session_key, last_seen, rtt_us, address)
 - [x] **Message routing** — if destination not a direct peer, forward via lowest-RTT path (greedy geographic routing)
-- [ ] **Transport abstraction** — `MeshTransport` trait with `send(node_id, msg)` / `recv() → (node_id, msg)` — implemented over TCP, UDP, BLE, UART, SPI
+- [x] **Transport abstraction** — `MeshTransport` trait with `send(node_id, msg)` / `recv() → (node_id, msg)` — host UDP + TCP adapters implemented; BLE / UART / SPI still open
 - [x] **Backpressure** — per-peer send queue (8 messages); drop lowest-priority messages on overflow
 - [x] **Partition tolerance** — nodes continue operating locally during network partition; auto-rejoin and re-sync on reconnection
 - [ ] **NAT traversal** — optional STUN-like hole punching for nodes behind NAT (WAN deployments)

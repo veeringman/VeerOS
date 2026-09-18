@@ -380,6 +380,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-wifi-sys-esp32c6"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57649401fc2f906a16e2268de88693724a125adcd0eba89b594a157affcee2d5"
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1508,6 +1514,7 @@ version = "0.1.0"
 dependencies = [
  "arch",
  "esp-wifi-sys",
+ "esp-wifi-sys-esp32c6",
 ]
 
 [[package]]
@@ -1897,6 +1904,7 @@ name = "veer_fabric_transport"
 version = "0.1.0"
 dependencies = [
  "crypto",
+ "microkernel",
  "quinn",
  "rcgen",
  "rustls",

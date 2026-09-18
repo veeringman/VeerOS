@@ -14,8 +14,9 @@ use core::ptr;
 /// Heap size — 64 KiB should be sufficient for WiFi blobs.
 const HEAP_SIZE: usize = 128 * 1024;
 
-/// Minimum allocation alignment (4 bytes for RISC-V 32-bit).
-const MIN_ALIGN: usize = 4;
+/// Minimum allocation alignment. WiFi MAC DMA descriptors are 16-byte objects;
+/// 4-byte alignment is enough for RISC-V but the blob/MAC want 16.
+const MIN_ALIGN: usize = 16;
 
 /// Block header size (stored before each allocation).
 const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
@@ -33,7 +34,9 @@ static mut FREE_LIST: *mut BlockHeader = ptr::null_mut();
 static mut ALLOCATED: usize = 0;
 
 /// Block header — each free block starts with this.
-#[repr(C)]
+/// 16-byte aligned so the payload after the header is also 16-byte aligned
+/// (WiFi MAC DMA descriptors require it).
+#[repr(C, align(16))]
 struct BlockHeader {
     /// Size of the usable region (excluding the header).
     size: usize,

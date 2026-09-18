@@ -599,12 +599,13 @@ static mut IDLE_STACK: IdleStack = IdleStack([0u8; 2048]);
 // Shell task
 // ---------------------------------------------------------------------------
 
-/// Stack for the shell task (4 KiB — needs room for the line buffer, etc.).
+/// Stack for the shell task. 12 KiB leaves DRAM for an 8 KiB wifi-drv stack
+/// so PHY cal does not smash BSS.
 #[cfg(feature = "shell")]
 #[repr(align(16))]
-struct ShellStack([u8; 16384]);
+struct ShellStack([u8; 12288]);
 #[cfg(feature = "shell")]
-static mut SHELL_STACK: ShellStack = ShellStack([0u8; 16384]);
+static mut SHELL_STACK: ShellStack = ShellStack([0u8; 12288]);
 
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
@@ -630,7 +631,6 @@ fn shell_task() -> ! {
         zigbee_cmd: Some(zigbee_command),
         #[cfg(not(feature = "ieee802154"))]
         zigbee_cmd: None,
-        sensor_cmd: None,
         sensor_cmd: None,
         get_current_user: Some(get_current_user),
         get_user_list: Some(write_user_list),
@@ -660,8 +660,13 @@ fn shell_task() -> ! {
         dmesg: Some(dmesg_info),
         reboot: None,
         shutdown: None,
+        sleep_ms: None,
         caps_cmd: Some(caps_command),
         auditlog_cmd: Some(auditlog_command),
+        ifconfig_cmd: None,
+        ping_cmd: None,
+        netstat_cmd: None,
+        ssh_cmd: None,
         #[cfg(feature = "multi-user")]
         login: Some(do_login),
         #[cfg(not(feature = "multi-user"))]
@@ -682,6 +687,7 @@ fn shell_task() -> ! {
         remove_user: Some(do_remove_user),
         #[cfg(not(feature = "multi-user"))]
         remove_user: None,
+        pre_authenticated: false,
         // AI-native
         get_agent_list: None,
         agent_cmd: None,
@@ -742,16 +748,86 @@ fn net_task() -> ! {
     let serial = usb_serial();
     let mut con = Console::new(serial);
 
+    // The RF PHY requires the SoC to run from PLL (CPU 160 MHz / APB 80 MHz);
+    // at the XTAL default (40 MHz) the receiver is out of spec. VeerOS never
+    // configures the clock, so read PCR_SYSCLK_CONF_REG[17:16] = SOC_CLK_SEL.
+    {
+        const PCR_SYSCLK_CONF_REG: usize = 0x6009_6110;
+        let sysclk = unsafe { core::ptr::read_volatile(PCR_SYSCLK_CONF_REG as *const u32) };
+        let sel = (sysclk >> 16) & 0x3;
+        let src = match sel {
+            0 => "XTAL(40MHz)",
+            1 => "PLL(160MHz)",
+            2 => "RC_FAST",
+            _ => "reserved",
+        };
+        let _ = writeln!(
+            con,
+            "[net] SOC_CLK_SEL={} src={} (need PLL for RF) sysclk={:#010x}",
+            sel, src, sysclk
+        );
+    }
+
     let _ = writeln!(con, "[net] waiting for WiFi association...");
 
-    // Wait until WiFi is connected.
+    // LED wait-indicator (XIAO C6 user LED = GPIO15). FAST (~6 Hz) = RX
+    // callback saw frames; SLOW (~0.6 Hz) = still waiting. Timed off the
+    // 16 MHz systimer so USB stall cannot freeze the blink.
+    soc_esp32::gpio::set_mode(15, soc_esp32::gpio::GpioMode::Output);
+    let mut led_on = false;
+    let mut led_last_us: u64 = soc_esp32::systimer::now_us();
+
+    // Wait until WiFi is connected. Keep polling blob timers so ppTask
+    // can run, and emit ISR/RX diags so a silent MAC is visible.
+    let mut wait_tick = 0u32;
     loop {
+        net_poll();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
+        // Drive the LED first, before any (possibly-stalled) USB write.
+        let rx_now = unsafe { (*WIFI.0.get()).driver().rx_cb_count() };
+        let half_period_us: u64 = if rx_now > 0 { 80_000 } else { 800_000 };
+        let now_us = soc_esp32::systimer::now_us();
+        if now_us.wrapping_sub(led_last_us) >= half_period_us {
+            led_last_us = now_us;
+            led_on = !led_on;
+            soc_esp32::gpio::write(15, led_on);
+        }
+
         let connected = unsafe { (*WIFI.0.get()).driver().is_connected() };
         if connected {
             break;
         }
-        for _ in 0..10_000 {
+        wait_tick += 1;
+        if wait_tick % 500 == 0 {
+            let (en, out, inn, f3, f14, lpm, hold, lpin) = soc_esp32::gpio::rf_switch_diag();
+            let _ = writeln!(
+                con,
+                "[net] rfsw en={:#010x} out={:#010x} in={:#010x} f3={:#x} f14={:#x} lpmux={:#x} hold={:#x} lpin={:#x} g3={} g14={}",
+                en, out, inn, f3, f14, lpm, hold, lpin,
+                soc_esp32::gpio::read(3) as u8,
+                soc_esp32::gpio::read(14) as u8
+            );
+            if wait_tick == 500 {
+                soc_esp32::wifi::dump_mac_bb(&mut con);
+            }
+            let rx_count = unsafe { (*WIFI.0.get()).driver().rx_cb_count() };
+            let (alloc_tot, alloc_big, alloc_max) = soc_esp32::wifi_os_adapter::alloc_diag();
+            let cal_ret = soc_esp32::wifi_os_adapter::phy_cal_ret();
+            let (isr_cnt, _plic, _emip, _th, _mie, _mip, _ien, _it, _pw, _pwa, _ith, map_mac, _m1, _m2, st0, _st1, si0, si1, _on, _ioc, _iof, _sh, tasks_spawned, tasks_entered, _sa, sem_ok, sem_blk, sem_give, q_send, q_recv, _qst, _qrt, _qmd, ev_count, ev_last) =
+                soc_esp32::wifi_os_adapter::wifi_diag();
+            let (irq_ext11, irq1, irq2, irq_other, irq_last) = crate::trap::irq_diag();
+            let rxdesc = unsafe { core::ptr::read_volatile(0x600A_408C as *const u32) };
+            let (mfail, mfail_sz, qfail, qlen, qitem, macrst) =
+                soc_esp32::wifi_os_adapter::osi_gap_diag();
+            let _ = writeln!(
+                con,
+                "[net] wait #{} rx={} isr={} tasks={}/{} q={}/{} setintr={:#x}/{:#x} mapmac={:#x} st0={:#x} ev={}/{} irq={}/{}/{}/{}@{} rxdesc={:#x} mfail={}/{} qfail={}/{}x{} macrst={} alloc={}/{}/{}",
+                wait_tick, rx_count, isr_cnt, tasks_spawned, tasks_entered, q_send, q_recv, si0, si1, map_mac, st0, ev_count, ev_last, irq_ext11, irq1, irq2, irq_other, irq_last, rxdesc, mfail, mfail_sz, qfail, qlen, qitem, macrst, alloc_tot, alloc_big, alloc_max
+            );
+            let _ = (cal_ret, sem_ok, sem_blk, sem_give);
+        }
+        for _ in 0..1_000 {
             core::hint::spin_loop();
         }
     }
@@ -961,7 +1037,6 @@ fn net_task() -> ! {
                         #[cfg(not(feature = "ieee802154"))]
                         zigbee_cmd: None,
                         sensor_cmd: None,
-                        sensor_cmd: None,
                         get_current_user: Some(get_current_user),
                         get_user_list: Some(write_user_list),
                         vfs_list_dir: Some(vfs_list_dir),
@@ -990,13 +1065,19 @@ fn net_task() -> ! {
                         dmesg: Some(dmesg_info),
                         reboot: None,
                         shutdown: None,
+                        sleep_ms: None,
                         caps_cmd: Some(caps_command),
                         auditlog_cmd: Some(auditlog_command),
+                        ifconfig_cmd: None,
+                        ping_cmd: None,
+                        netstat_cmd: None,
+                        ssh_cmd: None,
                         login: None,
                         logout: None,
                         change_password: None,
                         add_user: None,
                         remove_user: None,
+                        pre_authenticated: true,
                         // AI-native
                         get_agent_list: None,
                         agent_cmd: None,
@@ -1151,12 +1232,14 @@ fn mesh_task() -> ! {
 
 /// Stacks for driver tasks (live in .bss).
 #[repr(align(16))]
+struct DrvStack8K([u8; 8192]);
+#[repr(align(16))]
 struct DrvStack4K([u8; 4096]);
 #[repr(align(16))]
 struct DrvStack2K([u8; 2048]);
 
 #[cfg(feature = "wifi")]
-static mut WIFI_DRV_STACK: DrvStack4K = DrvStack4K([0u8; 4096]);
+static mut WIFI_DRV_STACK: DrvStack8K = DrvStack8K([0u8; 8192]);
 #[cfg(feature = "ble")]
 static mut BLE_DRV_STACK: DrvStack2K = DrvStack2K([0u8; 2048]);
 #[cfg(feature = "ieee802154")]
@@ -1273,6 +1356,7 @@ fn wifi_driver_task() -> ! {
     }
 
     // Retry until connected; WiFi start/ppTask bring-up is asynchronous.
+    let mut scanned = false;
     loop {
         if mgr.state() != soc_esp32::wifi::WifiState::Connected {
             drv_log(b"[wifi-drv] connecting...\n");
@@ -1285,8 +1369,16 @@ fn wifi_driver_task() -> ! {
                     drv_log(b"[wifi-drv] connect failed, retrying\n");
                 }
             }
+            if !scanned {
+                scanned = true;
+                match mgr.scan() {
+                    Ok(0) => drv_log(b"[wifi-drv] scan: 0 APs\n"),
+                    Ok(_) => drv_log(b"[wifi-drv] scan: APs found\n"),
+                    Err(_) => drv_log(b"[wifi-drv] scan failed\n"),
+                }
+            }
         }
-        drv_sleep(100);
+        drv_sleep(500);
     }
 }
 
@@ -1294,94 +1386,9 @@ fn wifi_driver_task() -> ! {
 
 #[cfg(all(feature = "ble", target_arch = "riscv32"))]
 fn ble_driver_task() -> ! {
-    use soc_esp32::modem;
-
-    drv_log(b"[ble-drv] starting\n");
-
-    // Enable BLE clocks.
-    let clk_reg = modem::MODEM_LPCON_BASE + modem::MODEM_CLK_EN;
-    let cur = drv_mmio_read32(clk_reg);
-    drv_mmio_write32(clk_reg, cur | modem::CLK_BLE_EN | modem::CLK_FE_EN);
-    drv_log(b"[ble-drv] BLE clocks enabled\n");
-
-    // Release BLE baseband from reset.
-    let rst_reg = modem::MODEM_LPCON_BASE + modem::MODEM_RST_CTRL;
-    let rst = drv_mmio_read32(rst_reg);
-    drv_mmio_write32(rst_reg, rst | modem::RST_BLE_BB);
-    drv_yield();
-    drv_mmio_write32(rst_reg, rst & !modem::RST_BLE_BB);
-    drv_log(b"[ble-drv] BLE baseband reset complete\n");
-
-    // Verify MMIO access.
-    let bb_val = drv_mmio_read32(modem::BLE_BB_BASE);
-    if bb_val != usize::MAX as u32 {
-        drv_log(b"[ble-drv] BLE BB accessible\n");
-    } else {
-        drv_log(b"[ble-drv] BLE BB read failed\n");
-    }
-
-    // Clear and enable BLE interrupts.
-    drv_mmio_write32(modem::BLE_BB_BASE + modem::BLE_INT_CLR, 0xFFFF_FFFF);
-    drv_mmio_write32(
-        modem::BLE_BB_BASE + modem::BLE_INT_ENA,
-        modem::BLE_INT_SCAN_DONE
-            | modem::BLE_INT_ADV_DONE
-            | modem::BLE_INT_RX_DONE
-            | modem::BLE_INT_CONN_DONE
-            | modem::BLE_INT_TX_DONE,
-    );
-
-    // Enable BLE controller.
-    drv_mmio_write32(modem::BLE_BB_BASE + modem::BLE_CTRL, modem::BLE_CTRL_ENABLE);
-
-    drv_log(b"[ble-drv] ready, entering event loop\n");
-
-    // Main driver event loop: service BLE controller events.
+    drv_log(b"[ble-drv] parked; C6 combo RF is owned by WiFi PHY\n");
     loop {
-        let status = drv_mmio_read32(modem::BLE_BB_BASE + modem::BLE_INT_STATUS);
-
-        if status & modem::BLE_INT_RX_DONE != 0 {
-            drv_mmio_write32(
-                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
-                modem::BLE_INT_RX_DONE,
-            );
-            // RX data is consumed by BleManager's scan() — we just clear the IRQ.
-            let _rx = drv_mmio_read32(modem::BLE_BB_BASE + modem::BLE_RX_DESCR);
-        }
-
-        if status & modem::BLE_INT_ADV_DONE != 0 {
-            drv_mmio_write32(
-                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
-                modem::BLE_INT_ADV_DONE,
-            );
-            // Advertisement cycle complete — controller will auto-restart
-            // if ADV_ENABLE is still set.
-        }
-
-        if status & modem::BLE_INT_SCAN_DONE != 0 {
-            drv_mmio_write32(
-                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
-                modem::BLE_INT_SCAN_DONE,
-            );
-        }
-
-        if status & modem::BLE_INT_TX_DONE != 0 {
-            drv_mmio_write32(
-                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
-                modem::BLE_INT_TX_DONE,
-            );
-        }
-
-        if status & modem::BLE_INT_CONN_DONE != 0 {
-            drv_mmio_write32(
-                modem::BLE_BB_BASE + modem::BLE_INT_CLR,
-                modem::BLE_INT_CONN_DONE,
-            );
-        }
-
-        // Yield to scheduler.
-        // TODO: replace with drv_irq_wait() once BLE IRQ is mapped to a CPU line.
-        drv_sleep(10);
+        drv_sleep(1000);
     }
 }
 
@@ -1389,96 +1396,9 @@ fn ble_driver_task() -> ! {
 
 #[cfg(all(feature = "ieee802154", target_arch = "riscv32"))]
 fn ieee802154_driver_task() -> ! {
-    use soc_esp32::modem;
-
-    drv_log(b"[802154-drv] starting\n");
-
-    // Enable 802.15.4 clocks.
-    let clk_reg = modem::MODEM_LPCON_BASE + modem::MODEM_CLK_EN;
-    let cur = drv_mmio_read32(clk_reg);
-    drv_mmio_write32(clk_reg, cur | modem::CLK_IEEE802154_EN | modem::CLK_FE_EN);
-    drv_log(b"[802154-drv] 802.15.4 clocks enabled\n");
-
-    // Release 802.15.4 MAC from reset.
-    let rst_reg = modem::MODEM_LPCON_BASE + modem::MODEM_RST_CTRL;
-    let rst = drv_mmio_read32(rst_reg);
-    drv_mmio_write32(rst_reg, rst | modem::RST_IEEE802154_MAC);
-    drv_yield();
-    drv_mmio_write32(rst_reg, rst & !modem::RST_IEEE802154_MAC);
-    drv_log(b"[802154-drv] MAC reset complete\n");
-
-    // Verify MMIO access.
-    let mac_val = drv_mmio_read32(modem::IEEE802154_MAC_BASE);
-    if mac_val != usize::MAX as u32 {
-        drv_log(b"[802154-drv] MAC accessible\n");
-    } else {
-        drv_log(b"[802154-drv] MAC read failed\n");
-    }
-
-    // Clear and enable interrupts (RX, TX, TX fail, ED, ACK).
-    drv_mmio_write32(modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR, 0xFFFF_FFFF);
-    drv_mmio_write32(
-        modem::IEEE802154_MAC_BASE + modem::ZB_INT_ENA,
-        modem::ZB_INT_TX_DONE
-            | modem::ZB_INT_RX_DONE
-            | modem::ZB_INT_TX_FAIL
-            | modem::ZB_INT_ED_DONE
-            | modem::ZB_INT_ACK_RCVD,
-    );
-
-    // Enable MAC with RX on and auto-ACK.
-    drv_mmio_write32(
-        modem::IEEE802154_MAC_BASE + modem::ZB_MAC_CTRL,
-        modem::ZB_CTRL_ENABLE | modem::ZB_CTRL_RX_ON | modem::ZB_CTRL_AUTO_ACK,
-    );
-
-    drv_log(b"[802154-drv] ready, entering event loop\n");
-
-    // Main driver event loop: service 802.15.4 MAC events.
+    drv_log(b"[802154-drv] parked; C6 combo RF is owned by WiFi PHY\n");
     loop {
-        let status = drv_mmio_read32(modem::IEEE802154_MAC_BASE + modem::ZB_INT_STATUS);
-
-        if status & modem::ZB_INT_RX_DONE != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_RX_DONE,
-            );
-            // Frame received — RadioManager's poll_rx() reads the FIFO from M-mode.
-            // We clear the IRQ so the MAC can continue receiving.
-            let _rx_len = drv_mmio_read32(modem::IEEE802154_MAC_BASE + modem::ZB_RX_LEN);
-        }
-
-        if status & modem::ZB_INT_TX_DONE != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_TX_DONE,
-            );
-        }
-
-        if status & modem::ZB_INT_TX_FAIL != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_TX_FAIL,
-            );
-        }
-
-        if status & modem::ZB_INT_ED_DONE != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_ED_DONE,
-            );
-        }
-
-        if status & modem::ZB_INT_ACK_RCVD != 0 {
-            drv_mmio_write32(
-                modem::IEEE802154_MAC_BASE + modem::ZB_INT_CLR,
-                modem::ZB_INT_ACK_RCVD,
-            );
-        }
-
-        // Yield to scheduler.
-        // TODO: replace with drv_irq_wait() once 802.15.4 IRQ is mapped to a CPU line.
-        drv_sleep(10);
+        drv_sleep(1000);
     }
 }
 
@@ -1609,6 +1529,10 @@ pub extern "C" fn _rust_start() -> ! {
     // ── disable watchdogs (ROM bootloader enables them) ──────────
     soc_esp32::wdt::disable_watchdogs();
 
+    // XIAO C6: power the FM8625H RF switch onto the ceramic antenna *before*
+    // any PHY work, matching Arduino initVariant() / the working esp-radio ref.
+    soc_esp32::gpio::enable_xiao_onboard_antenna();
+
     // ── install EARLY trap handler to diagnose crashes ──────────
     {
         extern "C" {
@@ -1628,6 +1552,19 @@ pub extern "C" fn _rust_start() -> ! {
 
     // ── early console ────────────────────────────────────────
     let mut con = Console::new(serial);
+
+    soc_esp32::gpio::enable_xiao_onboard_antenna();
+    {
+        let (en, out, inn, f3, f14, lpm, hold, lpin) = soc_esp32::gpio::rf_switch_diag();
+        let _ = writeln!(
+            con,
+            "[boot] rfsw en={:#010x} out={:#010x} in={:#010x} f3={:#x} f14={:#x} lpmux={:#x} hold={:#x} lpin={:#x} g3={} g14={} iomux3={:#x}",
+            en, out, inn, f3, f14, lpm, hold, lpin,
+            soc_esp32::gpio::read(3) as u8,
+            soc_esp32::gpio::read(14) as u8,
+            unsafe { core::ptr::read_volatile((0x6000_9000 + 0x04 + 3 * 4) as *const u32) }
+        );
+    }
 
     // ── platform + kernel init ───────────────────────────────
     let platform = Esp32Riscv::new();
@@ -1903,7 +1840,7 @@ pub extern "C" fn _rust_start() -> ! {
         {
             use soc_esp32::modem;
             let sb = (&raw const WIFI_DRV_STACK) as usize;
-            let st = sb + core::mem::size_of::<DrvStack4K>();
+            let st = sb + core::mem::size_of::<DrvStack8K>();
             if let Some(idx) = sched.create_task(
                 "wifi-drv",
                 wifi_driver_task as *const () as usize,

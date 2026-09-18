@@ -7,6 +7,8 @@
 use core::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 use core::ptr;
 
+#[cfg(feature = "c6")]
+use esp_wifi_sys_esp32c6 as esp_wifi_sys;
 use esp_wifi_sys::include::{
     wifi_osi_funcs_t, ESP_WIFI_OS_ADAPTER_MAGIC, ESP_WIFI_OS_ADAPTER_VERSION,
 };
@@ -41,7 +43,9 @@ pub static mut g_wifi_feature_caps: u64 = WIFI_FEATURE_CAPS;
 
 /// Software timer entry — the blobs pass around `ets_timer` pointers.
 /// We store the callback and manage firing from our poll loop.
-const MAX_TIMERS: usize = 8;
+/// Gold uses unbounded RTOS timers; 8 slots silently aliased onto slot 0
+/// and never reused after setfn (callback stayed Some after disarm).
+const MAX_TIMERS: usize = 32;
 
 struct SoftTimer {
     active: bool,
@@ -64,38 +68,58 @@ static mut TIMERS: [SoftTimer; MAX_TIMERS] = [const {
 }; MAX_TIMERS];
 
 /// Timer handle map — maps blob timer pointer to our index.
-/// We use the lower bits of the pointer as a simple hash.
 static mut TIMER_MAP: [(usize, usize); MAX_TIMERS] = [(0, usize::MAX); MAX_TIMERS];
+
+/// `register_chipv7_phy` runs with the flash cache off. Do not fire
+/// software timers from OSI waits during that window.
+static mut PHY_IN_CAL: bool = false;
 
 fn timer_slot_for(ptimer: *mut c_void) -> usize {
     let key = ptimer as usize;
-    // Search for existing or empty slot.
     for i in 0..MAX_TIMERS {
         let (k, idx) = unsafe { TIMER_MAP[i] };
         if k == key && idx != usize::MAX {
             return idx;
         }
     }
-    // Allocate new.
-    for i in 0..MAX_TIMERS {
-        let (_, idx) = unsafe { TIMER_MAP[i] };
-        if idx == usize::MAX {
-            // Find a free timer.
-            for t in 0..MAX_TIMERS {
-                if !unsafe { TIMERS[t].active } && unsafe { TIMERS[t].callback.is_none() } {
-                    unsafe {
-                        TIMER_MAP[i] = (key, t);
-                    }
-                    return t;
-                }
+    // Reuse a disarmed slot. `setfn` leaves callback=Some after disarm, so
+    // requiring callback.is_none() leaked every timer until the table filled
+    // and everything aliased onto slot 0 (scan dwell / ic_enable).
+    let mut timer_idx = usize::MAX;
+    for t in 0..MAX_TIMERS {
+        if !unsafe { TIMERS[t].active } {
+            if unsafe { TIMERS[t].callback.is_none() } {
+                timer_idx = t;
+                break;
+            }
+            if timer_idx == usize::MAX {
+                timer_idx = t;
             }
         }
     }
-    0 // fallback
+    if timer_idx == usize::MAX {
+        timer_idx = 0;
+    }
+    for i in 0..MAX_TIMERS {
+        let (_, idx) = unsafe { TIMER_MAP[i] };
+        if idx == usize::MAX {
+            unsafe {
+                TIMER_MAP[i] = (key, timer_idx);
+            }
+            return timer_idx;
+        }
+    }
+    unsafe {
+        TIMER_MAP[0] = (key, timer_idx);
+    }
+    timer_idx
 }
 
 /// Poll all software timers — call from the WiFi task loop.
 pub fn poll_timers() {
+    if unsafe { PHY_IN_CAL } {
+        return;
+    }
     let now = systimer::now_us();
     for i in 0..MAX_TIMERS {
         let t = unsafe { &mut TIMERS[i] };
@@ -117,11 +141,11 @@ pub fn poll_timers() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_QUEUES: usize = 8;
-const QUEUE_BUF_SIZE: usize = 2048;
 
 /// Layout: first field is `pc_head` (pointer to data) so that
 /// `*(u32*)(queue_handle + 0)` returns a valid non-null address,
 /// matching what the WiFi blobs expect from FreeRTOS QueueHandle_t.
+/// Storage lives in the same heap block (gold InternalMemory QueueHandle).
 #[repr(C)]
 struct SimpleQueue {
     pc_head: *mut u8,     // offset 0 — mimics FreeRTOS pcHead
@@ -132,90 +156,136 @@ struct SimpleQueue {
     tail: usize,
     count: usize,
     in_use: bool,
-    data: [u8; QUEUE_BUF_SIZE],
 }
 
-static mut QUEUES: [SimpleQueue; MAX_QUEUES] = [const {
-    SimpleQueue {
-        pc_head: ptr::null_mut(),
-        pc_write_to: ptr::null_mut(),
-        item_size: 0,
-        capacity: 0,
-        head: 0,
-        tail: 0,
-        count: 0,
-        in_use: false,
-        data: [0; QUEUE_BUF_SIZE],
+static mut QUEUE_SLOTS: [*mut SimpleQueue; MAX_QUEUES] = [ptr::null_mut(); MAX_QUEUES];
+
+fn note_queue_fail(queue_len: usize, item_size: usize) {
+    unsafe {
+        QUEUE_FAIL_COUNT = QUEUE_FAIL_COUNT.wrapping_add(1);
+        QUEUE_LAST_LEN = queue_len as u32;
+        QUEUE_LAST_ITEM = item_size as u32;
     }
-}; MAX_QUEUES];
+}
 
 fn alloc_queue(queue_len: usize, item_size: usize) -> *mut c_void {
+    let Some(need) = queue_len.checked_mul(item_size) else {
+        note_queue_fail(queue_len, item_size);
+        return ptr::null_mut();
+    };
+    if queue_len == 0 || item_size == 0 {
+        note_queue_fail(queue_len, item_size);
+        return ptr::null_mut();
+    }
+    let hdr = core::mem::size_of::<SimpleQueue>();
+    let Some(total) = hdr.checked_add(need) else {
+        note_queue_fail(queue_len, item_size);
+        return ptr::null_mut();
+    };
     for i in 0..MAX_QUEUES {
-        let q = unsafe { &mut QUEUES[i] };
-        if !q.in_use && queue_len * item_size <= QUEUE_BUF_SIZE {
-            q.item_size = item_size;
-            q.capacity = queue_len;
-            q.head = 0;
-            q.tail = 0;
-            q.count = 0;
-            q.in_use = true;
-            // Set pc_head to point at data so blob deref at offset 0 works
-            q.pc_head = q.data.as_mut_ptr();
-            q.pc_write_to = q.data.as_mut_ptr();
-            return q as *mut SimpleQueue as *mut c_void;
+        if !unsafe { QUEUE_SLOTS[i].is_null() } {
+            continue;
+        }
+        let raw = unsafe { super::heap::malloc(total) } as *mut u8;
+        if raw.is_null() {
+            note_queue_fail(queue_len, item_size);
+            return ptr::null_mut();
+        }
+        unsafe {
+            ptr::write_bytes(raw, 0, total);
+            let q = raw as *mut SimpleQueue;
+            (*q).item_size = item_size;
+            (*q).capacity = queue_len;
+            (*q).head = 0;
+            (*q).tail = 0;
+            (*q).count = 0;
+            (*q).in_use = true;
+            (*q).pc_head = raw.add(hdr);
+            (*q).pc_write_to = (*q).pc_head;
+            QUEUE_SLOTS[i] = q;
+            return q as *mut c_void;
         }
     }
+    note_queue_fail(queue_len, item_size);
     ptr::null_mut()
 }
 
-fn get_queue(handle: *mut c_void) -> Option<&'static mut SimpleQueue> {
+fn free_queue_storage(q: &mut SimpleQueue) {
+    let ptr = q as *mut SimpleQueue;
+    for i in 0..MAX_QUEUES {
+        if unsafe { QUEUE_SLOTS[i] } == ptr {
+            unsafe {
+                QUEUE_SLOTS[i] = ptr::null_mut();
+                super::heap::free(ptr as *mut c_void);
+            }
+            return;
+        }
+    }
+}
+
+fn get_queue_in_array(handle: *mut c_void) -> Option<&'static mut SimpleQueue> {
     if handle.is_null() {
         return None;
     }
-    let addr = handle as usize;
-    let base = unsafe { QUEUES.as_ptr() } as usize;
-    let end = base + core::mem::size_of::<[SimpleQueue; MAX_QUEUES]>();
-    if addr >= base && addr < end {
-        // Find which SimpleQueue this address falls within
-        let offset = addr - base;
-        let queue_size = core::mem::size_of::<SimpleQueue>();
-        let idx = offset / queue_size;
-        let q = unsafe { &mut QUEUES[idx] };
-        if q.in_use {
-            return Some(q);
+    let p = handle as *mut SimpleQueue;
+    for i in 0..MAX_QUEUES {
+        if unsafe { QUEUE_SLOTS[i] } == p {
+            let q = unsafe { &mut *p };
+            if q.in_use {
+                return Some(q);
+            }
         }
     }
     None
 }
 
+fn get_queue(handle: *mut c_void) -> Option<&'static mut SimpleQueue> {
+    if let Some(q) = get_queue_in_array(handle) {
+        return Some(q);
+    }
+    if handle.is_null() {
+        return None;
+    }
+    // wifi_create_queue returns wifi_static_queue_t { handle, storage }.
+    // The blob usually passes q->handle into _queue_send; if it passes the
+    // wrapper itself, the first word is the real SimpleQueue*.
+    let inner = unsafe { *(handle as *const *mut c_void) };
+    get_queue_in_array(inner)
+}
+
 fn queue_send_impl(q: &mut SimpleQueue, item: *const c_void) -> bool {
-    if q.count >= q.capacity || item.is_null() {
-        return false;
-    }
-    let offset = q.tail * q.item_size;
-    unsafe {
-        ptr::copy_nonoverlapping(
-            item as *const u8,
-            q.data.as_mut_ptr().add(offset),
-            q.item_size,
-        );
-    }
-    q.tail = (q.tail + 1) % q.capacity;
-    q.count += 1;
-    true
+    let irq = interrupts_disable();
+    let ok = if q.count >= q.capacity || item.is_null() || q.pc_head.is_null() {
+        false
+    } else {
+        let offset = q.tail * q.item_size;
+        unsafe {
+            ptr::copy_nonoverlapping(item as *const u8, q.pc_head.add(offset), q.item_size);
+        }
+        q.tail = (q.tail + 1) % q.capacity;
+        q.count += 1;
+        true
+    };
+    interrupts_restore(irq);
+    ok
 }
 
 fn queue_recv_impl(q: &mut SimpleQueue, item: *mut c_void) -> bool {
-    if q.count == 0 || item.is_null() {
-        return false;
-    }
-    let offset = q.head * q.item_size;
-    unsafe {
-        ptr::copy_nonoverlapping(q.data.as_ptr().add(offset), item as *mut u8, q.item_size);
-    }
-    q.head = (q.head + 1) % q.capacity;
-    q.count -= 1;
-    true
+    let irq = interrupts_disable();
+    let ok = if q.count == 0 || q.count > q.capacity || item.is_null() || q.pc_head.is_null()
+    {
+        false
+    } else {
+        let offset = q.head * q.item_size;
+        unsafe {
+            ptr::copy_nonoverlapping(q.pc_head.add(offset), item as *mut u8, q.item_size);
+        }
+        q.head = (q.head + 1) % q.capacity;
+        q.count -= 1;
+        true
+    };
+    interrupts_restore(irq);
+    ok
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -264,6 +334,129 @@ static mut QUEUE_RECV_LAST_TAG: u32 = 0;
 static mut QUEUE_MAX_DEPTH: u32 = 0;
 static mut EVENT_POST_COUNT: u32 = 0;
 static mut EVENT_POST_LAST_ID: i32 = -1;
+
+/// Allocation accounting — tells whether the blob ever built the RX ring.
+/// `static_rx_buf_num=10` at ~1.6 KiB each should show ~10 large allocs when
+/// `ic_enable` arms MAC RX. Zero large allocs = RX ring never set up.
+static mut ALLOC_TOTAL_COUNT: u32 = 0;
+static mut ALLOC_LARGE_COUNT: u32 = 0;
+static mut ALLOC_MAX_SIZE: u32 = 0;
+static mut ALLOC_FAIL_COUNT: u32 = 0;
+static mut ALLOC_FAIL_SIZE: u32 = 0;
+static mut QUEUE_FAIL_COUNT: u32 = 0;
+static mut QUEUE_LAST_LEN: u32 = 0;
+static mut QUEUE_LAST_ITEM: u32 = 0;
+static mut MAC_RESET_CALLS: u32 = 0;
+
+fn osi_hex_u32(usb: &crate::usb_serial_jtag::UsbSerialJtag, v: u32) {
+    use arch::Serial;
+    usb.write_byte(b'0');
+    usb.write_byte(b'x');
+    let mut i = 0;
+    while i < 8 {
+        let n = ((v >> (28 - i * 4)) & 0xf) as u8;
+        usb.write_byte(if n < 10 { b'0' + n } else { b'a' + (n - 10) });
+        i += 1;
+    }
+}
+
+fn osi_log(kind: u8, a: u32, b: u32, ptr: *mut c_void) {
+    use arch::Serial;
+    let usb = crate::usb_serial_jtag::UsbSerialJtag::new();
+    usb.write_byte(kind);
+    usb.write_byte(b' ');
+    osi_hex_u32(&usb, a);
+    if b != 0 {
+        usb.write_byte(b' ');
+        osi_hex_u32(&usb, b);
+    }
+    usb.write_byte(b' ');
+    osi_hex_u32(&usb, ptr as u32);
+    usb.write_byte(b'\n');
+}
+/// register_chipv7_phy() return code (0 = ok; ESP_CAL_DATA_CHECK_FAIL etc.).
+static mut PHY_CAL_RET: i32 = 0x7fff_ffff;
+
+pub fn phy_cal_ret() -> i32 {
+    unsafe { PHY_CAL_RET }
+}
+
+#[inline]
+fn note_alloc(size: usize) {
+    unsafe {
+        ALLOC_TOTAL_COUNT = ALLOC_TOTAL_COUNT.wrapping_add(1);
+        if size >= 1500 {
+            ALLOC_LARGE_COUNT = ALLOC_LARGE_COUNT.wrapping_add(1);
+        }
+        if size as u32 > ALLOC_MAX_SIZE {
+            ALLOC_MAX_SIZE = size as u32;
+        }
+    }
+}
+
+pub fn alloc_diag() -> (u32, u32, u32) {
+    unsafe { (ALLOC_TOTAL_COUNT, ALLOC_LARGE_COUNT, ALLOC_MAX_SIZE) }
+}
+
+/// `(malloc_fail, malloc_fail_size, queue_fail, last_q_len, last_q_item, mac_reset_calls)`
+pub fn osi_gap_diag() -> (u32, u32, u32, u32, u32, u32) {
+    unsafe {
+        (
+            ALLOC_FAIL_COUNT,
+            ALLOC_FAIL_SIZE,
+            QUEUE_FAIL_COUNT,
+            QUEUE_LAST_LEN,
+            QUEUE_LAST_ITEM,
+            MAC_RESET_CALLS,
+        )
+    }
+}
+
+fn malloc_traced(size: usize) -> *mut c_void {
+    note_alloc(size);
+    let p = unsafe { super::heap::malloc(size) };
+    if p.is_null() {
+        unsafe {
+            ALLOC_FAIL_COUNT = ALLOC_FAIL_COUNT.wrapping_add(1);
+            ALLOC_FAIL_SIZE = size as u32;
+        }
+        osi_log(b'F', size as u32, 0, ptr::null_mut());
+    } else {
+        osi_log(b'M', size as u32, 0, p);
+    }
+    p
+}
+
+fn realloc_traced(ptr: *mut c_void, size: usize) -> *mut c_void {
+    note_alloc(size);
+    let p = unsafe { super::heap::realloc(ptr, size) };
+    if p.is_null() && size != 0 {
+        unsafe {
+            ALLOC_FAIL_COUNT = ALLOC_FAIL_COUNT.wrapping_add(1);
+            ALLOC_FAIL_SIZE = size as u32;
+        }
+        osi_log(b'F', size as u32, 0, ptr::null_mut());
+    } else {
+        osi_log(b'R', size as u32, 0, p);
+    }
+    p
+}
+
+fn calloc_traced(n: usize, size: usize) -> *mut c_void {
+    let bytes = n.saturating_mul(size);
+    note_alloc(bytes);
+    let p = unsafe { super::heap::calloc(n, size) };
+    if p.is_null() && bytes != 0 {
+        unsafe {
+            ALLOC_FAIL_COUNT = ALLOC_FAIL_COUNT.wrapping_add(1);
+            ALLOC_FAIL_SIZE = bytes as u32;
+        }
+        osi_log(b'F', bytes as u32, 0, ptr::null_mut());
+    } else {
+        osi_log(b'Z', bytes as u32, 0, p);
+    }
+    p
+}
 
 fn alloc_sem(max: u32, init: u32) -> *mut c_void {
     for i in 0..MAX_SEMS {
@@ -379,7 +572,43 @@ fn hw_random() -> u32 {
 static mut PHY_ENABLED: bool = false;
 static mut PHY_CALIBRATED: bool = false;
 
-/// PHY init data for ESP32-C6 (128 bytes, matches esp-wifi defaults at 20 dBm max TX power).
+/// Gold esp-phy 0.2.0 C6 `PHY_INIT_DATA_DEFAULT` (20 dBm).
+#[cfg(feature = "c6")]
+static PHY_INIT_DATA: esp_wifi_sys::include::esp_phy_init_data_t =
+    esp_wifi_sys::include::esp_phy_init_data_t {
+        params: [
+            0x01, 0x00, 0x50, 0x50, 0x50, 0x50, 0x50, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28,
+            0x28, 0x28, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28, 0x28, 0x28, 0x00, 0x00, 0x00,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x9b, 0x00,
+        ],
+    };
+
+/// H2 keeps the previous 0x0a-shaped table (still on esp-wifi-sys 0.8.1).
+#[cfg(all(feature = "h2", not(feature = "c6")))]
+static PHY_INIT_DATA: esp_wifi_sys::include::esp_phy_init_data_t =
+    esp_wifi_sys::include::esp_phy_init_data_t {
+        params: [
+            0x0a, 0x00, 0x50, 0x50, 0x50, 0x50, 0x50, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x44, 0x3c,
+            0x3c, 0x3c, 0x4c, 0x4c, 0x4c, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x51,
+        ],
+    };
+
+#[cfg(not(any(feature = "c6", feature = "h2")))]
 static PHY_INIT_DATA: esp_wifi_sys::include::esp_phy_init_data_t =
     esp_wifi_sys::include::esp_phy_init_data_t {
         params: [
@@ -670,7 +899,9 @@ pub fn wifi_isr_dispatch(cpu_int: usize) -> bool {
     }
     let fnc = unsafe { WIFI_ISR_FN };
     if fnc.is_null() {
-        return false;
+        // Still claim the line so the trap handler does not mask it.
+        // The blob may call set_isr(null) around mode changes.
+        return true;
     }
     let handler: unsafe extern "C" fn(*mut c_void) = unsafe { core::mem::transmute(fnc) };
     let arg = unsafe { WIFI_ISR_ARG };
@@ -701,15 +932,8 @@ unsafe extern "C" fn set_intr(_cpu_no: i32, intr_source: u32, _intr_num: u32, _i
 }
 
 unsafe extern "C" fn clear_intr(_intr_source: u32, _intr_num: u32) {
-    // Clear pending for our WiFi CPU interrupt lines.
-    core::ptr::write_volatile(
-        (PLIC_BASE + PLIC_MXINT_CLEAR) as *mut u32,
-        1 << WIFI_CPU_INT,
-    );
-    core::ptr::write_volatile(
-        (INTPRI_BASE + INTC_CPU_INT_CLEAR) as *mut u32,
-        1 << WIFI_CPU_INT,
-    );
+    // Gold C6 leaves this empty. Clearing PLIC/INTPRI pending here drops
+    // RX-ready IRQs the blob arms during ic_enable.
 }
 
 unsafe extern "C" fn set_isr(_n: i32, f: *mut c_void, arg: *mut c_void) {
@@ -792,7 +1016,9 @@ unsafe extern "C" fn ints_off(mask: u32) {
 }
 
 unsafe extern "C" fn is_from_isr() -> bool {
-    false
+    // Gold always returns true so the blob uses ISR-safe queue/sem paths
+    // from wifi_isr_dispatch / ic_enable.
+    true
 }
 
 unsafe extern "C" fn spin_lock_create() -> *mut c_void {
@@ -837,7 +1063,7 @@ unsafe extern "C" fn semphr_take(semphr: *mut c_void, block_time_tick: u32) -> i
             let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
                 u32::MAX
             } else {
-                block_time_tick.max(500)
+                block_time_tick.max(1)
             };
             let mut i: u32 = 0;
             loop {
@@ -937,33 +1163,73 @@ unsafe extern "C" fn mutex_unlock(mutex: *mut c_void) -> i32 {
 
 unsafe extern "C" fn queue_create(queue_len: u32, item_size: u32) -> *mut c_void {
     let h = alloc_queue(queue_len as usize, item_size as usize);
+    osi_log(b'q', queue_len, item_size, h);
     h
 }
 
 unsafe extern "C" fn queue_delete(queue: *mut c_void) {
     if let Some(q) = get_queue(queue) {
-        q.in_use = false;
+        free_queue_storage(q);
     }
+}
+
+fn note_queue_send_ok(q: &SimpleQueue, item: *mut c_void) {
+    unsafe {
+        QUEUE_SEND_COUNT = QUEUE_SEND_COUNT.wrapping_add(1);
+        if !item.is_null() && q.item_size >= 4 {
+            QUEUE_SEND_LAST_TAG = core::ptr::read_unaligned(item as *const u32);
+        }
+        let depth = q.count as u32;
+        if depth > QUEUE_MAX_DEPTH {
+            QUEUE_MAX_DEPTH = depth;
+        }
+    }
+}
+
+fn osi_trace(tag: u8) {
+    use arch::Serial;
+    let usb = crate::usb_serial_jtag::UsbSerialJtag::new();
+    usb.write_byte(b'[');
+    usb.write_byte(b'O');
+    usb.write_byte(b'S');
+    usb.write_byte(b'I');
+    usb.write_byte(tag);
+    usb.write_byte(b']');
+    usb.write_byte(b'\n');
 }
 
 unsafe extern "C" fn queue_send(
     queue: *mut c_void,
     item: *mut c_void,
-    _block_time_tick: u32,
+    block_time_tick: u32,
 ) -> i32 {
     if let Some(q) = get_queue(queue) {
-        let ok = queue_send_impl(q, item as *const c_void);
-        if ok {
-            QUEUE_SEND_COUNT = QUEUE_SEND_COUNT.wrapping_add(1);
-            if !item.is_null() && q.item_size >= 4 {
-                QUEUE_SEND_LAST_TAG = core::ptr::read_unaligned(item as *const u32);
+        if queue_send_impl(q, item as *const c_void) {
+            note_queue_send_ok(q, item);
+            return 1;
+        }
+    }
+    if block_time_tick > 0 {
+        let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
+            u32::MAX
+        } else {
+            block_time_tick.max(1)
+        };
+        let mut i: u32 = 0;
+        loop {
+            poll_timers();
+            if let Some(q) = get_queue(queue) {
+                if queue_send_impl(q, item as *const c_void) {
+                    note_queue_send_ok(q, item);
+                    return 1;
+                }
             }
-            let depth = q.count as u32;
-            if depth > QUEUE_MAX_DEPTH {
-                QUEUE_MAX_DEPTH = depth;
+            sys_sleep(1);
+            i = i.wrapping_add(1);
+            if max_iters != u32::MAX && i >= max_iters {
+                break;
             }
         }
-        return ok as i32;
     }
     0
 }
@@ -1017,7 +1283,7 @@ unsafe extern "C" fn queue_recv(
         let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
             u32::MAX
         } else {
-            block_time_tick.max(500)
+            block_time_tick.max(1)
         };
         let mut i: u32 = 0;
         loop {
@@ -1043,7 +1309,10 @@ unsafe extern "C" fn queue_recv(
 
 unsafe extern "C" fn queue_msg_waiting(queue: *mut c_void) -> u32 {
     if let Some(q) = get_queue(queue) {
-        return q.count as u32;
+        let irq = interrupts_disable();
+        let n = q.count as u32;
+        interrupts_restore(irq);
+        return n;
     }
     0
 }
@@ -1111,7 +1380,7 @@ unsafe extern "C" fn event_group_wait_bits(
         let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
             u32::MAX
         } else {
-            block_time_tick.max(500)
+            block_time_tick.max(1)
         };
         let mut i: u32 = 0;
         loop {
@@ -1358,14 +1627,12 @@ unsafe extern "C" fn task_delete(_task_handle: *mut c_void) {
 }
 
 unsafe extern "C" fn task_delay(tick: u32) {
-    // 1 tick = 10 ms in this port.
-    let t = (tick as usize).max(1);
-    sys_sleep(t);
+    // Gold/esp-radio: 1 OSI tick = 1 ms (scheduler tick is also 1 ms).
+    sys_sleep((tick as usize).max(1));
 }
 
 unsafe extern "C" fn task_ms_to_tick(ms: u32) -> i32 {
-    // 1 tick = 10ms.
-    (ms / 10).max(1) as i32
+    ms as i32
 }
 
 unsafe extern "C" fn task_get_current_task() -> *mut c_void {
@@ -1377,12 +1644,20 @@ unsafe extern "C" fn task_get_max_priority() -> i32 {
 }
 
 unsafe extern "C" fn osi_malloc(size: usize) -> *mut c_void {
-    let p = unsafe { super::heap::malloc(size) };
-    p
+    malloc_traced(size)
 }
 
 unsafe extern "C" fn osi_free(p: *mut c_void) {
     unsafe { super::heap::free(p) }
+}
+
+const WIFI_EVENT_STA_CONNECTED: i32 = 4;
+const WIFI_EVENT_STA_DISCONNECTED: i32 = 5;
+
+static mut WIFI_STA_CONNECTED: bool = false;
+
+pub fn wifi_sta_got_connected() -> bool {
+    unsafe { WIFI_STA_CONNECTED }
 }
 
 unsafe extern "C" fn event_post(
@@ -1394,6 +1669,11 @@ unsafe extern "C" fn event_post(
 ) -> i32 {
     EVENT_POST_COUNT = EVENT_POST_COUNT.wrapping_add(1);
     EVENT_POST_LAST_ID = event_id;
+    if event_id == WIFI_EVENT_STA_CONNECTED {
+        WIFI_STA_CONNECTED = true;
+    } else if event_id == WIFI_EVENT_STA_DISCONNECTED {
+        WIFI_STA_CONNECTED = false;
+    }
     0
 }
 
@@ -1411,8 +1691,8 @@ unsafe extern "C" fn wifi_apb80m_request() {}
 unsafe extern "C" fn wifi_apb80m_release() {}
 
 /// Run PHY calibration early (before `esp_wifi_init_internal`), matching
-/// esp-wifi's init order.  When the blob later calls `phy_enable()` from
-/// ppTask it will find `PHY_CALIBRATED == true` and take the fast
+/// esp-wifi / ESP-IDF init order.  When the blob later calls `phy_enable()`
+/// from ppTask it will find `PHY_CALIBRATED == true` and take the fast
 /// `phy_wakeup_init()` path instead of blocking in `register_chipv7_phy`.
 pub fn early_phy_init() {
     unsafe {
@@ -1420,30 +1700,34 @@ pub fn early_phy_init() {
             return;
         }
 
-        // Step 0: Populate g_phyFuns — the PHY blob's ROM function table.
+        phy_trace(b'0');
+
+        // Populate g_phyFuns — the PHY blob's ROM function table.
         extern "C" {
             fn phy_get_romfuncs() -> *const u32;
+            fn phy_get_romfunc_addr();
             static mut g_phyFuns: *const u32;
         }
+        phy_get_romfunc_addr();
         g_phyFuns = phy_get_romfuncs();
+        phy_trace(b'1');
 
-        // Step 1: Full radio clock infrastructure (PMU, state maps, LP clocks)
-        modem::init_radio_clocks();
-        // Step 2: Legacy modem clock gate enables
-        modem::enable_all_clocks();
-        // Step 3: I2C master clock at 160 MHz (needed for RF register writes)
-        modem::enable_phy_clock();
-        // Step 4: Enable WiFi BB/FE/MAC clocks *before* PHY cal
-        modem::enable_wifi_clocks();
-        // Step 5: Run PHY calibration blob (partial cal, matching esp-wifi)
-        esp_wifi_sys::include::register_chipv7_phy(
-            &PHY_INIT_DATA as *const esp_wifi_sys::include::esp_phy_init_data_t,
-            &raw mut PHY_CAL_DATA,
-            esp_wifi_sys::include::esp_phy_calibration_mode_t_PHY_RF_CAL_NONE,
-        );
-        PHY_CALIBRATED = true;
-        PHY_ENABLED = true;
+        // Gold does not re-init radio clocks or run cal here. First
+        // `phy_enable` from ppTask does I2C + register_chipv7_phy.
+        phy_trace(b'3');
     }
+}
+
+fn phy_trace(tag: u8) {
+    use arch::Serial;
+    let usb = crate::usb_serial_jtag::UsbSerialJtag::new();
+    usb.write_byte(b'[');
+    usb.write_byte(b'P');
+    usb.write_byte(b'H');
+    usb.write_byte(b'Y');
+    usb.write_byte(tag);
+    usb.write_byte(b']');
+    usb.write_byte(b'\n');
 }
 
 unsafe extern "C" fn phy_disable() {
@@ -1451,38 +1735,76 @@ unsafe extern "C" fn phy_disable() {
 }
 
 unsafe extern "C" fn phy_enable() {
-    if !unsafe { PHY_ENABLED } {
-        modem::init_radio_clocks();
-        modem::enable_all_clocks();
-        modem::enable_phy_clock();
-
-        if !unsafe { PHY_CALIBRATED } {
-            // First-time PHY init: run full calibration via blob.
-            unsafe {
-                esp_wifi_sys::include::register_chipv7_phy(
-                    &PHY_INIT_DATA as *const esp_wifi_sys::include::esp_phy_init_data_t,
-                    &raw mut PHY_CAL_DATA,
-                    esp_wifi_sys::include::esp_phy_calibration_mode_t_PHY_RF_CAL_FULL,
-                );
-                PHY_CALIBRATED = true;
-            }
-        } else {
-            // Already calibrated: quick wake-up.
-            unsafe { esp_wifi_sys::include::phy_wakeup_init() };
-        }
-
-        unsafe { PHY_ENABLED = true };
+    if unsafe { PHY_ENABLED } {
+        return;
     }
+
+    // Gold `esp_phy::enable_phy`: enable I2C PHY clock and hold it (the
+    // PhyClockGuard is mem::forget'd), bbpll USB, then register_chipv7_phy.
+    // It does not re-run init_radio_clocks / enable_wifi / phy_wifi_enable_set.
+    modem::enable_phy_clock();
+    extern "C" {
+        fn phy_bbpll_en_usb(enable: bool);
+    }
+    unsafe {
+        phy_bbpll_en_usb(true);
+    }
+
+    if !unsafe { PHY_CALIBRATED } {
+        unsafe {
+            PHY_IN_CAL = true;
+            let ret = esp_wifi_sys::include::register_chipv7_phy(
+                &PHY_INIT_DATA as *const esp_wifi_sys::include::esp_phy_init_data_t,
+                &raw mut PHY_CAL_DATA,
+                esp_wifi_sys::include::esp_phy_calibration_mode_t_PHY_RF_CAL_FULL,
+            );
+            PHY_IN_CAL = false;
+            PHY_CALIBRATED = true;
+            PHY_CAL_RET = ret;
+        }
+    } else {
+        unsafe { esp_wifi_sys::include::phy_wakeup_init() };
+    }
+
+    phy_trace(b'4');
+    unsafe { PHY_ENABLED = true };
 }
 
 unsafe extern "C" fn phy_update_country_info(_country: *const c_char) -> c_int {
-    0
+    // Gold/esp-radio returns -1 ("not implemented"). Returning 0 claims we
+    // programmed the country/RX filter when we did not; the blob then skips
+    // writing 0x600a4300 (ffffffff on gold, 0 here).
+    -1
 }
 
-unsafe extern "C" fn read_mac(mac: *mut u8, _type_: c_uint) -> c_int {
-    let efuse_mac = modem::read_efuse_mac();
+/// Derive a locally-administered MAC from the eFuse base (esp-hal).
+fn derive_local_mac(mac: &mut [u8; 6]) {
+    let base = mac[0];
+    for i in 0..64u8 {
+        let derived = (base | 0x02) ^ (i << 2);
+        if derived != base {
+            mac[0] = derived;
+            return;
+        }
+    }
+}
+
+unsafe extern "C" fn read_mac(mac: *mut u8, type_: c_uint) -> c_int {
+    // Blob type: 0=STA (base), 1=AP (local), 2=BT (local + last-octet +1).
+    // Gold's 0x600a4064 is e6… because AP gets a distinct address; repeating
+    // the STA MAC for every type is a known IDF abort path for ic_enable.
+    let mut addr = modem::read_efuse_mac();
+    match type_ {
+        0 => {}
+        1 => derive_local_mac(&mut addr),
+        2 => {
+            derive_local_mac(&mut addr);
+            addr[5] = addr[5].wrapping_add(1);
+        }
+        _ => return -1,
+    }
     for i in 0..6 {
-        unsafe { *mac.add(i) = efuse_mac[i] };
+        unsafe { *mac.add(i) = addr[i] };
     }
     0
 }
@@ -1502,7 +1824,27 @@ unsafe extern "C" fn ets_timer_disarm(timer: *mut c_void) {
 }
 
 unsafe extern "C" fn ets_timer_done(ptimer: *mut c_void) {
-    ets_timer_disarm(ptimer);
+    let key = ptimer as usize;
+    let mut slot = None;
+    for i in 0..MAX_TIMERS {
+        let (k, idx) = unsafe { TIMER_MAP[i] };
+        if k == key && idx != usize::MAX {
+            slot = Some((i, idx));
+            break;
+        }
+    }
+    let Some((map_i, tidx)) = slot else {
+        return;
+    };
+    let t = unsafe { &mut TIMERS[tidx] };
+    t.active = false;
+    t.callback = None;
+    t.arg = ptr::null_mut();
+    t.period_us = 0;
+    t.next_fire = 0;
+    unsafe {
+        TIMER_MAP[map_i] = (0, usize::MAX);
+    }
 }
 
 unsafe extern "C" fn ets_timer_setfn(
@@ -1526,15 +1868,28 @@ unsafe extern "C" fn ets_timer_arm_us(ptimer: *mut c_void, us: u32, repeat: bool
 }
 
 unsafe extern "C" fn wifi_reset_mac() {
-    modem::reset_all_modems();
+    // The blob calls this once from esp_wifi_start, *after* phy_enable.
+    // Pulsing RST_WIFIMAC/WIFIBB here wipes RX descriptor slots.
+    // Gold C6 leaves this callback empty; we only pulse MAC earlier,
+    // with APB clocks already on.
+    unsafe {
+        MAC_RESET_CALLS = MAC_RESET_CALLS.wrapping_add(1);
+    }
+    osi_trace(b'R');
+    if unsafe { PHY_ENABLED } {
+        return;
+    }
+    modem::reset_wifi_mac();
 }
 
 unsafe extern "C" fn wifi_clock_enable() {
-    modem::enable_all_clocks();
+    modem::enable_wifi_clocks();
 }
 
 unsafe extern "C" fn wifi_clock_disable() {
-    // Don't actually disable — other radios might need clocks.
+    // Gold implements enable_wifi(false) here. This blob never calls the
+    // callback during start (OSId=0); actually ungating clocks collapsed
+    // MAC ISRs when tested from other paths, so keep the no-op.
 }
 
 unsafe extern "C" fn wifi_rtc_enable_iso() {}
@@ -1623,8 +1978,8 @@ unsafe extern "C" fn random() -> c_ulong {
 }
 
 unsafe extern "C" fn slowclk_cal_get() -> u32 {
-    // Return approximate RTC slow clock calibration value.
-    // 150kHz RC oscillator → ~6667 ns per cycle.
+    // 150kHz RC oscillator → ~6667 ns per cycle. Returning 0 (esp-radio C6)
+    // makes esp_wifi_start take an illegal-instruction trap on this port.
     6667
 }
 
@@ -1636,45 +1991,70 @@ unsafe extern "C" fn log_timestamp() -> u32 {
 
 // Memory allocation wrappers.
 unsafe extern "C" fn malloc_internal(size: usize) -> *mut c_void {
-    unsafe { super::heap::malloc(size) }
+    malloc_traced(size)
 }
 
 unsafe extern "C" fn realloc_internal(ptr: *mut c_void, size: usize) -> *mut c_void {
-    unsafe { super::heap::realloc(ptr, size) }
+    realloc_traced(ptr, size)
 }
 
 unsafe extern "C" fn calloc_internal(n: usize, size: usize) -> *mut c_void {
-    unsafe { super::heap::calloc(n, size) }
+    calloc_traced(n, size)
 }
 
 unsafe extern "C" fn zalloc_internal(size: usize) -> *mut c_void {
-    unsafe { super::heap::calloc(1, size) }
+    calloc_traced(1, size)
 }
 
 unsafe extern "C" fn wifi_malloc(size: usize) -> *mut c_void {
-    unsafe { super::heap::malloc(size) }
+    malloc_traced(size)
 }
 
 unsafe extern "C" fn wifi_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    unsafe { super::heap::realloc(ptr, size) }
+    realloc_traced(ptr, size)
 }
 
 unsafe extern "C" fn wifi_calloc(n: usize, size: usize) -> *mut c_void {
-    unsafe { super::heap::calloc(n, size) }
+    calloc_traced(n, size)
 }
 
 unsafe extern "C" fn wifi_zalloc(size: usize) -> *mut c_void {
-    unsafe { super::heap::calloc(1, size) }
+    calloc_traced(1, size)
 }
 
 unsafe extern "C" fn wifi_create_queue(queue_len: c_int, item_size: c_int) -> *mut c_void {
+    osi_trace(b'Q');
     let h = alloc_queue(queue_len as usize, item_size as usize);
-    h
+    if h.is_null() {
+        osi_trace(b'q');
+        return ptr::null_mut();
+    }
+    // Gold: leak a DRAM box whose first word is the queue handle
+    // (`wifi_static_queue_t.handle`). Zero 8 bytes so `storage` is NULL
+    // if the blob reads it. Do not put this in BSS — extra statics here
+    // have previously shifted other OSI state.
+    let wrap = calloc_traced(1, 8) as *mut *mut c_void;
+    if wrap.is_null() {
+        osi_trace(b'q');
+        return ptr::null_mut();
+    }
+    unsafe { *wrap = h };
+    osi_log(b'Q', queue_len as u32, item_size as u32, wrap as *mut c_void);
+    wrap as *mut c_void
 }
 
 unsafe extern "C" fn wifi_delete_queue(queue: *mut c_void) {
-    if let Some(q) = get_queue(queue) {
-        q.in_use = false;
+    if queue.is_null() {
+        return;
+    }
+    let inner = unsafe { *(queue as *const *mut c_void) };
+    if let Some(q) = get_queue_in_array(inner) {
+        free_queue_storage(q);
+        unsafe { super::heap::free(queue) };
+        return;
+    }
+    if let Some(q) = get_queue_in_array(queue) {
+        free_queue_storage(q);
     }
 }
 

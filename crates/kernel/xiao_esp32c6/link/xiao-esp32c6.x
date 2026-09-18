@@ -30,10 +30,11 @@ MEMORY
        generates two distinct ROM segments for the bootloader. */
     IROM  (rx) : ORIGIN = 0x42200020, LENGTH = 2M
 
-    /* On-chip SRAM for data, BSS, heap, and stacks.
+    /* On-chip SRAM for data, BSS, heap, stacks, and WiFi/PHY IRAM.
        Last ~1 KiB (0x4087_FC00–0x4087_FFFF) is reserved for ROM data
-       pointers used by the WiFi/PHY/PP blobs. */
-    DRAM  (rw) : ORIGIN = 0x40800000, LENGTH = 0x7FC00
+       pointers used by the WiFi/PHY/PP blobs.  rwx: PHY cal runs with
+       the flash cache off, so blob IRAM must execute from HP SRAM. */
+    DRAM  (rwx) : ORIGIN = 0x40800000, LENGTH = 0x7FC00
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -259,19 +260,12 @@ SECTIONS
         KEEP(*(.text._veer_trap_entry));
         KEEP(*(.text._veer_start_first_task));
         *(.text .text.*);
-        /* WiFi blob IRAM sections — must execute from SRAM when flash
-           cache is disabled.  For now keep them in flash (IROM); move
-           to a DRAM-loaded section if WiFi calibration faults. */
-        *(.iram1 .iram1.*);
-        *(.wifi0iram .wifi0iram.*);
-        *(.wifiextrairam .wifiextrairam.*);
-        *(.wifirxiram .wifirxiram.*);
-        *(.wifislprxiram .wifislprxiram.*);
-        *(.wifislpiram .wifislpiram.*);
         _etext = ABSOLUTE(.);
     } > IROM
 
-    /* ── DRAM segment (mutable data, loaded to SRAM) ────────── */
+    /* ── DRAM segment (mutable data + WiFi IRAM, loaded to SRAM) ──
+       PHY calibration disables the flash cache. Blob routines in
+       .wifi0iram / .iram1 must therefore live in HP SRAM, not IROM. */
     .data : ALIGN(4)
     {
         _data_start = ABSOLUTE(.);
@@ -279,6 +273,13 @@ SECTIONS
         *(.sdata .sdata.*);
         /* WiFi/PHY blob initialized data sections */
         *(.dram1 .dram1.*);
+        *(.iram1 .iram1.*);
+        *(.wifi0iram .wifi0iram.* .wifi0iram.*.literal);
+        *(.wifiextrairam .wifiextrairam.* .wifiextrairam.*.literal);
+        *(.wifirxiram .wifirxiram.* .wifirxiram.*.literal);
+        *(.wifislprxiram .wifislprxiram.* .wifislprxiram.*.literal);
+        *(.wifislpiram .wifislpiram.* .wifislpiram.*.literal);
+        *(.phyiram .phyiram.* .phyiram.*.literal);
         _data_end = ABSOLUTE(.);
     } > DRAM
 

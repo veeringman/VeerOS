@@ -18,20 +18,27 @@
 
 use arch::NetworkDevice;
 use core::ffi::c_void;
-use core::fmt;
+use core::fmt::{self, Write};
 use core::ptr;
 
+#[cfg(feature = "c6")]
+use esp_wifi_sys_esp32c6 as esp_wifi_sys;
 use esp_wifi_sys::include::{
     esp_interface_t_ESP_IF_WIFI_AP, esp_interface_t_ESP_IF_WIFI_STA, esp_supplicant_init,
     esp_wifi_connect_internal, esp_wifi_init_internal, esp_wifi_internal_free_rx_buffer,
     esp_wifi_internal_reg_rxcb, esp_wifi_internal_tx, esp_wifi_scan_get_ap_num,
-    esp_wifi_scan_get_ap_records, esp_wifi_scan_start, esp_wifi_set_config, esp_wifi_set_mode,
-    esp_wifi_set_tx_done_cb, esp_wifi_start, g_wifi_default_wpa_crypto_funcs, wifi_ap_record_t,
-    wifi_auth_mode_t_WIFI_AUTH_OPEN, wifi_auth_mode_t_WIFI_AUTH_WEP,
+    esp_wifi_scan_get_ap_records, esp_wifi_scan_start, esp_wifi_set_config,
+    esp_wifi_set_country, esp_wifi_set_mode, esp_wifi_set_protocol,
+    esp_wifi_set_ps, esp_wifi_set_tx_done_cb, esp_wifi_start, g_wifi_default_wpa_crypto_funcs,
+    wifi_ap_record_t, wifi_auth_mode_t_WIFI_AUTH_OPEN, wifi_auth_mode_t_WIFI_AUTH_WEP,
     wifi_auth_mode_t_WIFI_AUTH_WPA2_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA2_WPA3_PSK,
     wifi_auth_mode_t_WIFI_AUTH_WPA3_PSK, wifi_auth_mode_t_WIFI_AUTH_WPA_PSK, wifi_config_t,
-    wifi_init_config_t, wifi_interface_t_WIFI_IF_STA, wifi_mode_t_WIFI_MODE_NULL,
-    wifi_mode_t_WIFI_MODE_STA, wifi_sta_config_t, ESP_OK, WIFI_INIT_CONFIG_MAGIC,
+    wifi_country_policy_t_WIFI_COUNTRY_POLICY_MANUAL, wifi_country_t, wifi_init_config_t,
+    wifi_interface_t_WIFI_IF_STA, wifi_mode_t_WIFI_MODE_NULL, wifi_mode_t_WIFI_MODE_STA,
+    wifi_pmf_config_t, wifi_ps_type_t_WIFI_PS_NONE,
+    wifi_sae_pwe_method_t_WPA3_SAE_PWE_BOTH, wifi_scan_config_t,
+    wifi_scan_type_t_WIFI_SCAN_TYPE_ACTIVE, wifi_sta_config_t, ESP_OK, WIFI_INIT_CONFIG_MAGIC,
+    WIFI_PROTOCOL_11B, WIFI_PROTOCOL_11G, WIFI_PROTOCOL_11N,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +67,27 @@ static mut RX_CB_FREE_COUNT: u32 = 0;
 static mut RX_CB_REG_COUNT: u32 = 0;
 static mut RX_CB_REG_LAST_STA_RET: i32 = 0;
 static mut RX_CB_REG_LAST_AP_RET: i32 = 0;
+
+fn wifi_usb_trace(msg: &[u8]) {
+    use arch::Serial;
+    let usb = crate::usb_serial_jtag::UsbSerialJtag::new();
+    for b in msg {
+        usb.write_byte(*b);
+    }
+}
+
+fn wifi_usb_hex(tag: &[u8], v: u32) {
+    const H: &[u8] = b"0123456789abcdef";
+    let mut buf = [0u8; 10];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    for i in 0..8 {
+        buf[2 + i] = H[((v >> (28 - i * 4)) & 0xf) as usize];
+    }
+    wifi_usb_trace(tag);
+    wifi_usb_trace(&buf);
+    wifi_usb_trace(b"\n");
+}
 
 unsafe extern "C" fn recv_cb_sta(buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
     unsafe {
@@ -441,24 +469,29 @@ impl Esp32Wifi {
             if ret != ESP_OK as i32 {
                 return Err(WifiError::ConnectionFailed);
             }
-            // esp_wifi_connect_internal() queued the connect command.
-            // The WPA handshake happens asynchronously via interrupts + ppTask.
-            // Yield to let ppTask process the handshake, then poll timers.
-            for _ in 0..200u32 {
+            // Handshake is asynchronous (MAC ISR + ppTask). Wait for
+            // WIFI_EVENT_STA_CONNECTED instead of assuming success.
+            for _ in 0..400u32 {
                 crate::wifi_os_adapter::poll_timers();
                 crate::wifi_os_adapter::yield_to_scheduler();
+                if crate::wifi_os_adapter::wifi_sta_got_connected() {
+                    self.connected = true;
+                    return Ok(());
+                }
             }
-            self.connected = true;
-            return Ok(());
+            return Err(WifiError::ConnectionFailed);
         }
 
         if !config.is_configured() {
             return Err(WifiError::NotConfigured);
         }
 
-        // Step 1: Enable modem clocks and reset.
-        modem::enable_all_clocks();
-        modem::reset_all_modems();
+        // Gold RadioRefGuard::init() only runs init_radio_clocks (wifipwr).
+        // BB/MAC clocks come from the blob's wifi_clock_enable; I2C+cal from
+        // phy_enable. Enabling those here, then pulsing MAC, was not gold.
+        crate::gpio::enable_xiao_onboard_antenna();
+        modem::init_radio_clocks();
+        crate::gpio::enable_xiao_onboard_antenna();
 
         // Step 2: Read factory MAC from eFuse.
         self.mac = modem::read_efuse_mac();
@@ -477,35 +510,40 @@ impl Esp32Wifi {
         // Step 3b: Configure WiFi interrupt routing (INTMATRIX + PLIC).
         crate::wifi_os_adapter::setup_wifi_interrupts();
 
-        // Step 3c: Early PHY calibration — run register_chipv7_phy now so
-        // the blob's later phy_enable() from ppTask takes the fast wakeup path.
+        // Step 3c: Populate g_phyFuns. Gold defers I2C + register_chipv7_phy
+        // to the blob's first phy_enable() from ppTask.
         crate::wifi_os_adapter::early_phy_init();
+        wifi_usb_trace(b"[wifi] init_internal\n");
 
         // Step 4: Build wifi_init_config_t.
         let init_cfg = wifi_init_config_t {
             osi_funcs: unsafe { &raw mut esp_wifi_sys::include::g_wifi_osi_funcs },
             wpa_crypto_funcs: unsafe { g_wifi_default_wpa_crypto_funcs },
-            static_rx_buf_num: 4,
-            dynamic_rx_buf_num: 4,
-            tx_buf_type: 0, // static TX buffers
-            static_tx_buf_num: 4,
-            dynamic_tx_buf_num: 0,
+            // Match esp-radio 0.18 / esp-wifi-sys C6 blob compile-time config.
+            // tx_buf_type MUST be 1 (dynamic); the blob is built with
+            // CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1. Static TX (0) leaves MAC RX
+            // descriptor slots 0x600a408c–4094 empty.
+            static_rx_buf_num: 10,
+            dynamic_rx_buf_num: 32,
+            tx_buf_type: 1,
+            static_tx_buf_num: 0,
+            dynamic_tx_buf_num: 32,
             rx_mgmt_buf_type: 0,
-            rx_mgmt_buf_num: 2,
+            rx_mgmt_buf_num: 5,
             cache_tx_buf_num: 0,
             csi_enable: 0,
-            ampdu_rx_enable: 0,
-            ampdu_tx_enable: 0,
+            ampdu_rx_enable: 1,
+            ampdu_tx_enable: 1,
             amsdu_tx_enable: 0,
             nvs_enable: 0,
             nano_enable: 0,
-            rx_ba_win: 0,
+            rx_ba_win: 6,
             wifi_task_core_id: 0,
             beacon_max_len: 752,
-            mgmt_sbuf_num: 6,
+            mgmt_sbuf_num: 32,
             feature_caps: crate::wifi_os_adapter::WIFI_FEATURE_CAPS,
             sta_disconnected_pm: false,
-            espnow_max_encrypt_num: 0,
+            espnow_max_encrypt_num: 7,
             tx_hetb_queue_num: 3,
             dump_hesigb_enable: false,
             magic: WIFI_INIT_CONFIG_MAGIC as i32,
@@ -513,23 +551,29 @@ impl Esp32Wifi {
 
         // Step 5: Initialize WiFi internals.
         let ret = unsafe { esp_wifi_init_internal(&init_cfg) };
+        wifi_usb_trace(b"[wifi] init_internal done\n");
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
 
-        // Step 6: Match esp-wifi init flow: force mode NULL first.
+        // Gold wifi_init: NULL mode + supplicant + rxcb, then country/ps.
+        wifi_usb_trace(b"[wifi] set_mode NULL\n");
         let ret = unsafe { esp_wifi_set_mode(wifi_mode_t_WIFI_MODE_NULL) };
+        wifi_usb_trace(b"[wifi] set_mode NULL done\n");
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
 
         // Step 7: Initialize supplicant (WPA2 handshake).
+        wifi_usb_trace(b"[wifi] supplicant\n");
         let ret = unsafe { esp_supplicant_init() };
+        wifi_usb_trace(b"[wifi] supplicant done\n");
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
 
         // Step 8: Register RX callbacks and TX done callback.
+        wifi_usb_trace(b"[wifi] rxcb\n");
         // Match esp-wifi: register callbacks for both STA and AP interfaces.
         let ret = unsafe {
             esp_wifi_internal_reg_rxcb(esp_interface_t_ESP_IF_WIFI_STA, Some(recv_cb_sta))
@@ -556,16 +600,45 @@ impl Esp32Wifi {
             return Err(WifiError::InitFailed);
         }
 
+        // Gold: country + PS_NONE after wifi_init, before set_config/start.
+        let country = wifi_country_t {
+            cc: [b'C' as _, b'N' as _, 0],
+            schan: 1,
+            nchan: 13,
+            max_tx_power: 20,
+            policy: wifi_country_policy_t_WIFI_COUNTRY_POLICY_MANUAL,
+        };
+        wifi_usb_trace(b"[wifi] set_country\n");
+        let ret = unsafe { esp_wifi_set_country(&country) };
+        wifi_usb_trace(b"[wifi] set_country done\n");
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+        let ret = unsafe { esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE) };
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+
         // Step 9: Set STA mode.
+        wifi_usb_trace(b"[wifi] set_mode STA\n");
         let ret = unsafe { esp_wifi_set_mode(wifi_mode_t_WIFI_MODE_STA) };
+        wifi_usb_trace(b"[wifi] set_mode STA done\n");
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
 
         // Step 10: Configure STA with SSID and password.
+        wifi_usb_trace(b"[wifi] set_config\n");
         let mut sta_cfg: wifi_sta_config_t = unsafe { core::mem::zeroed() };
         sta_cfg.ssid[..config.ssid_len].copy_from_slice(&config.ssid[..config.ssid_len]);
         sta_cfg.password[..config.pass_len].copy_from_slice(&config.password[..config.pass_len]);
+        sta_cfg.listen_interval = 3;
+        sta_cfg.threshold.rssi = -99;
+        sta_cfg.pmf_cfg = wifi_pmf_config_t {
+            capable: true,
+            required: false,
+        };
+        sta_cfg.sae_pwe_h2e = wifi_sae_pwe_method_t_WPA3_SAE_PWE_BOTH;
 
         let mut wifi_cfg = wifi_config_t { sta: sta_cfg };
         let ret = unsafe { esp_wifi_set_config(wifi_interface_t_WIFI_IF_STA, &mut wifi_cfg) };
@@ -573,10 +646,25 @@ impl Esp32Wifi {
             return Err(WifiError::InitFailed);
         }
 
-        // Step 11: Start WiFi.
-        let ret = unsafe { esp_wifi_start() };
+        // Gold default Protocols: 11b|11g|11n, applied before start.
+        let proto = (WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N) as u8;
+        let ret = unsafe { esp_wifi_set_protocol(wifi_interface_t_WIFI_IF_STA, proto) };
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
+        }
+
+        // Step 11: Start WiFi.
+        wifi_usb_trace(b"[wifi] start\n");
+        let ret = unsafe { esp_wifi_start() };
+        wifi_usb_trace(b"[wifi] start done\n");
+        if ret != ESP_OK as i32 {
+            return Err(WifiError::InitFailed);
+        }
+        let rxdesc = unsafe { core::ptr::read_volatile(0x600A_408C as *const u32) };
+        if rxdesc != 0 {
+            wifi_usb_trace(b"[wifi] rxdesc live\n");
+        } else {
+            wifi_usb_trace(b"[wifi] rxdesc still 0\n");
         }
 
         // Some firmware paths can reset callback hooks during start/mode transitions.
@@ -600,6 +688,12 @@ impl Esp32Wifi {
         if ret != ESP_OK as i32 {
             return Err(WifiError::InitFailed);
         }
+
+        crate::gpio::enable_xiao_onboard_antenna();
+        wifi_usb_hex(
+            b"[wifi] calret=",
+            crate::wifi_os_adapter::phy_cal_ret() as u32,
+        );
 
         self.initialized = true;
 
@@ -639,10 +733,15 @@ impl Esp32Wifi {
 
     /// Scan for nearby access points using the blob's scan API.
     pub fn scan(&self, results: &mut [ScanResult]) -> Result<usize, WifiError> {
-        // Start a blocking scan (pass null config for default params).
-        let ret = unsafe { esp_wifi_scan_start(ptr::null(), true) };
+        // Gold: active scan, min 120 ms / max 150 ms per channel, 1 ms OSI tick.
+        let mut cfg: wifi_scan_config_t = unsafe { core::mem::zeroed() };
+        cfg.show_hidden = true;
+        cfg.scan_type = wifi_scan_type_t_WIFI_SCAN_TYPE_ACTIVE;
+        cfg.scan_time.active.min = 120;
+        cfg.scan_time.active.max = 150;
+        let ret = unsafe { esp_wifi_scan_start(&cfg, true) };
         if ret != ESP_OK as i32 {
-            return Ok(0);
+            return Err(WifiError::InitFailed);
         }
 
         let mut ap_count: u16 = 0;
@@ -732,5 +831,36 @@ impl NetworkDevice for Esp32Wifi {
 
     fn mac_address(&self) -> [u8; 6] {
         self.mac
+    }
+}
+
+/// MAC 0x600A4000 (512 words) + BB 0x600A7800 (128) + FE / SYSCON / LPCON.
+pub fn dump_mac_bb(w: &mut dyn fmt::Write) {
+    dump_regs(w, "MAC", 0x600A_4000, 512);
+    dump_regs(w, "BB", 0x600A_7800, 128);
+    dump_regs(w, "FE", 0x600A_8000, 256);
+    dump_regs(w, "PHYA", 0x600A_9800, 128);
+    dump_regs(w, "LPCON", 0x600A_F000, 32);
+    dump_regs(w, "ZB", 0x600A_3000, 32);
+    let slot = unsafe { core::ptr::read_volatile(0x600A_4084 as *const u32) };
+    let addr = 0x4080_0000 | (slot & 0x00FF_FFFF) as usize;
+    let _ = writeln!(w, "DESCRING slot={:#010x} addr={:#010x}", slot, addr);
+    dump_regs(w, "DESC", addr, 32);
+}
+
+fn dump_regs(w: &mut dyn fmt::Write, tag: &str, base: usize, words: usize) {
+    let _ = writeln!(w, "REGDUMP VEEROS-{} base={:#010x} words={}", tag, base, words);
+    let mut i = 0;
+    while i < words {
+        let r = |off: usize| -> u32 {
+            unsafe { core::ptr::read_volatile((base + (i + off) * 4) as *const u32) }
+        };
+        let _ = writeln!(
+            w,
+            "{:#010x}: {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
+            base + i * 4,
+            r(0), r(1), r(2), r(3), r(4), r(5), r(6), r(7)
+        );
+        i += 8;
     }
 }

@@ -346,14 +346,12 @@ pub unsafe fn mmio_write(addr: usize, val: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
 }
 
-/// Enable all modem clocks (WiFi, BLE, 802.15.4, RF front-end).
+/// Gold never writes MODEM_LPCON+0x00 (`TEST_CONF`). We used to OR
+/// CLK_WIFI|CLK_BLE there from `phy_enable`, leaving 0x3 vs gold 0.
+/// Real LP clocks are MODEM_LPCON_CLK_CONF at +0x18 (`enable_wifi_clocks`).
 pub fn enable_all_clocks() {
     unsafe {
-        let clk = mmio_read(MODEM_LPCON_BASE + MODEM_CLK_EN);
-        mmio_write(
-            MODEM_LPCON_BASE + MODEM_CLK_EN,
-            clk | CLK_WIFI_EN | CLK_BLE_EN | CLK_IEEE802154_EN | CLK_FE_EN,
-        );
+        mmio_write(MODEM_LPCON_BASE + MODEM_CLK_EN, 0);
     }
 }
 
@@ -378,22 +376,18 @@ pub fn init_radio_clocks() {
         // clk_zb/fe/bt/wifi_st_map = 6, modem_peri = 4, modem_apb = 6
         mmio_write(MODEM_SYSCON_CLK_CONF_POWER_ST, 0x6466_6600);
 
-        // ── MODEM_SYSCON: force ALL clocks on (bypass state gating) ─
-        mmio_write(MODEM_SYSCON_CLK_CONF_FORCE_ON, 0xFFFF_FFFF);
-        mmio_write(MODEM_SYSCON_CLK_CONF1_FORCE_ON, 0x00FF_FFFF);
+        // Gold init_clocks does not FORCE_ON every modem clock (that also
+        // ungates BT/ZB on CLK_CONF1 and can steal the combo RF).
 
         // ── MODEM_LPCON: state-based clock gating ──────────────────
         mmio_write(MODEM_LPCON_CLK_CONF_POWER_ST, 0x6666_0000);
 
-        // ── MODEM_LPCON: force clocks on ───────────────────────────
-        mmio_write(MODEM_LPCON_CLK_CONF_FORCE_ON, 0xFFFF_FFFF);
-
         // ── MODEM_LPCON: WiFi LP clock — enable all sources, div=0 ─
         mmio_write(MODEM_LPCON_WIFI_LP_CLK_CONF, 0x0F);
 
-        // ── MODEM_LPCON: enable wifipwr clock ──────────────────────
+        // ── MODEM_LPCON: enable wifipwr only (gold init_clocks) ────
         let lp_clk = mmio_read(MODEM_LPCON_CLK_CONF);
-        mmio_write(MODEM_LPCON_CLK_CONF, lp_clk | 0x0F); // all 4 enables
+        mmio_write(MODEM_LPCON_CLK_CONF, lp_clk | 0x01);
     }
 }
 
@@ -423,34 +417,43 @@ pub fn enable_phy_clock() {
 /// `esp_wifi_init_internal()`.
 pub fn enable_wifi_clocks() {
     unsafe {
-        // MODEM_SYSCON CLK_CONF1: bits 0-23 = all WiFi BB/FE/MAC/BT clocks
-        mmio_write(MODEM_SYSCON_CLK_CONF1, 0x00FF_FFFF);
+        // Gold enable_wifi CLK_CONF1: wifibb 22..160x1, wifimac, wifi_apb,
+        // fe_80/160/cal160/apb. Do NOT set BT (17-18) or analog-mode extras.
+        const GOLD_WIFI: u32 = 0x0001_E7FF;
+        const BT_BITS: u32 = (1 << 17) | (1 << 18);
+        let c1 = mmio_read(MODEM_SYSCON_CLK_CONF1);
+        mmio_write(MODEM_SYSCON_CLK_CONF1, (c1 & !BT_BITS) | GOLD_WIFI);
 
-        // MODEM_LPCON CLK_CONF: set bits 0 (wifipwr) + 1 (coex)
+        // MODEM_LPCON CLK_CONF: bits 0 (wifipwr) + 1 (coex)
         let lp_clk = mmio_read(MODEM_LPCON_CLK_CONF);
         mmio_write(MODEM_LPCON_CLK_CONF, lp_clk | 0x03);
     }
 }
 
-/// Release all modem peripherals from reset (assert then deassert).
-pub fn reset_all_modems() {
+/// MODEM_SYSCON.modem_rst_conf — the real WiFi MAC/BB reset (not LPCON+0x04).
+const MODEM_SYSCON_RST_CONF: usize = MODEM_SYSCON_BASE + 0x10;
+const RST_WIFIBB: u32 = 1 << 8;
+const RST_WIFIMAC: u32 = 1 << 10;
+
+/// Pulse WiFi MAC reset via MODEM_SYSCON. Used only for the one-shot
+/// bring-up before the blob runs. The OSI `wifi_reset_mac` callback is a
+/// no-op on C6 (matching esp-radio) so it cannot wipe RX descriptors.
+/// Gold's empty C6 reset is not usable here: skipping the pulse drops
+/// isr from ~240 to ~22 and still leaves 408c=0.
+pub fn reset_wifi_mac() {
     unsafe {
-        let rst_reg = MODEM_LPCON_BASE + MODEM_RST_CTRL;
-        let rst = mmio_read(rst_reg);
-        // Assert reset on all three subsystems.
-        mmio_write(
-            rst_reg,
-            rst | RST_WIFI_MAC | RST_BLE_BB | RST_IEEE802154_MAC,
-        );
-        // Brief delay — a few reads act as a fence.
-        let _ = mmio_read(rst_reg);
-        let _ = mmio_read(rst_reg);
-        // Deassert reset.
-        mmio_write(
-            rst_reg,
-            rst & !(RST_WIFI_MAC | RST_BLE_BB | RST_IEEE802154_MAC),
-        );
+        let rst = mmio_read(MODEM_SYSCON_RST_CONF);
+        mmio_write(MODEM_SYSCON_RST_CONF, rst | RST_WIFIBB | RST_WIFIMAC);
+        let _ = mmio_read(MODEM_SYSCON_RST_CONF);
+        let _ = mmio_read(MODEM_SYSCON_RST_CONF);
+        mmio_write(MODEM_SYSCON_RST_CONF, rst & !(RST_WIFIBB | RST_WIFIMAC));
     }
+}
+
+/// Release WiFi MAC/BB from reset. BLE/802.15.4 are left alone so they
+/// cannot fight the combo RF while WiFi owns the PHY.
+pub fn reset_all_modems() {
+    reset_wifi_mac();
 }
 
 /// Read the factory-programmed WiFi MAC address from eFuse.
@@ -463,13 +466,15 @@ pub fn read_efuse_mac() -> [u8; 6] {
     let lo = unsafe { mmio_read(EFUSE_MAC_LO) };
     let hi = unsafe { mmio_read(EFUSE_MAC_HI) };
 
+    // eFuse stores the IEEE MAC as [hi[15:0] | lo[31:0]] little-endian words.
+    // Octet 0 is the high byte of `hi` (matches espflash / ESP-IDF).
     [
-        (lo & 0xFF) as u8,
-        ((lo >> 8) & 0xFF) as u8,
-        ((lo >> 16) & 0xFF) as u8,
-        ((lo >> 24) & 0xFF) as u8,
-        (hi & 0xFF) as u8,
         ((hi >> 8) & 0xFF) as u8,
+        (hi & 0xFF) as u8,
+        ((lo >> 24) & 0xFF) as u8,
+        ((lo >> 16) & 0xFF) as u8,
+        ((lo >> 8) & 0xFF) as u8,
+        (lo & 0xFF) as u8,
     ]
 }
 

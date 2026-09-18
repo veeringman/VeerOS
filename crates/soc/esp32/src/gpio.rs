@@ -49,6 +49,28 @@ const GPIO_PIN_STRIDE: usize = 4;
 /// GPIO function output selection registers.
 /// GPIO_FUNCn_OUT_SEL_CFG_REG = FUNC_OUT_SEL_BASE + n * 4
 const FUNC_OUT_SEL_BASE: usize = GPIO_BASE + 0x554;
+/// OUT_SEL = 0x80 routes GPIO_OUT_REG; OEN_SEL (bit 10) uses GPIO_ENABLE_REG
+/// for pad OE. Without OEN_SEL the pad OE stays with the peripheral and HP
+/// GPIO writes never leave the chip — GPIO3 is the XIAO RF-switch enable.
+const GPIO_FUNC_OUT_SEL_GPIO: u32 = 0x80;
+const GPIO_FUNC_OEN_SEL: u32 = 1 << 10;
+
+/// LP_AON: GPIO0–7 can be owned by LP_IO. SEL bit=1 routes the pad to LP_IO
+/// (HP GPIO is ignored). HOLD freezes the pad regardless of HP writes.
+const LP_AON_BASE: usize = 0x600B_1000;
+const LP_AON_GPIO_MUX: usize = LP_AON_BASE + 0x28;
+const LP_AON_GPIO_HOLD0: usize = LP_AON_BASE + 0x2C;
+const LP_IO_BASE: usize = 0x600B_2000;
+const LP_IO_OUT_W1TC: usize = LP_IO_BASE + 0x08;
+const LP_IO_OE_W1TS: usize = LP_IO_BASE + 0x10;
+const LP_IO_IN: usize = LP_IO_BASE + 0x24;
+const LP_IO_GPIO0: usize = LP_IO_BASE + 0x48;
+const LPPERI_CLK_EN: usize = 0x600B_2800;
+const LPPERI_LP_IO_CK_EN: u32 = 1 << 27;
+/// Write-1-to-unhold. Bit 29 = all LP pads, bit 31 = all HP pads.
+const PMU_IMM_PAD_HOLD_ALL: usize = 0x600B_00E4;
+const PMU_UNHOLD_LP: u32 = 1 << 29;
+const PMU_UNHOLD_HP: u32 = 1 << 31;
 
 /// IO MUX base address.
 const IO_MUX_BASE: usize = 0x6000_9000;
@@ -135,23 +157,41 @@ fn configure_as_gpio(pin: u8) {
         // Set function to GPIO (func 1)
         val &= !IO_MUX_MCU_SEL_MASK;
         val |= IO_MUX_GPIO_FUNC << IO_MUX_MCU_SEL_SHIFT;
-        // Enable input (always useful for read-back)
+        // GPIO function, no sleep, 20 mA, no pulls. FUN_IE on so GPIO_IN
+        // readback is trustworthy (esp-hal leaves it off; we need the diag).
         val |= IO_MUX_FUN_IE;
-        // Clear sleep-mode select
         val &= !IO_MUX_SLP_SEL;
+        val &= !(IO_MUX_FUN_WPU | IO_MUX_FUN_WPD);
+        val &= !IO_MUX_FUN_DRV_MASK;
+        val |= 2 << IO_MUX_FUN_DRV_SHIFT;
         write_reg(mux_addr, val);
     }
 
-    // Route GPIO output through GPIO matrix: use 0x80 (simple GPIO output)
+    // Route GPIO output through GPIO matrix: SIG_GPIO_OUT (0x80). Match
+    // esp-hal init_gpio: only out_sel, leave oen_sel=0 so OE follows GPIO_ENABLE
+    // via the GPIO peripheral signal.
     unsafe {
         let func_out = FUNC_OUT_SEL_BASE + (pin as usize) * 4;
-        write_reg(func_out, 0x80);
+        write_reg(func_out, GPIO_FUNC_OUT_SEL_GPIO);
+    }
+}
+
+/// Attach GPIO0–7 to the HP IO_MUX and release pad-hold so HP writes reach the pin.
+fn attach_hp_gpio(pin: u8) {
+    if pin >= 8 {
+        return;
+    }
+    let mask = 1u32 << pin;
+    unsafe {
+        clear_bits(LP_AON_GPIO_MUX, mask);
+        clear_bits(LP_AON_GPIO_HOLD0, mask);
     }
 }
 
 /// Set the direction of a GPIO pin.
 pub fn set_mode(pin: u8, mode: GpioMode) {
     if pin >= GPIO_COUNT { return; }
+    attach_hp_gpio(pin);
     configure_as_gpio(pin);
     let mask = 1u32 << pin;
     match mode {
@@ -198,6 +238,44 @@ pub fn write(pin: u8, high: bool) {
         unsafe { write_reg(GPIO_OUT_W1TS, mask); }
     } else {
         unsafe { write_reg(GPIO_OUT_W1TC, mask); }
+    }
+}
+
+/// XIAO ESP32-C6 FM8625H RF switch: GPIO3 powers the switch (active low),
+/// GPIO14 selects onboard ceramic (low) vs U.FL (high). Arduino `initVariant()`
+/// drives these as HP GPIO. GPIO3 is an LP pad — without PMU unhold, HP writes
+/// leave GPIO_OUT low while the pad stays high and the radio is deaf.
+pub fn enable_xiao_onboard_antenna() {
+    unsafe {
+        write_reg(PMU_IMM_PAD_HOLD_ALL, PMU_UNHOLD_LP | PMU_UNHOLD_HP);
+        set_bits(LPPERI_CLK_EN, LPPERI_LP_IO_CK_EN);
+        clear_bits(LP_AON_GPIO_HOLD0, 1 << 3);
+        // Digital/HP GPIO owns the pad (Arduino gpio_config path).
+        clear_bits(LP_AON_GPIO_MUX, 1 << 3);
+    }
+
+    for pin in [3u8, 14] {
+        attach_hp_gpio(pin);
+        configure_as_gpio(pin);
+        write(pin, false);
+        unsafe { write_reg(GPIO_ENABLE_W1TS, 1u32 << pin); }
+    }
+}
+
+/// Snapshot used to prove the RF-switch pads actually moved.
+/// (enable, out, hp_in, func_out[3], func_out[14], lp_mux, hold0, lp_in)
+pub fn rf_switch_diag() -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    unsafe {
+        (
+            read_reg(GPIO_ENABLE_REG),
+            read_reg(GPIO_OUT_REG),
+            read_reg(GPIO_IN_REG),
+            read_reg(FUNC_OUT_SEL_BASE + 3 * 4),
+            read_reg(FUNC_OUT_SEL_BASE + 14 * 4),
+            read_reg(LP_AON_GPIO_MUX),
+            read_reg(LP_AON_GPIO_HOLD0),
+            read_reg(LP_IO_IN),
+        )
     }
 }
 

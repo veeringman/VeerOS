@@ -30,6 +30,7 @@ use arch::Platform;
 pub mod ble;
 pub mod ble_hid;
 pub mod c_stubs;
+pub mod gpio;
 pub mod heap;
 pub mod ieee802154;
 pub mod intc;

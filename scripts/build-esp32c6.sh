@@ -84,17 +84,19 @@ esac
 # ── Auto-detect serial port ──────────────────────────────────────────────
 
 if [[ -z "$PORT" ]]; then
-    # Look for Espressif USB JTAG/serial debug unit.
-    for dev in /dev/ttyACM* /dev/ttyUSB*; do
+    # Linux CDC-ACM / USB-serial, plus macOS USB Serial/JTAG (cu.usbmodem*).
+    shopt -s nullglob
+    for dev in /dev/cu.usbmodem* /dev/tty.usbmodem* /dev/ttyACM* /dev/ttyUSB*; do
         if [[ -e "$dev" ]]; then
             PORT="$dev"
             break
         fi
     done
+    shopt -u nullglob
     if [[ -z "$PORT" ]]; then
         echo "ERROR: No ESP32 serial device found."
         echo "  • Ensure the XIAO ESP32-C6 is connected with a USB-C data cable"
-        echo "  • Check: ls /dev/ttyACM* /dev/ttyUSB*"
+        echo "  • Check: ls /dev/cu.usbmodem* /dev/ttyACM* /dev/ttyUSB*"
         exit 1
     fi
 fi

@@ -9,10 +9,13 @@ description = "ESP32 RISC-V SoC drivers (C3/C6/H2) for VeerOS"
 
 [features]
 default = ["c6"]
-c3 = ["esp-wifi-sys/esp32c3"]
-c6 = ["esp-wifi-sys/esp32c6"]
-h2 = ["esp-wifi-sys/esp32c6"]
+c3 = ["dep:esp-wifi-sys", "esp-wifi-sys/esp32c3"]
+c6 = ["dep:esp-wifi-sys-esp32c6"]
+h2 = ["dep:esp-wifi-sys", "esp-wifi-sys/esp32c6"]
 
 [dependencies]
 arch = { path = "../../arch" }
-esp-wifi-sys = { version = "0.8.1", default-features = false }
+# C3/H2 stay on the umbrella 0.8.1 crate. C6 uses gold's per-chip 0.2.0
+# blobs (`libpp`/`libnet80211`/`libphy` are different files).
+esp-wifi-sys = { version = "0.8.1", default-features = false, optional = true }
+esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
