@@ -200,3 +200,19 @@ impl Serial for UsbSerialJtag {
         (conf & SERIAL_OUT_EP_DATA_AVAIL) != 0
     }
 }
+
+impl UsbSerialJtag {
+    /// Drop leftover host bytes (flash-stub / monitor reset noise) so the
+    /// shell does not treat them as a command.
+    pub fn drain_rx(&self) {
+        let mut n = 0u32;
+        while n < 256 && self.has_data() {
+            let _ = unsafe { mmio_read(USB_SERIAL_JTAG_BASE + EP1_REG) } as u8;
+            let conf = unsafe { mmio_read(USB_SERIAL_JTAG_BASE + EP1_CONF_REG) };
+            if conf & SERIAL_OUT_EP_DATA_AVAIL == 0 {
+                unsafe { mmio_write(USB_SERIAL_JTAG_BASE + INT_CLR_REG, SERIAL_OUT_RECV_PKT_INT) };
+            }
+            n += 1;
+        }
+    }
+}

@@ -73,6 +73,7 @@ static mut TIMER_MAP: [(usize, usize); MAX_TIMERS] = [(0, usize::MAX); MAX_TIMER
 /// `register_chipv7_phy` runs with the flash cache off. Do not fire
 /// software timers from OSI waits during that window.
 static mut PHY_IN_CAL: bool = false;
+static mut TIMER_FIRE_COUNT: u32 = 0;
 
 fn timer_slot_for(ptimer: *mut c_void) -> usize {
     let key = ptimer as usize;
@@ -125,7 +126,10 @@ pub fn poll_timers() {
         let t = unsafe { &mut TIMERS[i] };
         if t.active && now >= t.next_fire {
             if let Some(cb) = t.callback {
-                unsafe { cb(t.arg) };
+                unsafe {
+                    TIMER_FIRE_COUNT = TIMER_FIRE_COUNT.wrapping_add(1);
+                    cb(t.arg);
+                }
             }
             if t.repeat {
                 t.next_fire = now + t.period_us;
@@ -159,6 +163,7 @@ struct SimpleQueue {
 }
 
 static mut QUEUE_SLOTS: [*mut SimpleQueue; MAX_QUEUES] = [ptr::null_mut(); MAX_QUEUES];
+static mut QUEUE_WAITERS: [usize; MAX_QUEUES] = [usize::MAX; MAX_QUEUES];
 
 fn note_queue_fail(queue_len: usize, item_size: usize) {
     unsafe {
@@ -200,6 +205,7 @@ fn alloc_queue(queue_len: usize, item_size: usize) -> *mut c_void {
             (*q).tail = 0;
             (*q).count = 0;
             (*q).in_use = true;
+            QUEUE_WAITERS[i] = usize::MAX;
             (*q).pc_head = raw.add(hdr);
             (*q).pc_write_to = (*q).pc_head;
             QUEUE_SLOTS[i] = q;
@@ -216,6 +222,7 @@ fn free_queue_storage(q: &mut SimpleQueue) {
         if unsafe { QUEUE_SLOTS[i] } == ptr {
             unsafe {
                 QUEUE_SLOTS[i] = ptr::null_mut();
+                QUEUE_WAITERS[i] = usize::MAX;
                 super::heap::free(ptr as *mut c_void);
             }
             return;
@@ -251,6 +258,52 @@ fn get_queue(handle: *mut c_void) -> Option<&'static mut SimpleQueue> {
     // wrapper itself, the first word is the real SimpleQueue*.
     let inner = unsafe { *(handle as *const *mut c_void) };
     get_queue_in_array(inner)
+}
+
+fn queue_slot_of(q: &SimpleQueue) -> Option<usize> {
+    let p = q as *const SimpleQueue as *mut SimpleQueue;
+    for i in 0..MAX_QUEUES {
+        if unsafe { QUEUE_SLOTS[i] } == p {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn queue_waiter_of(q: &SimpleQueue) -> usize {
+    queue_slot_of(q)
+        .map(|i| unsafe { QUEUE_WAITERS[i] })
+        .unwrap_or(usize::MAX)
+}
+
+fn set_queue_waiter(q: &SimpleQueue, waiter: usize) {
+    if let Some(i) = queue_slot_of(q) {
+        unsafe { QUEUE_WAITERS[i] = waiter };
+    }
+}
+
+fn sem_slot_of(s: &SimpleSem) -> Option<usize> {
+    let base = unsafe { SEMS.as_ptr() } as usize;
+    let addr = s as *const SimpleSem as usize;
+    if addr >= base {
+        let i = (addr - base) / core::mem::size_of::<SimpleSem>();
+        if i < MAX_SEMS {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn sem_waiter_of(s: &SimpleSem) -> usize {
+    sem_slot_of(s)
+        .map(|i| unsafe { SEM_WAITERS[i] })
+        .unwrap_or(usize::MAX)
+}
+
+fn set_sem_waiter(s: &SimpleSem, waiter: usize) {
+    if let Some(i) = sem_slot_of(s) {
+        unsafe { SEM_WAITERS[i] = waiter };
+    }
 }
 
 fn queue_send_impl(q: &mut SimpleQueue, item: *const c_void) -> bool {
@@ -292,7 +345,7 @@ fn queue_recv_impl(q: &mut SimpleQueue, item: *mut c_void) -> bool {
 // Simple semaphore/mutex (spinlock-based, interrupts disabled)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const MAX_SEMS: usize = 16;
+const MAX_SEMS: usize = 32;
 
 /// Layout matches what blobs expect: returned handle is a real pointer.
 /// Blobs may dereference semaphore handles like FreeRTOS QueueHandle_t.
@@ -309,6 +362,8 @@ struct SimpleSem {
     owner: usize,   // task id that holds the recursive mutex (0 = unowned)
     recursion: u32, // nesting depth for recursive mutex
 }
+
+static mut SEM_WAITERS: [usize; MAX_SEMS] = [usize::MAX; MAX_SEMS];
 
 static mut SEMS: [SimpleSem; MAX_SEMS] = [const {
     SimpleSem {
@@ -469,6 +524,7 @@ fn alloc_sem(max: u32, init: u32) -> *mut c_void {
             s.owner = 0;
             s.recursion = 0;
             unsafe {
+                SEM_WAITERS[i] = usize::MAX;
                 SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1);
             }
             return s as *mut SimpleSem as *mut c_void;
@@ -487,6 +543,9 @@ fn alloc_recursive_mutex() -> *mut c_void {
             s.recursive = true;
             s.owner = 0;
             s.recursion = 0;
+            unsafe {
+                SEM_WAITERS[i] = usize::MAX;
+            }
             unsafe {
                 SEM_ALLOC_COUNT = SEM_ALLOC_COUNT.wrapping_add(1);
             }
@@ -572,21 +631,22 @@ fn hw_random() -> u32 {
 static mut PHY_ENABLED: bool = false;
 static mut PHY_CALIBRATED: bool = false;
 
-/// Gold esp-phy 0.2.0 C6 `PHY_INIT_DATA_DEFAULT` (20 dBm).
+/// Byte-identical to esp-phy 0.2.0 C6 `PHY_INIT_DATA_DEFAULT` (20 dBm).
+/// The previous copy kept 18 extra `0xff` bytes and placed `0x9b` at
+/// index 126 instead of gold's 111 — `register_chipv7_phy` still
+/// returned success, but RF came up on the wrong table.
 #[cfg(feature = "c6")]
 static PHY_INIT_DATA: esp_wifi_sys::include::esp_phy_init_data_t =
     esp_wifi_sys::include::esp_phy_init_data_t {
         params: [
-            0x01, 0x00, 0x50, 0x50, 0x50, 0x50, 0x50, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28,
-            0x28, 0x28, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28, 0x28, 0x28, 0x00, 0x00, 0x00,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x9b, 0x00,
+            0x01, 0x00, 0x50, 0x50, 0x50, 0x50, 0x50, 0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28, 0x28, 0x28,
+            0x4c, 0x4c, 0x4c, 0x4c, 0x48, 0x28, 0x28, 0x28, 0x28, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9b,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ],
     };
 
@@ -684,6 +744,20 @@ static mut WIFI_ISR_ARG: *mut c_void = core::ptr::null_mut();
 static mut WIFI_ISR_COUNT: u32 = 0;
 static mut BLOB_TASKS_SPAWNED: u32 = 0;
 static mut ISR_REGISTERED: bool = false;
+
+/// Set by `task_yield_from_isr` / ISR queue send. Consumed by the trap
+/// handler so we context-switch after the blob FIQ, like gold esp-rtos
+/// `yield_task_from_isr` → `task::yield_task()`. Never ecall from ISR.
+static mut YIELD_FROM_ISR: bool = false;
+static mut YIELD_FROM_ISR_REQ: u32 = 0;
+static mut YIELD_FROM_ISR_TAKEN: u32 = 0;
+/// True only while the blob Wi-Fi ISR is on the trap stack. Any OSI give
+/// must not ecall — nested trap smashes the ISR frame (`!E02` at stack).
+static mut IN_WIFI_ISR: bool = false;
+static mut ISR_WAKE: [usize; 4] = [usize::MAX; 4];
+static mut PP_RUNS: u32 = 0;
+static mut PP_LAST_TICK: u32 = 0;
+static mut PP_MAX_GAP: u32 = 0;
 
 /// Track what the blob passes to set_intr.
 static mut BLOB_SET_INTR_SOURCE: [u32; 4] = [0xFFFF; 4];
@@ -905,8 +979,134 @@ pub fn wifi_isr_dispatch(cpu_int: usize) -> bool {
     }
     let handler: unsafe extern "C" fn(*mut c_void) = unsafe { core::mem::transmute(fnc) };
     let arg = unsafe { WIFI_ISR_ARG };
-    unsafe { handler(arg) };
+    unsafe {
+        IN_WIFI_ISR = true;
+        handler(arg);
+        IN_WIFI_ISR = false;
+    }
     true
+}
+
+fn request_yield_from_isr() {
+    unsafe {
+        YIELD_FROM_ISR = true;
+        YIELD_FROM_ISR_REQ = YIELD_FROM_ISR_REQ.wrapping_add(1);
+    }
+}
+
+fn in_wifi_isr() -> bool {
+    unsafe { IN_WIFI_ISR }
+}
+
+fn record_isr_wake(waiter: usize) {
+    if waiter == usize::MAX {
+        return;
+    }
+    unsafe {
+        for slot in ISR_WAKE.iter_mut() {
+            if *slot == waiter || *slot == usize::MAX {
+                *slot = waiter;
+                break;
+            }
+        }
+    }
+    request_yield_from_isr();
+}
+
+/// Trap handler: ready these tasks after a blob ISR give (no ecall).
+pub fn take_isr_wake_tasks(out: &mut [usize]) -> usize {
+    let mut n = 0;
+    unsafe {
+        for slot in ISR_WAKE.iter_mut() {
+            if *slot != usize::MAX && n < out.len() {
+                out[n] = *slot;
+                n += 1;
+                *slot = usize::MAX;
+            }
+        }
+    }
+    n
+}
+
+/// Trap handler: true once per ISR if the blob asked to reschedule.
+pub fn take_yield_from_isr() -> bool {
+    unsafe {
+        if YIELD_FROM_ISR {
+            YIELD_FROM_ISR = false;
+            YIELD_FROM_ISR_TAKEN = YIELD_FROM_ISR_TAKEN.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// First spawned blob task (ppTask) that `is_ready` accepts.
+pub fn first_ready_blob_task(mut is_ready: impl FnMut(usize) -> bool) -> Option<usize> {
+    unsafe {
+        for t in BLOB_TASKS.iter() {
+            if t.active && t.task_id != usize::MAX && is_ready(t.task_id) {
+                return Some(t.task_id);
+            }
+        }
+    }
+    None
+}
+
+/// Active blob scheduler task ids (ppTask slots).
+pub fn blob_task_ids(out: &mut [usize]) -> usize {
+    let mut n = 0;
+    unsafe {
+        for t in BLOB_TASKS.iter() {
+            if t.active && t.task_id != usize::MAX && n < out.len() {
+                out[n] = t.task_id;
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+pub fn is_blob_task_id(id: usize) -> bool {
+    unsafe {
+        BLOB_TASKS
+            .iter()
+            .any(|t| t.active && t.task_id == id)
+    }
+}
+
+/// Count a switch onto ppTask. `tick` is the scheduler tick counter.
+pub fn note_pp_scheduled(tick: u64) {
+    unsafe {
+        PP_RUNS = PP_RUNS.wrapping_add(1);
+        let t = tick as u32;
+        if PP_LAST_TICK != 0 {
+            let gap = t.wrapping_sub(PP_LAST_TICK);
+            if gap > PP_MAX_GAP {
+                PP_MAX_GAP = gap;
+            }
+        }
+        PP_LAST_TICK = t;
+    }
+}
+
+/// `(yield_req, yield_taken, pp_runs, pp_last_tick, pp_max_gap, phy_i2c_on)`
+pub fn rtos_compat_diag() -> (u32, u32, u32, u32, u32, u32) {
+    let i2c = (modem::lpcon_clk_conf() >> 2) & 1;
+    unsafe {
+        (
+            YIELD_FROM_ISR_REQ,
+            YIELD_FROM_ISR_TAKEN,
+            PP_RUNS,
+            PP_LAST_TICK,
+            PP_MAX_GAP,
+            i2c,
+        )
+    }
+}
+
+pub fn timer_fire_count() -> u32 {
+    unsafe { TIMER_FIRE_COUNT }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1036,7 +1236,9 @@ unsafe extern "C" fn wifi_int_restore(_wifi_int_mux: *mut c_void, tmp: u32) {
     interrupts_restore(tmp);
 }
 
-unsafe extern "C" fn task_yield_from_isr() {}
+unsafe extern "C" fn task_yield_from_isr() {
+    request_yield_from_isr();
+}
 
 unsafe extern "C" fn semphr_create(max: u32, init: u32) -> *mut c_void {
     let h = alloc_sem(max, init);
@@ -1060,6 +1262,9 @@ unsafe extern "C" fn semphr_take(semphr: *mut c_void, block_time_tick: u32) -> i
         // portMAX_DELAY (0xFFFFFFFF) → block indefinitely.
         if block_time_tick > 0 {
             SEM_TAKE_BLOCK_COUNT = SEM_TAKE_BLOCK_COUNT.wrapping_add(1);
+            if let Some(s) = get_sem(semphr) {
+                set_sem_waiter(s, sys_task_id());
+            }
             let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
                 u32::MAX
             } else {
@@ -1067,10 +1272,10 @@ unsafe extern "C" fn semphr_take(semphr: *mut c_void, block_time_tick: u32) -> i
             };
             let mut i: u32 = 0;
             loop {
-                poll_timers();
                 if let Some(s) = get_sem(semphr) {
                     if s.count > 0 {
                         s.count -= 1;
+                        set_sem_waiter(s, usize::MAX);
                         SEM_TAKE_OK_COUNT = SEM_TAKE_OK_COUNT.wrapping_add(1);
                         return 1;
                     }
@@ -1092,21 +1297,54 @@ unsafe extern "C" fn semphr_give(semphr: *mut c_void) -> i32 {
             s.count += 1;
         }
         SEM_GIVE_COUNT = SEM_GIVE_COUNT.wrapping_add(1);
+        let waiter = sem_waiter_of(s);
+        set_sem_waiter(s, usize::MAX);
+        wake_and_yield(waiter);
         return 1;
     }
     0
 }
 
-unsafe extern "C" fn wifi_thread_semphr_get() -> *mut c_void {
-    // Return a dummy semaphore.
-    static mut THREAD_SEM: usize = 0;
-    if unsafe { THREAD_SEM == 0 } {
-        let s = alloc_sem(1, 0);
-        unsafe { THREAD_SEM = s as usize };
-        s
-    } else {
-        unsafe { THREAD_SEM as *mut c_void }
+/// Gold `current_task_thread_semaphore`: counting (max=1, init=0),
+/// one handle per TCB. A shared dummy lets wifi-drv and ppTask steal
+/// each other's posts and skip the RX-arm wait.
+const MAX_THREAD_SEMS: usize = 16;
+static mut THREAD_SEMS: [*mut c_void; MAX_THREAD_SEMS] = [ptr::null_mut(); MAX_THREAD_SEMS];
+
+fn drop_thread_sem(task_id: usize) {
+    if task_id >= MAX_THREAD_SEMS {
+        return;
     }
+    let h = unsafe { THREAD_SEMS[task_id] };
+    if h.is_null() {
+        return;
+    }
+    if let Some(s) = get_sem(h) {
+        s.in_use = false;
+        s.count = 0;
+        s.owner = 0;
+        s.recursion = 0;
+    }
+    unsafe {
+        THREAD_SEMS[task_id] = ptr::null_mut();
+    }
+}
+
+unsafe extern "C" fn wifi_thread_semphr_get() -> *mut c_void {
+    let tid = sys_task_id();
+    if tid >= MAX_THREAD_SEMS {
+        return ptr::null_mut();
+    }
+    let existing = unsafe { THREAD_SEMS[tid] };
+    if !existing.is_null() {
+        return existing;
+    }
+    let s = alloc_sem(1, 0);
+    unsafe {
+        THREAD_SEMS[tid] = s;
+    }
+    osi_log(b'T', tid as u32, 0, s);
+    s
 }
 
 unsafe extern "C" fn mutex_create() -> *mut c_void {
@@ -1206,6 +1444,9 @@ unsafe extern "C" fn queue_send(
     if let Some(q) = get_queue(queue) {
         if queue_send_impl(q, item as *const c_void) {
             note_queue_send_ok(q, item);
+            let waiter = queue_waiter_of(q);
+            set_queue_waiter(q, usize::MAX);
+            wake_and_yield(waiter);
             return 1;
         }
     }
@@ -1217,10 +1458,12 @@ unsafe extern "C" fn queue_send(
         };
         let mut i: u32 = 0;
         loop {
-            poll_timers();
             if let Some(q) = get_queue(queue) {
                 if queue_send_impl(q, item as *const c_void) {
                     note_queue_send_ok(q, item);
+                    let waiter = queue_waiter_of(q);
+                    set_queue_waiter(q, usize::MAX);
+                    wake_and_yield(waiter);
                     return 1;
                 }
             }
@@ -1237,9 +1480,23 @@ unsafe extern "C" fn queue_send(
 unsafe extern "C" fn queue_send_from_isr(
     queue: *mut c_void,
     item: *mut c_void,
-    _hptw: *mut c_void,
+    hptw: *mut c_void,
 ) -> i32 {
-    queue_send(queue, item, 0)
+    // Do not call queue_send: that path ecalls wake/yield. Gold only
+    // sets hptw and yields after the FIQ.
+    if let Some(q) = get_queue(queue) {
+        if queue_send_impl(q, item as *const c_void) {
+            note_queue_send_ok(q, item);
+            let waiter = queue_waiter_of(q);
+            set_queue_waiter(q, usize::MAX);
+            record_isr_wake(waiter);
+            if !hptw.is_null() {
+                unsafe { *(hptw as *mut i32) = 1 };
+            }
+            return 1;
+        }
+    }
+    0
 }
 
 unsafe extern "C" fn queue_send_to_back(
@@ -1257,7 +1514,13 @@ unsafe extern "C" fn queue_send_to_front(
 ) -> i32 {
     // Simplified: same as send_to_back (FIFO).
     if let Some(q) = get_queue(queue) {
-        return queue_send_impl(q, item as *const c_void) as i32;
+        if queue_send_impl(q, item as *const c_void) {
+            let waiter = queue_waiter_of(q);
+            set_queue_waiter(q, usize::MAX);
+            wake_and_yield(waiter);
+            return 1;
+        }
+        return 0;
     }
     0
 }
@@ -1268,18 +1531,22 @@ unsafe extern "C" fn queue_recv(
     block_time_tick: u32,
 ) -> i32 {
     if let Some(q) = get_queue(queue) {
-        if queue_recv_impl(q, item) {
-            QUEUE_RECV_OK_COUNT = QUEUE_RECV_OK_COUNT.wrapping_add(1);
-            if !item.is_null() && q.item_size >= 4 {
-                QUEUE_RECV_LAST_TAG = core::ptr::read_unaligned(item as *const u32);
-            }
-            return 1;
-        }
+                if queue_recv_impl(q, item) {
+                    set_queue_waiter(q, usize::MAX);
+                    QUEUE_RECV_OK_COUNT = QUEUE_RECV_OK_COUNT.wrapping_add(1);
+                    if !item.is_null() && q.item_size >= 4 {
+                        QUEUE_RECV_LAST_TAG = core::ptr::read_unaligned(item as *const u32);
+                    }
+                    return 1;
+                }
     }
     // Queue empty — if blocking requested, sleep/yield and retry.
     // portMAX_DELAY (0xFFFFFFFF) → block indefinitely.
     if block_time_tick > 0 {
         QUEUE_RECV_BLOCK_COUNT = QUEUE_RECV_BLOCK_COUNT.wrapping_add(1);
+        if let Some(q) = get_queue(queue) {
+            set_queue_waiter(q, sys_task_id());
+        }
         let max_iters: u32 = if block_time_tick >= 0xFFFF_FF00 {
             u32::MAX
         } else {
@@ -1287,9 +1554,9 @@ unsafe extern "C" fn queue_recv(
         };
         let mut i: u32 = 0;
         loop {
-            poll_timers();
             if let Some(q) = get_queue(queue) {
                 if queue_recv_impl(q, item) {
+                    set_queue_waiter(q, usize::MAX);
                     QUEUE_RECV_OK_COUNT = QUEUE_RECV_OK_COUNT.wrapping_add(1);
                     if !item.is_null() && q.item_size >= 4 {
                         QUEUE_RECV_LAST_TAG = core::ptr::read_unaligned(item as *const u32);
@@ -1396,7 +1663,6 @@ unsafe extern "C" fn event_group_wait_bits(
                 }
                 return val;
             }
-            poll_timers();
             sys_sleep(1);
             i = i.wrapping_add(1);
             if max_iters != u32::MAX && i >= max_iters {
@@ -1413,12 +1679,16 @@ unsafe extern "C" fn event_group_wait_bits(
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_BLOB_TASKS: usize = 4;
-const BLOB_TASK_STACK_SIZE: usize = 8192;
+/// Gold: requested size + 6 KiB, 16-byte aligned. 8 KiB static overflowed.
+const BLOB_STACK_EXTRA: usize = 6 * 1024;
+const BLOB_STACK_MIN: usize = 16 * 1024;
+const BLOB_STACK_MAX: usize = 24 * 1024;
 
 struct BlobTask {
     func: unsafe extern "C" fn(*mut c_void),
     param: *mut c_void,
-    stack: [u8; BLOB_TASK_STACK_SIZE],
+    stack: *mut u8,
+    stack_len: usize,
     active: bool,
     task_id: usize,
 }
@@ -1427,11 +1697,23 @@ static mut BLOB_TASKS: [BlobTask; MAX_BLOB_TASKS] = [const {
     BlobTask {
         func: dummy_task_fn,
         param: ptr::null_mut(),
-        stack: [0; BLOB_TASK_STACK_SIZE],
+        stack: ptr::null_mut(),
+        stack_len: 0,
         active: false,
         task_id: usize::MAX,
     }
 }; MAX_BLOB_TASKS];
+
+fn blob_stack_bytes(stack_depth: u32) -> usize {
+    let mut sz = (stack_depth as usize).saturating_add(BLOB_STACK_EXTRA);
+    if sz < BLOB_STACK_MIN {
+        sz = BLOB_STACK_MIN;
+    }
+    if sz > BLOB_STACK_MAX {
+        sz = BLOB_STACK_MAX;
+    }
+    (sz + 15) & !15
+}
 
 /// Which blob task slot is currently executing on this core.
 static mut CURRENT_BLOB_TASK: usize = usize::MAX;
@@ -1481,6 +1763,37 @@ fn sys_yield() {}
 
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
+fn sys_task_wake(task_id: usize) {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") task_id,
+            in("a7") 0x0Dusize, // SYS_TASK_WAKE
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+#[inline(always)]
+fn sys_task_wake(_task_id: usize) {}
+
+/// Gold queue/sem give: ready the waiter. SYS_TASK_WAKE reschedules
+/// only if that task outranks the caller (ppTask ~23 vs wifi-drv 2).
+/// From the blob ISR this only records the waiter — ecall would nest.
+fn wake_and_yield(waiter: usize) {
+    if waiter == usize::MAX || waiter >= 16 {
+        return;
+    }
+    if in_wifi_isr() {
+        record_isr_wake(waiter);
+        return;
+    }
+    sys_task_wake(waiter);
+}
+
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
 fn sys_sleep(ticks: usize) {
     unsafe {
         core::arch::asm!(
@@ -1526,6 +1839,7 @@ unsafe fn run_blob_task(idx: usize) -> ! {
         let t = &BLOB_TASKS[idx];
         (t.func, t.param)
     };
+    osi_log(b'R', func as u32, param as u32, func as *mut c_void);
     unsafe { func(param) };
     unsafe { BLOB_TASKS[idx].active = false };
     loop {
@@ -1533,15 +1847,49 @@ unsafe fn run_blob_task(idx: usize) -> ! {
     }
 }
 
+/// rustc 1.95 / LLVM 22 turns the old `fn() -> ! { run_blob_task(n) }`
+/// wrappers into a mid-function `jalr` and hands that address to spawn.
+/// A fresh TCB has `ra=0`, so the first instruction is an unmapped jump.
+unsafe extern "C" fn run_blob_task_c(idx: usize) -> ! {
+    unsafe { run_blob_task(idx) }
+}
+
+#[cfg(target_arch = "riscv32")]
+macro_rules! blob_entry {
+    ($name:ident, $idx:tt) => {
+        #[unsafe(naked)]
+        unsafe extern "C" fn $name() -> ! {
+            core::arch::naked_asm!(
+                concat!("li a0, ", $idx),
+                "j {run}",
+                run = sym run_blob_task_c,
+            );
+        }
+    };
+}
+
+#[cfg(target_arch = "riscv32")]
+blob_entry!(blob_task_entry0, 0);
+#[cfg(target_arch = "riscv32")]
+blob_entry!(blob_task_entry1, 1);
+#[cfg(target_arch = "riscv32")]
+blob_entry!(blob_task_entry2, 2);
+#[cfg(target_arch = "riscv32")]
+blob_entry!(blob_task_entry3, 3);
+
+#[cfg(not(target_arch = "riscv32"))]
 unsafe extern "C" fn blob_task_entry0() -> ! {
     unsafe { run_blob_task(0) }
 }
+#[cfg(not(target_arch = "riscv32"))]
 unsafe extern "C" fn blob_task_entry1() -> ! {
     unsafe { run_blob_task(1) }
 }
+#[cfg(not(target_arch = "riscv32"))]
 unsafe extern "C" fn blob_task_entry2() -> ! {
     unsafe { run_blob_task(2) }
 }
+#[cfg(not(target_arch = "riscv32"))]
 unsafe extern "C" fn blob_task_entry3() -> ! {
     unsafe { run_blob_task(3) }
 }
@@ -1573,22 +1921,39 @@ fn blob_task_yield() {
 unsafe extern "C" fn task_create_pinned_to_core(
     task_func: *mut c_void,
     _name: *const c_char,
-    _stack_depth: u32,
+    stack_depth: u32,
     param: *mut c_void,
     _prio: u32,
     task_handle: *mut c_void,
     _core_id: u32,
 ) -> i32 {
-    // Register blob task in a slot and spawn a real scheduler task for it.
+    // Gold: heap stack, 16-byte top, +6 KiB, then the new task runs
+    // before create() returns. Copy gp in SYS_SPAWN so this trampoline
+    // can read BLOB_TASKS (gp=0 was the `!E01@80` path).
     for i in 0..MAX_BLOB_TASKS {
         let t = unsafe { &mut BLOB_TASKS[i] };
         if !t.active {
+            let sz = blob_stack_bytes(stack_depth);
+            let raw = malloc_traced(sz) as *mut u8;
+            if raw.is_null() {
+                return 0;
+            }
             t.func = unsafe { core::mem::transmute(task_func) };
             t.param = param;
+            osi_log(b'F', task_func as u32, param as u32, task_func);
+            t.stack = raw;
+            t.stack_len = sz;
             t.active = true;
-            let sb = t.stack.as_ptr() as usize;
-            let st = sb + BLOB_TASK_STACK_SIZE;
-            let child = sys_spawn(blob_task_entry_for(i), st, sb, _prio as usize);
+            let sb = raw as usize;
+            let st = (sb + sz) & !15;
+            // Gold ppTask is ~23 (max-2). A raw blob prio of 1 loses every
+            // pick_next to wifi-drv (2), so spawn-yield never enters the
+            // RX-arm path during wifi::new.
+            let prio = (_prio as usize).max(23);
+            let entry = blob_task_entry_for(i);
+            osi_log(b'P', _prio, prio as u32, raw as *mut c_void);
+            osi_log(b'E', entry as u32, st as u32, raw as *mut c_void);
+            let child = sys_spawn(entry, st, sb, prio);
             t.task_id = child;
             if !task_handle.is_null() {
                 unsafe { *(task_handle as *mut usize) = child };
@@ -1596,11 +1961,15 @@ unsafe extern "C" fn task_create_pinned_to_core(
             if child == usize::MAX {
                 t.active = false;
                 t.task_id = usize::MAX;
+                t.stack = ptr::null_mut();
+                t.stack_len = 0;
+                unsafe { super::heap::free(raw as *mut c_void) };
                 return 0;
             }
             unsafe {
                 BLOB_TASKS_SPAWNED += 1;
             }
+            sys_yield();
             return 1;
         }
     }
@@ -1622,8 +1991,54 @@ unsafe extern "C" fn task_create(
     task_create_pinned_to_core(task_func, name, stack_depth, param, prio, task_handle, 0)
 }
 
-unsafe extern "C" fn task_delete(_task_handle: *mut c_void) {
-    // No task-kill syscall yet.
+#[cfg(target_arch = "riscv32")]
+fn sys_task_delete(task_id: usize) -> usize {
+    let ret: usize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") task_id,
+            in("a7") 0x0Cusize, // SYS_TASK_DELETE
+            lateout("a0") ret,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+fn sys_task_delete(_task_id: usize) -> usize {
+    0
+}
+
+unsafe extern "C" fn task_delete(task_handle: *mut c_void) {
+    // Gold `schedule_task_deletion`: null handle deletes the caller.
+    let id = if task_handle.is_null() {
+        usize::MAX
+    } else {
+        task_handle as usize
+    };
+    let match_id = if id == usize::MAX {
+        sys_task_id()
+    } else {
+        id
+    };
+    for t in unsafe { BLOB_TASKS.iter_mut() } {
+        if t.active && t.task_id == match_id {
+            t.active = false;
+            t.func = dummy_task_fn;
+            t.param = ptr::null_mut();
+            t.task_id = usize::MAX;
+            if !t.stack.is_null() {
+                unsafe { super::heap::free(t.stack as *mut c_void) };
+                t.stack = ptr::null_mut();
+                t.stack_len = 0;
+            }
+            drop_thread_sem(match_id);
+            break;
+        }
+    }
+    let _ = sys_task_delete(id);
 }
 
 unsafe extern "C" fn task_delay(tick: u32) {
@@ -1640,7 +2055,7 @@ unsafe extern "C" fn task_get_current_task() -> *mut c_void {
 }
 
 unsafe extern "C" fn task_get_max_priority() -> i32 {
-    25
+    31
 }
 
 unsafe extern "C" fn osi_malloc(size: usize) -> *mut c_void {
@@ -1651,13 +2066,62 @@ unsafe extern "C" fn osi_free(p: *mut c_void) {
     unsafe { super::heap::free(p) }
 }
 
+const WIFI_EVENT_SCAN_DONE: i32 = 1;
+const WIFI_EVENT_STA_START: i32 = 2;
+const WIFI_EVENT_STA_STOP: i32 = 3;
 const WIFI_EVENT_STA_CONNECTED: i32 = 4;
 const WIFI_EVENT_STA_DISCONNECTED: i32 = 5;
+const WIFI_EVENT_AP_START: i32 = 12;
+const WIFI_EVENT_AP_STOP: i32 = 13;
+const WIFI_EVENT_AP_STACONNECTED: i32 = 14;
+const WIFI_EVENT_AP_STADISCONNECTED: i32 = 15;
+
+/// Gold `enable_wifi_events` set from `wifi::new`.
+const GOLD_WIFI_EVENT_MASK: u32 = (1u32 << WIFI_EVENT_SCAN_DONE as u32)
+    | (1u32 << WIFI_EVENT_STA_START as u32)
+    | (1u32 << WIFI_EVENT_STA_STOP as u32)
+    | (1u32 << WIFI_EVENT_STA_CONNECTED as u32)
+    | (1u32 << WIFI_EVENT_STA_DISCONNECTED as u32)
+    | (1u32 << WIFI_EVENT_AP_START as u32)
+    | (1u32 << WIFI_EVENT_AP_STOP as u32)
+    | (1u32 << WIFI_EVENT_AP_STACONNECTED as u32)
+    | (1u32 << WIFI_EVENT_AP_STADISCONNECTED as u32);
 
 static mut WIFI_STA_CONNECTED: bool = false;
+static mut WIFI_EVENT_ENABLE_MASK: u32 = 0;
+static mut WIFI_EVENT_BITS: u32 = 0;
 
 pub fn wifi_sta_got_connected() -> bool {
     unsafe { WIFI_STA_CONNECTED }
+}
+
+/// Gold `event::enable_wifi_events(...)` — called from `wifi::new` before init.
+pub fn enable_wifi_events() {
+    unsafe {
+        WIFI_EVENT_ENABLE_MASK = GOLD_WIFI_EVENT_MASK;
+        WIFI_EVENT_BITS = 0;
+    }
+}
+
+/// Wait for a posted Wi-Fi event (gold `scan_async` / `EVENT_CHANNEL`).
+pub fn wait_wifi_event(event_id: i32, timeout_ms: u32) -> bool {
+    if !(0..32).contains(&event_id) {
+        return false;
+    }
+    let bit = 1u32 << event_id;
+    let deadline = systimer::now_us().saturating_add(timeout_ms as u64 * 1000);
+    loop {
+        unsafe {
+            if WIFI_EVENT_BITS & bit != 0 {
+                WIFI_EVENT_BITS &= !bit;
+                return true;
+            }
+        }
+        if systimer::now_us() >= deadline {
+            return false;
+        }
+        sys_sleep(1);
+    }
 }
 
 unsafe extern "C" fn event_post(
@@ -1669,6 +2133,13 @@ unsafe extern "C" fn event_post(
 ) -> i32 {
     EVENT_POST_COUNT = EVENT_POST_COUNT.wrapping_add(1);
     EVENT_POST_LAST_ID = event_id;
+    if (0..32).contains(&event_id) {
+        let bit = 1u32 << event_id;
+        let mask = WIFI_EVENT_ENABLE_MASK;
+        if mask == 0 || (mask & bit) != 0 {
+            WIFI_EVENT_BITS |= bit;
+        }
+    }
     if event_id == WIFI_EVENT_STA_CONNECTED {
         WIFI_STA_CONNECTED = true;
     } else if event_id == WIFI_EVENT_STA_DISCONNECTED {
@@ -1690,31 +2161,15 @@ unsafe extern "C" fn dport_access_stall_other_cpu_end_wrap() {}
 unsafe extern "C" fn wifi_apb80m_request() {}
 unsafe extern "C" fn wifi_apb80m_release() {}
 
-/// Run PHY calibration early (before `esp_wifi_init_internal`), matching
-/// esp-wifi / ESP-IDF init order.  When the blob later calls `phy_enable()`
-/// from ppTask it will find `PHY_CALIBRATED == true` and take the fast
-/// `phy_wakeup_init()` path instead of blocking in `register_chipv7_phy`.
-pub fn early_phy_init() {
+fn populate_phy_romfuncs() {
+    extern "C" {
+        fn phy_get_romfuncs() -> *const u32;
+        fn phy_get_romfunc_addr();
+        static mut g_phyFuns: *const u32;
+    }
     unsafe {
-        if PHY_CALIBRATED {
-            return;
-        }
-
-        phy_trace(b'0');
-
-        // Populate g_phyFuns — the PHY blob's ROM function table.
-        extern "C" {
-            fn phy_get_romfuncs() -> *const u32;
-            fn phy_get_romfunc_addr();
-            static mut g_phyFuns: *const u32;
-        }
         phy_get_romfunc_addr();
         g_phyFuns = phy_get_romfuncs();
-        phy_trace(b'1');
-
-        // Gold does not re-init radio clocks or run cal here. First
-        // `phy_enable` from ppTask does I2C + register_chipv7_phy.
-        phy_trace(b'3');
     }
 }
 
@@ -1743,6 +2198,9 @@ unsafe extern "C" fn phy_enable() {
     // PhyClockGuard is mem::forget'd), bbpll USB, then register_chipv7_phy.
     // It does not re-run init_radio_clocks / enable_wifi / phy_wifi_enable_set.
     modem::enable_phy_clock();
+    // Gold first `phy_enable` (not a pre-init hook) fills g_phyFuns,
+    // enables USB BBPLL, then `register_chipv7_phy`.
+    populate_phy_romfuncs();
     extern "C" {
         fn phy_bbpll_en_usb(enable: bool);
     }
@@ -1767,6 +2225,8 @@ unsafe extern "C" fn phy_enable() {
     }
 
     phy_trace(b'4');
+    // Gold mem::forget(PhyClockGuard) — keep I2C up for the whole session.
+    modem::enable_phy_clock();
     unsafe { PHY_ENABLED = true };
 }
 
@@ -1887,9 +2347,7 @@ unsafe extern "C" fn wifi_clock_enable() {
 }
 
 unsafe extern "C" fn wifi_clock_disable() {
-    // Gold implements enable_wifi(false) here. This blob never calls the
-    // callback during start (OSId=0); actually ungating clocks collapsed
-    // MAC ISRs when tested from other paths, so keep the no-op.
+    modem::disable_wifi_clocks();
 }
 
 unsafe extern "C" fn wifi_rtc_enable_iso() {}

@@ -169,7 +169,7 @@ pub unsafe fn dispatch(
     let required_cap = match nr {
         // Task basics: yield, exit, task_id, priority, count, tls
         SYS_YIELD | SYS_EXIT | SYS_TASK_ID | SYS_TASK_PRIORITY | SYS_TASK_COUNT | SYS_TLS_GET
-        | SYS_TLS_SET => ProcessCaps::TASK_BASIC,
+        | SYS_TLS_SET | SYS_TASK_DELETE | SYS_TASK_WAKE => ProcessCaps::TASK_BASIC,
 
         // Thread/process spawning
         SYS_SPAWN | SYS_JOIN => ProcessCaps::SPAWN_THREAD,
@@ -350,6 +350,70 @@ pub unsafe fn dispatch(
             SyscallAction::TaskExited
         }
 
+        SYS_TASK_DELETE => {
+            let target = if a0 == usize::MAX {
+                sched.current
+            } else {
+                a0
+            };
+            if target >= sched.tasks.len() || sched.tasks[target].state == TaskState::Free {
+                c.set_ret(0, usize::MAX);
+                SyscallAction::Resume
+            } else {
+                let pid = sched.tasks[target].process_id;
+                sched.tasks[target].exit_code = 0;
+                sched.tasks[target].state = TaskState::Free;
+                sched.tasks[target].block_reason = BlockReason::None;
+                sched.tasks[target].wakeup_tick = 0;
+                sched.tasks[target].join_target = usize::MAX;
+                sched.tasks[target].context.set_pc(0);
+                processes.thread_exited(pid, 0);
+                for i in 0..sched.tasks.len() {
+                    if sched.tasks[i].state == TaskState::Blocked
+                        && sched.tasks[i].block_reason == BlockReason::Join
+                        && sched.tasks[i].join_target == target
+                    {
+                        sched.tasks[i].state = TaskState::Ready;
+                        sched.tasks[i].block_reason = BlockReason::None;
+                        sched.tasks[i].join_target = usize::MAX;
+                        sched.tasks[i].context.set_ret(0, 0);
+                    }
+                }
+                if target == sched.current {
+                    SyscallAction::TaskExited
+                } else {
+                    c.set_ret(0, 0);
+                    SyscallAction::Resume
+                }
+            }
+        }
+
+        SYS_TASK_WAKE => {
+            if a0 < sched.tasks.len() && sched.tasks[a0].state == TaskState::Blocked {
+                sched.tasks[a0].state = TaskState::Ready;
+                sched.tasks[a0].block_reason = BlockReason::None;
+                sched.tasks[a0].wakeup_tick = 0;
+                c.set_ret(0, 0);
+                let cur = sched.current;
+                let pc = sched.tasks[a0].context.get_pc();
+                if a0 != cur
+                    && cur < sched.tasks.len()
+                    && sched.tasks[a0].priority > sched.tasks[cur].priority
+                    && pc >= 0x4000_0000
+                {
+                    if sched.tasks[cur].state == TaskState::Running {
+                        sched.tasks[cur].state = TaskState::Ready;
+                    }
+                    SyscallAction::Reschedule
+                } else {
+                    SyscallAction::Resume
+                }
+            } else {
+                c.set_ret(0, usize::MAX);
+                SyscallAction::Resume
+            }
+        }
+
         SYS_TASK_ID => {
             c.set_ret(0, sched.current);
             SyscallAction::Resume
@@ -404,6 +468,12 @@ pub unsafe fn dispatch(
                     // that execute from kernel-managed IROM without per-process mappings.
                     let parent_status = c.get_status();
                     sched.tasks[child_id].context.set_status(parent_status);
+                    // Gold new_task_context keeps the caller's GP. Zero GP
+                    // makes the blob trampoline load BLOB_TASKS from 0x0+off.
+                    #[cfg(target_arch = "riscv32")]
+                    {
+                        sched.tasks[child_id].context.gpr[3] = c.gpr[3];
+                    }
                     sched.tasks[child_id].parent = parent;
                     // Bump parent process's thread count.
                     if parent_pid < crate::process::MAX_PROCESSES {

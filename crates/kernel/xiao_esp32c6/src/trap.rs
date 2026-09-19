@@ -9,7 +9,7 @@
 #[allow(unused_imports)]
 use arch::riscv32::pmp;
 #[allow(unused_imports)]
-use arch::{TaskContext, TickTimer};
+use arch::{SavedContext, TaskContext, TickTimer};
 #[allow(unused_imports)]
 use microkernel::dispatch::{self, SyscallAction};
 #[allow(unused_imports)]
@@ -75,6 +75,14 @@ unsafe fn apply_pmp_for_current(sched: &Scheduler) {
     }
 }
 
+/// Refuse a switch to a TCB whose PC is not in mapped code (saw `!E01@80`).
+fn task_pc_runnable(sched: &Scheduler, idx: usize) -> bool {
+    if idx >= sched.tasks.len() {
+        return false;
+    }
+    sched.tasks[idx].context.get_pc() >= 0x4000_0000
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Rust trap dispatcher (riscv32 only — host builds skip this)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -129,10 +137,68 @@ unsafe fn handle_interrupt(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                 unsafe {
                     core::arch::asm!("csrc mie, {0}", in(reg) mask, options(nomem, nostack));
                 }
+                return ctx;
+            }
+            // Gold: yield_from_isr → rtos switches to the woken task
+            // (ppTask) after the FIQ. Do that here via the saved frame;
+            // never ecall or run blob task code on the ISR stack.
+            if soc_esp32::wifi_os_adapter::take_yield_from_isr() {
+                return switch_to_wifi_blob(ctx);
             }
             ctx
         }
     }
+}
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn switch_to_wifi_blob(ctx: *mut TaskContext) -> *mut TaskContext {
+    use microkernel::task::TaskState;
+    let sched: &mut Scheduler = unsafe { &mut *SCHEDULER.0.get() };
+    sched.save_current_context(unsafe { &*ctx });
+    if sched.current < sched.tasks.len() && sched.tasks[sched.current].state == TaskState::Running {
+        sched.tasks[sched.current].state = TaskState::Ready;
+    }
+    let prev = sched.current;
+    // Gold yield wakes the blocked receiver (ppTask), then switches to it.
+    let mut ids = [usize::MAX; 4];
+    let n = soc_esp32::wifi_os_adapter::blob_task_ids(&mut ids);
+    for i in 0..n {
+        let id = ids[i];
+        if id < sched.tasks.len() && sched.tasks[id].state == TaskState::Blocked {
+            sched.tasks[id].state = TaskState::Ready;
+            sched.tasks[id].block_reason = microkernel::task::BlockReason::None;
+        }
+    }
+    let mut wakes = [usize::MAX; 4];
+    let wn = soc_esp32::wifi_os_adapter::take_isr_wake_tasks(&mut wakes);
+    for i in 0..wn {
+        let id = wakes[i];
+        if id < sched.tasks.len() && sched.tasks[id].state == TaskState::Blocked {
+            sched.tasks[id].state = TaskState::Ready;
+            sched.tasks[id].block_reason = microkernel::task::BlockReason::None;
+        }
+    }
+    let next = soc_esp32::wifi_os_adapter::first_ready_blob_task(|id| {
+        id < sched.tasks.len() && sched.tasks[id].state == TaskState::Ready
+    })
+    .or_else(|| sched.pick_next());
+    if let Some(next) = next {
+        if !task_pc_runnable(sched, next) {
+            return ctx;
+        }
+        sched.current = next;
+        sched.tasks[next].state = TaskState::Running;
+        if soc_esp32::wifi_os_adapter::is_blob_task_id(next)
+            && !soc_esp32::wifi_os_adapter::is_blob_task_id(prev)
+        {
+            soc_esp32::wifi_os_adapter::note_pp_scheduled(sched.ticks);
+        }
+        apply_pmp_for_current(sched);
+        if let Some(new_ctx) = sched.current_context_mut() {
+            return new_ctx as *mut TaskContext;
+        }
+    }
+    ctx
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -142,9 +208,12 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext) -> *mut TaskContext {
 
     let sched: &mut Scheduler = unsafe { &mut *SCHEDULER.0.get() };
     sched.save_current_context(unsafe { &*ctx });
+    let prev = sched.current;
 
-    let need_switch = sched.tick();
+    // Gold: expire timers / wake waiters first, then pick the highest
+    // ready task. Waking after pick left ppTask Blocked for an extra tick.
     dispatch::wake_sleepers(sched);
+    let need_switch = sched.tick();
 
     // Wake poll-blocked tasks whose events fired or timeout expired.
     let ipc = unsafe { &*IPC.0.get() };
@@ -153,9 +222,16 @@ unsafe fn handle_timer_tick(ctx: *mut TaskContext) -> *mut TaskContext {
     microkernel::poll::wake_poll_waiters(poll, sched, ipc, channels);
 
     if need_switch {
-        apply_pmp_for_current(sched);
-        if let Some(new_ctx) = sched.current_context_mut() {
-            return new_ctx as *mut TaskContext;
+        if task_pc_runnable(sched, sched.current) {
+            apply_pmp_for_current(sched);
+            if let Some(new_ctx) = sched.current_context_mut() {
+                return new_ctx as *mut TaskContext;
+            }
+        }
+        sched.current = prev;
+        if prev < sched.tasks.len() {
+            use microkernel::task::TaskState;
+            sched.tasks[prev].state = TaskState::Running;
         }
     }
     ctx
@@ -223,6 +299,9 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                     // Save AFTER dispatch so pc+4 and any gpr writes are captured.
                     sched.save_current_context(unsafe { &*ctx });
                     if let Some(next) = sched.pick_next() {
+                        if !task_pc_runnable(sched, next) {
+                            return ctx;
+                        }
                         use microkernel::task::TaskState;
                         sched.current = next;
                         sched.tasks[next].state = TaskState::Running;
@@ -259,6 +338,35 @@ unsafe fn handle_exception(ctx: *mut TaskContext, code: usize) -> *mut TaskConte
                 });
             }
             crate::console_write_byte(b'\n');
+            unsafe {
+                let sched = &*SCHEDULER.0.get();
+                let ra = (*ctx).gpr[1] as u32;
+                let gp = (*ctx).gpr[3] as u32;
+                let a0 = (*ctx).gpr[10] as u32;
+                crate::console_write_byte(b'X');
+                crate::console_write_byte(b' ');
+                fn hex_u32(v: u32) {
+                    for shift in (0..8).rev() {
+                        let nib = ((v >> (shift * 4)) & 0xF) as u8;
+                        crate::console_write_byte(if nib < 10 {
+                            b'0' + nib
+                        } else {
+                            b'a' + nib - 10
+                        });
+                    }
+                    crate::console_write_byte(b' ');
+                }
+                hex_u32(sched.current as u32);
+                hex_u32(ra);
+                hex_u32(gp);
+                hex_u32(a0);
+                for i in 0..6 {
+                    if i < sched.tasks.len() {
+                        hex_u32(sched.tasks[i].context.get_pc() as u32);
+                    }
+                }
+                crate::console_write_byte(b'\n');
+            }
             // Flush USB Serial JTAG so bytes reach the host
             unsafe {
                 let usb_base: usize = 0x6000_F000;

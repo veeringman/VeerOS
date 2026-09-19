@@ -86,6 +86,17 @@ pub const SYS_TLS_GET: usize = 0x0A;
 ///   a0 = TLS base address
 pub const SYS_TLS_SET: usize = 0x0B;
 
+/// Delete a task (gold `task_delete` / `schedule_task_deletion`).
+///   a0 = task ID, or `usize::MAX` to delete the caller.
+/// Returns: a0 = 0 on success, `usize::MAX` if the slot is empty.
+/// Deleting the current task does not return (`TaskExited`).
+pub const SYS_TASK_DELETE: usize = 0x0C;
+
+/// Ready a blocked task (gold queue/sem wake).
+///   a0 = task ID
+/// Returns: a0 = 0 on success, `usize::MAX` if the slot is not blocked.
+pub const SYS_TASK_WAKE: usize = 0x0D;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // IPC (0x10–0x1F)
 // ═══════════════════════════════════════════════════════════════════════════

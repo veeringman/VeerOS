@@ -7,6 +7,8 @@
 //! These constants are derived from the ESP32-C6 Technical Reference
 //! Manual and are used by userspace driver tasks via MMIO syscalls.
 
+use core::fmt::{self, Write};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Modem clock / power control
 // ═══════════════════════════════════════════════════════════════════════════
@@ -300,6 +302,24 @@ const PMU_HP_SLEEP_ICG_MODEM: usize = PMU_BASE + 0x74;
 const PMU_IMM_SLEEP_SYSCLK: usize = PMU_BASE + 0xD0;
 /// PMU immediate modem ICG — bit 31 = update_dig_icg_modem_en.
 const PMU_IMM_MODEM_ICG: usize = PMU_BASE + 0xDC;
+/// Immediate HP clock power (write-trigger). Gold `enable_pll_clk_impl`.
+const PMU_IMM_HP_CK_POWER: usize = PMU_BASE + 0xCC;
+
+const I2C_ANA_MST_BASE: usize = 0x600A_F800;
+const I2C_ANA_CTRL0: usize = I2C_ANA_MST_BASE;
+const I2C_ANA_CTRL1: usize = I2C_ANA_MST_BASE + 0x04;
+const I2C_ANA_CONF0: usize = I2C_ANA_MST_BASE + 0x18;
+const I2C_ANA_CONF1: usize = I2C_ANA_MST_BASE + 0x1C;
+const I2C_ANA_CONF2: usize = I2C_ANA_MST_BASE + 0x20;
+const PCR_SYSCLK_CONF: usize = 0x6009_6110;
+const PCR_CPU_FREQ_CONF: usize = 0x6009_6118;
+
+const REGI2C_BBPLL: u8 = 0x66;
+const BBPLL_OC_REF: u8 = 2;
+const BBPLL_OC_DIV: u8 = 3;
+const BBPLL_OC_DR: u8 = 5;
+const BBPLL_REG6: u8 = 6;
+const BBPLL_REG9: u8 = 9;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MODEM_SYSCON register offsets (from MODEM_SYSCON_BASE = 0x600A_9800)
@@ -344,6 +364,38 @@ pub unsafe fn mmio_read(addr: usize) -> u32 {
 #[inline(always)]
 pub unsafe fn mmio_write(addr: usize, val: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
+}
+
+/// Gold `esp_hal::soc::esp32c6::pre_init`: APM path filters default to
+/// TEE-only. Wi-Fi MAC DMA is REE, so it cannot write the RX ring until
+/// these are cleared. `func_ctrl` is +0xC4 on each block.
+#[cfg(feature = "c6")]
+const HP_APM_FUNC: usize = 0x6009_90C4;
+#[cfg(feature = "c6")]
+const LP_APM0_FUNC: usize = 0x6009_98C4;
+#[cfg(feature = "c6")]
+const LP_APM_FUNC: usize = 0x600B_38C4;
+
+#[cfg(feature = "c6")]
+pub fn apm_func_ctrl() -> (u32, u32, u32) {
+    unsafe {
+        (
+            mmio_read(HP_APM_FUNC),
+            mmio_read(LP_APM0_FUNC),
+            mmio_read(LP_APM_FUNC),
+        )
+    }
+}
+
+#[cfg(feature = "c6")]
+pub fn disable_apm_filters() -> (u32, u32, u32) {
+    let before = apm_func_ctrl();
+    unsafe {
+        mmio_write(HP_APM_FUNC, 0);
+        mmio_write(LP_APM0_FUNC, 0);
+        mmio_write(LP_APM_FUNC, 0);
+    }
+    before
 }
 
 /// Gold never writes MODEM_LPCON+0x00 (`TEST_CONF`). We used to OR
@@ -391,10 +443,280 @@ pub fn init_radio_clocks() {
     }
 }
 
+/// Live MODEM_LPCON CLK_CONF (`+0x18`). Bit 2 = `clk_i2c_mst_en`.
+pub fn lpcon_clk_conf() -> u32 {
+    unsafe { mmio_read(MODEM_LPCON_CLK_CONF) }
+}
+
+fn spin_iters(n: u32) {
+    for _ in 0..n {
+        core::hint::spin_loop();
+    }
+}
+
+fn regi2c_bbpll_master() -> usize {
+    unsafe {
+        let conf2 = mmio_read(I2C_ANA_CONF2);
+        // ana_conf2.bbpll_mst_sel (bit 9): 1 → I2C0, 0 → I2C1
+        if (conf2 & (1 << 9)) != 0 {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+fn regi2c_enable_bbpll() -> usize {
+    enable_phy_clock();
+    unsafe {
+        // Gold: write 0x00FFFFFF then clear bbpll_rd (bit 7).
+        mmio_write(I2C_ANA_CONF1, 0x00FF_FF7F);
+    }
+    regi2c_bbpll_master()
+}
+
+fn regi2c_wait(master: usize) {
+    let ctrl = if master == 0 {
+        I2C_ANA_CTRL0
+    } else {
+        I2C_ANA_CTRL1
+    };
+    unsafe {
+        for _ in 0..100_000u32 {
+            if (mmio_read(ctrl) & (1 << 25)) == 0 {
+                return;
+            }
+        }
+    }
+}
+
+fn regi2c_write(reg: u8, data: u8) {
+    let master = regi2c_enable_bbpll();
+    let ctrl = if master == 0 {
+        I2C_ANA_CTRL0
+    } else {
+        I2C_ANA_CTRL1
+    };
+    unsafe {
+        mmio_write(
+            ctrl,
+            u32::from(REGI2C_BBPLL)
+                | (u32::from(reg) << 8)
+                | (u32::from(data) << 16)
+                | (1 << 24),
+        );
+    }
+    regi2c_wait(master);
+}
+
+fn regi2c_read(reg: u8) -> u8 {
+    let master = regi2c_enable_bbpll();
+    let ctrl = if master == 0 {
+        I2C_ANA_CTRL0
+    } else {
+        I2C_ANA_CTRL1
+    };
+    unsafe {
+        mmio_write(ctrl, u32::from(REGI2C_BBPLL) | (u32::from(reg) << 8));
+    }
+    regi2c_wait(master);
+    unsafe { ((mmio_read(ctrl) >> 16) & 0xFF) as u8 }
+}
+
+/// Gold C6 `esp_hal` `enable_pll_clk_impl`: analog BBPLL power + I2C
+/// programming + calibration. VeerOS previously only *read* `SOC_CLK_SEL`.
+///
+/// Returns 1 if `I2C_ANA_MST.ana_conf0.cal_done` latched, else 0.
+pub fn enable_bbpll() -> u32 {
+    unsafe {
+        enable_phy_clock();
+
+        // Recalibrating BBPLL while the CPU is on SPLL can stall the core.
+        // Drop to XTAL for the analog sequence, then restore.
+        let sys = mmio_read(PCR_SYSCLK_CONF);
+        let prev_sel = (sys >> 16) & 3;
+        if prev_sel != 0 {
+            mmio_write(PCR_SYSCLK_CONF, (sys & !(0x3 << 16)) | (0 << 16));
+            spin_iters(800);
+        }
+
+        // Write-trigger: power analog BBPLL + I2C (gold order).
+        let p = mmio_read(PMU_IMM_HP_CK_POWER);
+        mmio_write(
+            PMU_IMM_HP_CK_POWER,
+            p | (1 << 28) | (1 << 29) | (1 << 30),
+        );
+        let p = mmio_read(PMU_IMM_HP_CK_POWER);
+        mmio_write(PMU_IMM_HP_CK_POWER, p | (1 << 25));
+
+        // BBPLL calibration start: force_high=0, force_low=1.
+        let a0 = mmio_read(I2C_ANA_CONF0);
+        mmio_write(I2C_ANA_CONF0, (a0 & !(1 << 2)) | (1 << 3));
+
+        // Gold constants: DIV_REF=0, DCHGP=5, DCUR=3, DIV=8, DR1=0, DR3=0, VCO_DBIAS=2.
+        regi2c_write(BBPLL_OC_REF, 0x50);
+        regi2c_write(BBPLL_OC_DIV, 8);
+        let dr = regi2c_read(BBPLL_OC_DR);
+        regi2c_write(BBPLL_OC_DR, dr & !0x77);
+        regi2c_write(BBPLL_REG6, 0x73);
+        let r9 = regi2c_read(BBPLL_REG9);
+        regi2c_write(BBPLL_REG9, (r9 & !0x03) | 0x02);
+
+        let mut done = 0u32;
+        for _ in 0..1_000_000u32 {
+            if (mmio_read(I2C_ANA_CONF0) & (1 << 24)) != 0 {
+                done = 1;
+                break;
+            }
+        }
+        // Gold `ets_delay_us(10)` workaround: cal may assert early.
+        spin_iters(800);
+
+        let a0 = mmio_read(I2C_ANA_CONF0);
+        mmio_write(I2C_ANA_CONF0, (a0 | (1 << 2)) & !(1 << 3));
+
+        // Gold PRESET_160: cpu_hs_div_num=0 → CPU = SPLL/1 = 160 MHz.
+        // VeerOS reset/bootloader left 0x100 (div=1 → 80 MHz).
+        apply_gold_cpu_clock();
+
+        // Gold I2C DIG_REG[13] = 0x42 (XPD_DIG/XPD_RTC clear). We read 0x4e.
+        regi2c_write_block(0x6d, 13, 0x42);
+
+        if prev_sel != 0 {
+            let sys = mmio_read(PCR_SYSCLK_CONF);
+            mmio_write(PCR_SYSCLK_CONF, (sys & !(0x3 << 16)) | (prev_sel << 16));
+            spin_iters(800);
+        }
+
+        done
+    }
+}
+
+/// Gold `CpuClock::_160MHz`: `cpu_hs_div_num = 0`.
+pub fn apply_gold_cpu_clock() {
+    unsafe {
+        let cf = mmio_read(PCR_CPU_FREQ_CONF);
+        mmio_write(PCR_CPU_FREQ_CONF, cf & !0x0000_FF00);
+    }
+}
+
+pub fn cpu_freq_conf() -> u32 {
+    unsafe { mmio_read(PCR_CPU_FREQ_CONF) }
+}
+
+pub fn digreg_xpd() -> u8 {
+    regi2c_read_block(0x6d, 13)
+}
+
+fn regi2c_enable_block(block: u8) -> usize {
+    enable_phy_clock();
+    let (rd_bit, mst_bit) = match block {
+        0x66 => (7, 9),   // BBPLL
+        0x6a => (6, 8),   // BIAS
+        0x6d => (10, 12), // DIG_REG
+        0x61 => (8, 10),  // ULP_CAL
+        0x69 => (9, 11),  // SAR
+        _ => (7, 9),
+    };
+    unsafe {
+        mmio_write(I2C_ANA_CONF1, 0x00FF_FFFF & !(1 << rd_bit));
+        if (mmio_read(I2C_ANA_CONF2) & (1 << mst_bit)) != 0 {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+fn regi2c_write_block(block: u8, reg: u8, data: u8) {
+    let master = regi2c_enable_block(block);
+    let ctrl = if master == 0 {
+        I2C_ANA_CTRL0
+    } else {
+        I2C_ANA_CTRL1
+    };
+    unsafe {
+        mmio_write(
+            ctrl,
+            u32::from(block) | (u32::from(reg) << 8) | (u32::from(data) << 16) | (1 << 24),
+        );
+    }
+    regi2c_wait(master);
+}
+
+fn regi2c_read_block(block: u8, reg: u8) -> u8 {
+    let master = regi2c_enable_block(block);
+    let ctrl = if master == 0 {
+        I2C_ANA_CTRL0
+    } else {
+        I2C_ANA_CTRL1
+    };
+    unsafe {
+        mmio_write(ctrl, u32::from(block) | (u32::from(reg) << 8));
+    }
+    regi2c_wait(master);
+    unsafe { ((mmio_read(ctrl) >> 16) & 0xFF) as u8 }
+}
+
+/// Read-only analog / clock dump for gold vs VeerOS. Does not poke MAC/PHY.
+pub fn dump_analog(w: &mut dyn fmt::Write) {
+    unsafe {
+        let _ = writeln!(
+            w,
+            "ANALOG I2C_ANA {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
+            mmio_read(I2C_ANA_MST_BASE),
+            mmio_read(I2C_ANA_MST_BASE + 4),
+            mmio_read(I2C_ANA_MST_BASE + 8),
+            mmio_read(I2C_ANA_MST_BASE + 12),
+            mmio_read(I2C_ANA_CONF0),
+            mmio_read(I2C_ANA_CONF1),
+            mmio_read(I2C_ANA_CONF2),
+            mmio_read(I2C_ANA_MST_BASE + 0x24),
+        );
+        let pcr = 0x6009_6100usize;
+        let _ = writeln!(
+            w,
+            "ANALOG PCR {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
+            mmio_read(pcr),
+            mmio_read(pcr + 4),
+            mmio_read(pcr + 8),
+            mmio_read(pcr + 12),
+            mmio_read(pcr + 16),
+            mmio_read(pcr + 20),
+            mmio_read(pcr + 24),
+            mmio_read(pcr + 28),
+        );
+        let _ = writeln!(
+            w,
+            "ANALOG PMU icg={:08x}/{:08x}/{:08x} immck={:08x} immslp={:08x} immicg={:08x}",
+            mmio_read(PMU_HP_ACTIVE_ICG_MODEM),
+            mmio_read(PMU_HP_MODEM_ICG_MODEM),
+            mmio_read(PMU_HP_SLEEP_ICG_MODEM),
+            mmio_read(PMU_IMM_HP_CK_POWER),
+            mmio_read(PMU_IMM_SLEEP_SYSCLK),
+            mmio_read(PMU_IMM_MODEM_ICG),
+        );
+    }
+    for &(name, block, n) in &[
+        ("BBPLL", 0x66u8, 11u8),
+        ("BIAS", 0x6a, 4),
+        ("DIGREG", 0x6d, 16),
+        ("ULP", 0x61, 8),
+        ("SAR", 0x69, 8),
+    ] {
+        let _ = write!(w, "ANALOG I2C {name} {block:#04x}:");
+        for reg in 0..n {
+            let _ = write!(w, " {:02x}", regi2c_read_block(block, reg));
+        }
+        let _ = writeln!(w);
+    }
+}
+
 /// Enable the PHY I2C master clock (needed before `register_chipv7_phy`).
 ///
 /// Mirrors esp-hal's `enable_phy()` — turns on the I2C master bus clock
 /// at 160 MHz so the PHY calibration blob can program RF registers.
+/// Gold holds this for the whole session (`mem::forget(PhyClockGuard)`).
 pub fn enable_phy_clock() {
     unsafe {
         // Deassert I2C master reset (bit 2 of rst_conf).
@@ -427,6 +749,18 @@ pub fn enable_wifi_clocks() {
         // MODEM_LPCON CLK_CONF: bits 0 (wifipwr) + 1 (coex)
         let lp_clk = mmio_read(MODEM_LPCON_CLK_CONF);
         mmio_write(MODEM_LPCON_CLK_CONF, lp_clk | 0x03);
+    }
+}
+
+/// Gold `enable_wifi(false)`: clear the Wi-Fi CLK_CONF1 bits and
+/// wifipwr/coex in LPCON, leave BT bits alone.
+pub fn disable_wifi_clocks() {
+    unsafe {
+        const GOLD_WIFI: u32 = 0x0001_E7FF;
+        let c1 = mmio_read(MODEM_SYSCON_CLK_CONF1);
+        mmio_write(MODEM_SYSCON_CLK_CONF1, c1 & !GOLD_WIFI);
+        let lp_clk = mmio_read(MODEM_LPCON_CLK_CONF);
+        mmio_write(MODEM_LPCON_CLK_CONF, lp_clk & !0x03);
     }
 }
 

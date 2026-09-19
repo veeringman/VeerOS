@@ -259,8 +259,8 @@ impl Scheduler {
         }
     }
 
-    /// Pick the next task to run (round-robin among `Ready` tasks).
-    /// Returns the index, or `None` if nothing is runnable.
+    /// Pick the next task to run. Highest ready priority wins (gold
+    /// `esp-rtos`); same priority stays round-robin from `current+1`.
     pub fn pick_next(&self) -> Option<usize> {
         let start = if self.current == usize::MAX {
             0
@@ -268,42 +268,26 @@ impl Scheduler {
             (self.current + 1) % MAX_TASKS
         };
 
-        // --- priority scan (used when dist-rt is active) --------------------
-        #[cfg(feature = "dist-rt")]
-        {
-            let mut best_idx: Option<usize> = None;
-            let mut best_pri: Option<u8> = None;
-            for offset in 0..MAX_TASKS {
-                let idx = (start + offset) % MAX_TASKS;
-                let t = &self.tasks[idx];
-                if t.state == TaskState::Ready {
-                    match best_pri {
-                        None => {
-                            best_pri = Some(t.priority);
-                            best_idx = Some(idx);
-                        }
-                        Some(bp) if t.priority > bp => {
-                            best_pri = Some(t.priority);
-                            best_idx = Some(idx);
-                        }
-                        _ => {}
+        let mut best_idx: Option<usize> = None;
+        let mut best_pri: Option<u8> = None;
+        for offset in 0..MAX_TASKS {
+            let idx = (start + offset) % MAX_TASKS;
+            let t = &self.tasks[idx];
+            if t.state == TaskState::Ready {
+                match best_pri {
+                    None => {
+                        best_pri = Some(t.priority);
+                        best_idx = Some(idx);
                     }
+                    Some(bp) if t.priority > bp => {
+                        best_pri = Some(t.priority);
+                        best_idx = Some(idx);
+                    }
+                    _ => {}
                 }
             }
-            return best_idx;
         }
-
-        // --- simple round-robin (minimal / app) ----------------------------
-        #[cfg(not(feature = "dist-rt"))]
-        {
-            for offset in 0..MAX_TASKS {
-                let idx = (start + offset) % MAX_TASKS;
-                if self.tasks[idx].state == TaskState::Ready {
-                    return Some(idx);
-                }
-            }
-            None
-        }
+        best_idx
     }
 
     /// Called from the timer ISR on every tick. Advances the tick counter and

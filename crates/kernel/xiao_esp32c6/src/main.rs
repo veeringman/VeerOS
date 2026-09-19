@@ -5,6 +5,7 @@ mod trap;
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // ESP-IDF app descriptor — required by the 2nd-stage bootloader to validate
@@ -599,17 +600,38 @@ static mut IDLE_STACK: IdleStack = IdleStack([0u8; 2048]);
 // Shell task
 // ---------------------------------------------------------------------------
 
-/// Stack for the shell task. 12 KiB leaves DRAM for an 8 KiB wifi-drv stack
-/// so PHY cal does not smash BSS.
+/// Shell holds ScriptCtx (128×128-byte lines) plus history; 12 KiB overflowed
+/// into heap and turned vfs_read_file into `!E02@4086xxxx` after the prompt.
 #[cfg(feature = "shell")]
 #[repr(align(16))]
-struct ShellStack([u8; 12288]);
+struct ShellStack([u8; 36864]);
 #[cfg(feature = "shell")]
-static mut SHELL_STACK: ShellStack = ShellStack([0u8; 12288]);
+static mut SHELL_STACK: ShellStack = ShellStack([0u8; 36864]);
+
+#[cfg(all(feature = "shell", feature = "wifi"))]
+static SHELL_AFTER_WIFI: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "shell")]
 fn shell_task() -> ! {
+    // Constructing Shell (28 KiB frame) while wifi-drv is in init_internal
+    // made print_prompt jalr into SEMS (`!E02@40870a72`). Wait until the
+    // first scan attempt finishes.
+    #[cfg(feature = "wifi")]
+    {
+        while !SHELL_AFTER_WIFI.load(Ordering::Relaxed) {
+            #[cfg(target_arch = "riscv32")]
+            unsafe {
+                core::arch::asm!(
+                    "ecall",
+                    in("a0") 10usize,
+                    in("a7") 0x31usize,
+                    options(nostack),
+                );
+            }
+        }
+    }
     let serial = usb_serial();
+    serial.drain_rx();
     let mut con = Console::new(serial);
     let env = ShellEnv {
         version: VERSION,
@@ -808,6 +830,8 @@ fn net_task() -> ! {
                 soc_esp32::gpio::read(3) as u8,
                 soc_esp32::gpio::read(14) as u8
             );
+            let (rf_6b, rf_63) = soc_esp32::wifi::rf_i2c_snap();
+            let rf_63_dirty = rf_63;
             if wait_tick == 500 {
                 soc_esp32::wifi::dump_mac_bb(&mut con);
             }
@@ -817,13 +841,35 @@ fn net_task() -> ! {
             let (isr_cnt, _plic, _emip, _th, _mie, _mip, _ien, _it, _pw, _pwa, _ith, map_mac, _m1, _m2, st0, _st1, si0, si1, _on, _ioc, _iof, _sh, tasks_spawned, tasks_entered, _sa, sem_ok, sem_blk, sem_give, q_send, q_recv, _qst, _qrt, _qmd, ev_count, ev_last) =
                 soc_esp32::wifi_os_adapter::wifi_diag();
             let (irq_ext11, irq1, irq2, irq_other, irq_last) = crate::trap::irq_diag();
-            let rxdesc = unsafe { core::ptr::read_volatile(0x600A_408C as *const u32) };
             let (mfail, mfail_sz, qfail, qlen, qitem, macrst) =
                 soc_esp32::wifi_os_adapter::osi_gap_diag();
+            let (yreq, ytake, pp_runs, pp_last, pp_gap, i2c) =
+                soc_esp32::wifi_os_adapter::rtos_compat_diag();
+            let tfires = soc_esp32::wifi_os_adapter::timer_fire_count();
+            let (dmut, bmut, rxdesc, macor) = soc_esp32::wifi::poll_rx_probe();
+            let (agc5c, agc8c, bb5c) = soc_esp32::wifi::bb_agc_diag();
+            let (pll_d1, pll_d5, pll_d12) = soc_esp32::wifi::rfpll_snap();
+            let (pll1, pll5, pll12) = (pll_d1, pll_d5, pll_d12);
+            let (fe2c, fe30, fe44) = soc_esp32::wifi::fe_dc_diag();
+            let (mi00, mi40, mi48) = soc_esp32::wifi::mac_int_diag();
+            let (tsf50, tsf58, tsflo, tsfhi) = soc_esp32::wifi::tsf_diag();
+            let (r44c4, r44c8, r44cc, r44d4, r4c74) = soc_esp32::wifi::mac_time_diag();
+            soc_esp32::modem::enable_phy_clock();
             let _ = writeln!(
                 con,
-                "[net] wait #{} rx={} isr={} tasks={}/{} q={}/{} setintr={:#x}/{:#x} mapmac={:#x} st0={:#x} ev={}/{} irq={}/{}/{}/{}@{} rxdesc={:#x} mfail={}/{} qfail={}/{}x{} macrst={} alloc={}/{}/{}",
-                wait_tick, rx_count, isr_cnt, tasks_spawned, tasks_entered, q_send, q_recv, si0, si1, map_mac, st0, ev_count, ev_last, irq_ext11, irq1, irq2, irq_other, irq_last, rxdesc, mfail, mfail_sz, qfail, qlen, qitem, macrst, alloc_tot, alloc_big, alloc_max
+                "[net] wait #{} rx={} isr={} tasks={}/{} q={}/{} setintr={:#x}/{:#x} mapmac={:#x} st0={:#x} ev={}/{} irq={}/{}/{}/{}@{} rxdesc={:#x} mfail={}/{} qfail={}/{}x{} macrst={} alloc={}/{}/{} yld={}/{} pp={}/{}/{} i2c={} dmut={} bmut={} macor={:#x} tf={}",
+                wait_tick, rx_count, isr_cnt, tasks_spawned, tasks_entered, q_send, q_recv, si0, si1, map_mac, st0, ev_count, ev_last, irq_ext11, irq1, irq2, irq_other, irq_last, rxdesc, mfail, mfail_sz, qfail, qlen, qitem, macrst, alloc_tot, alloc_big, alloc_max, yreq, ytake, pp_runs, pp_last, pp_gap, i2c, dmut, bmut, macor, tfires
+            );
+            let _ = writeln!(
+                con,
+                "[net] rf i2c 6b2={:#04x} 634={:#04x}->{:#04x} pll={:#04x}/{:#04x}/{:#04x}->{:#04x}/{:#04x}/{:#04x} fe={:#010x}/{:#010x}/{:#010x} macint={:#010x}/{:#010x}/{:#010x} agc5c={:#010x} agc8c={:#010x} bb5c={:#010x}",
+                rf_6b, rf_63_dirty, rf_63, pll_d1, pll_d5, pll_d12, pll1, pll5, pll12, fe2c, fe30, fe44, mi00, mi40, mi48, agc5c, agc8c, bb5c
+            );
+            let _ = writeln!(
+                con,
+                "[net] tsf 50={:#010x} 58={:#010x} lo={:#010x} hi={:#010x} 44c4={:#010x} 44c8={:#010x} 44cc={:#010x} 44d4={:#010x} 4c74={:#010x} 42f4={:#010x}",
+                tsf50, tsf58, tsflo, tsfhi, r44c4, r44c8, r44cc, r44d4, r4c74,
+                unsafe { core::ptr::read_volatile(0x600A_42F4 as *const u32) }
             );
             let _ = (cal_ret, sem_ok, sem_blk, sem_give);
         }
@@ -1240,6 +1286,8 @@ struct DrvStack2K([u8; 2048]);
 
 #[cfg(feature = "wifi")]
 static mut WIFI_DRV_STACK: DrvStack8K = DrvStack8K([0u8; 8192]);
+#[cfg(feature = "wifi")]
+static mut WIFI_TMR_STACK: DrvStack4K = DrvStack4K([0u8; 4096]);
 #[cfg(feature = "ble")]
 static mut BLE_DRV_STACK: DrvStack2K = DrvStack2K([0u8; 2048]);
 #[cfg(feature = "ieee802154")]
@@ -1336,6 +1384,16 @@ fn drv_sleep(ticks: usize) {
 // ── Wi-Fi driver task ──────────────────────────────────────────────────
 
 #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
+/// Gold fires ets_timer callbacks on a timer-worker task, not the waiter.
+#[cfg(all(feature = "wifi", target_arch = "riscv32"))]
+fn wifi_timer_task() -> ! {
+    loop {
+        soc_esp32::wifi_os_adapter::poll_timers();
+        drv_sleep(1);
+    }
+}
+
+#[cfg(all(feature = "wifi", target_arch = "riscv32"))]
 fn wifi_driver_task() -> ! {
     drv_log(b"[wifi-drv] starting\n");
 
@@ -1376,6 +1434,8 @@ fn wifi_driver_task() -> ! {
                     Ok(_) => drv_log(b"[wifi-drv] scan: APs found\n"),
                     Err(_) => drv_log(b"[wifi-drv] scan failed\n"),
                 }
+                #[cfg(feature = "shell")]
+                SHELL_AFTER_WIFI.store(true, Ordering::Relaxed);
             }
         }
         drv_sleep(500);
@@ -1529,6 +1589,10 @@ pub extern "C" fn _rust_start() -> ! {
     // ── disable watchdogs (ROM bootloader enables them) ──────────
     soc_esp32::wdt::disable_watchdogs();
 
+    // Gold pre_init: drop TEE-only APM filters so REE MAC DMA can write SRAM.
+    // Safe now that blob spawn entries are naked (no LLVM tail-jalr).
+    let (apm_hp, apm_lp0, apm_lp) = soc_esp32::modem::disable_apm_filters();
+
     // XIAO C6: power the FM8625H RF switch onto the ceramic antenna *before*
     // any PHY work, matching Arduino initVariant() / the working esp-radio ref.
     soc_esp32::gpio::enable_xiao_onboard_antenna();
@@ -1554,6 +1618,11 @@ pub extern "C" fn _rust_start() -> ! {
     let mut con = Console::new(serial);
 
     soc_esp32::gpio::enable_xiao_onboard_antenna();
+    let _ = writeln!(
+        con,
+        "[boot] apm hp={:#010x} lp0={:#010x} lp={:#010x} (cleared)",
+        apm_hp, apm_lp0, apm_lp
+    );
     {
         let (en, out, inn, f3, f14, lpm, hold, lpin) = soc_esp32::gpio::rf_switch_diag();
         let _ = writeln!(
@@ -1838,6 +1907,22 @@ pub extern "C" fn _rust_start() -> ! {
 
         #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
         {
+            let tsb = (&raw const WIFI_TMR_STACK) as usize;
+            let tst = tsb + core::mem::size_of::<DrvStack4K>();
+            if let Some(idx) = sched.create_task(
+                "wifi-tmr",
+                wifi_timer_task as *const () as usize,
+                tst,
+                tsb,
+                2,
+                0,
+            ) {
+                sched.tasks[idx].context.set_status(INITIAL_MSTATUS);
+            }
+        }
+
+        #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
+        {
             use soc_esp32::modem;
             let sb = (&raw const WIFI_DRV_STACK) as usize;
             let st = sb + core::mem::size_of::<DrvStack8K>();
@@ -1846,7 +1931,7 @@ pub extern "C" fn _rust_start() -> ! {
                 wifi_driver_task as *const () as usize,
                 st,
                 sb,
-                2,
+                1,
                 0,
             ) {
                 // TODO: switch to UMODE_MSTATUS once PMP grants cover IROM/DROM/stack
@@ -1983,6 +2068,8 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(con, "[boot] idle task registered");
     #[cfg(feature = "shell")]
     let _ = writeln!(con, "[boot] shell task registered");
+    #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
+    let _ = writeln!(con, "[boot] wifi-tmr task registered (M-mode)");
     #[cfg(all(feature = "wifi", target_arch = "riscv32"))]
     let _ = writeln!(con, "[boot] wifi-drv task registered (M-mode)");
     #[cfg(all(feature = "ble", target_arch = "riscv32"))]
