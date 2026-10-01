@@ -8,11 +8,16 @@
 
 use arch::{Platform, TickTimer};
 
+pub mod bochs;
 pub mod mem;
+pub mod pcie;
 pub mod timer;
 pub mod uart;
+pub mod uart_kbd;
 pub mod virtio_blk;
+pub mod virtio_input;
 pub mod virtio_net;
+pub mod virtio_pci;
 
 pub struct Aarch64Virt;
 

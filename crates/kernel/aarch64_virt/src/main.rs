@@ -11,8 +11,31 @@ use core::cell::UnsafeCell;
 use core::fmt::Write;
 
 use arch::{BlockDevice, Console, Platform, Serial, TaskContext};
-use panic_halt as _;
 use soc_aarch64_virt::{default_serial, system_timer, Aarch64Virt};
+use veer_ui::View;
+
+/// Report panics on the serial console (file/line) instead of halting
+/// silently — the UI loop must never die quietly.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let mut console = Console::new(default_serial());
+    let _ = writeln!(console, "");
+    let _ = writeln!(console, "[panic] {}", info.message());
+    if let Some(loc) = info.location() {
+        let _ = writeln!(
+            console,
+            "[panic] at {}:{}:{}",
+            loc.file(),
+            loc.line(),
+            loc.column()
+        );
+    }
+    loop {
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack, preserves_flags)) };
+    }
+}
+
+mod sysview;
 
 #[cfg(feature = "net")]
 use arch::NetworkDevice;
@@ -99,6 +122,26 @@ _park:
 
 #[unsafe(no_mangle)]
 static mut DTB_PTR: usize = 0;
+
+// ── Input globals ──────────────────────────────────────────────────────────
+// Single-core boot: the UI loop owns these (mirrors `DTB_PTR` above).
+
+/// Unified keyboard/mouse queues (`/dev/keyboard`, `/dev/mouse` semantics).
+static mut INPUT: microkernel::input::InputSubsystem = microkernel::input::InputSubsystem::new();
+/// UART command-palette keyboard source.
+static mut UI_KBD: soc_aarch64_virt::uart_kbd::UartKeyboard =
+    soc_aarch64_virt::uart_kbd::UartKeyboard::new();
+/// VNC keyboard (virtio-input-pci).
+static mut VIRT_KBD: Option<soc_aarch64_virt::virtio_input::VirtioInput> = None;
+/// VNC tablet/mouse (virtio-input-pci).
+static mut VIRT_PTR: Option<soc_aarch64_virt::virtio_input::VirtioInput> = None;
+
+/// Frame arena for view rebuilds (reset every frame by construction).
+static mut ARENA_BUF: [u8; 65536] = [0; 65536];
+/// First VeeroS view (live system status).
+static mut SYSVIEW: sysview::SystemView = sysview::SystemView::new();
+/// Pixel framebuffer when a Bochs display is present.
+static mut FB: Option<soc_aarch64_virt::bochs::BochsDisplay> = None;
 
 // ── Networking globals ───────────────────────────────────────────────────────
 
@@ -599,6 +642,104 @@ pub extern "C" fn _rust_start() -> ! {
     let _ = writeln!(console, "uart     : PL011 @ 0x09000000");
     let _ = writeln!(console, "load     : 0x00080000");
 
+    // ── Pixel framebuffer (QEMU `virt` + `-device bochs-display`) ──
+    // Absent under serial-only VMMs (veer-vm/HVF): probe fails gracefully.
+    match soc_aarch64_virt::bochs::BochsDisplay::probe() {
+        Some(fb) => {
+            use arch::DisplayDevice;
+            let _ = writeln!(
+                console,
+                "[display] bochs {}x{}x{} lfb=0x{:x}",
+                fb.width(),
+                fb.height(),
+                fb.bpp(),
+                fb.framebuffer_base()
+            );
+            // SAFETY: single-core boot; the UI loop is the sole accessor.
+            unsafe {
+                SYSVIEW.fb_label = "1024x768x32 bochs";
+                FB = Some(fb);
+            }
+            render_view();
+            let _ = writeln!(console, "[display] VeeroS view painted");
+        }
+        None => {
+            let _ = writeln!(console, "[display] no Bochs display (serial-only)");
+        }
+    }
+
+    // ── Input: UART command-palette keyboard → InputSubsystem ──
+    // SAFETY: single-core boot; the UI loop is the sole accessor.
+    unsafe { INPUT.init() };
+    let _ = writeln!(console, "[input] uart keyboard ready (type on serial)");
+
+    // ── Virtio input: VNC keyboard + tablet over PCI ──
+    // Absent without `-device virtio-{keyboard,tablet}-pci`: skipped.
+    {
+        use soc_aarch64_virt::pcie::PciId;
+        let mut found = [PciId::EMPTY; 8];
+        let n = soc_aarch64_virt::pcie::find_by_vendor(0x1AF4, &mut found);
+        let _ = writeln!(console, "[input] pci scan: {n} virtio device(s)");
+        let mut window = 0x1400_0000usize;
+        for i in 0..n {
+            let id = found[i];
+            let _ = writeln!(
+                console,
+                "[input] pci 1af4:{:04x} class {:02x}",
+                id.device, id.class
+            );
+            if id.device == soc_aarch64_virt::virtio_input::VIRTIO_INPUT_PCI_DEVICE {
+                // SAFETY: same single-owner rationale as above.
+                unsafe {
+                    let kbd = VIRT_KBD.is_none() && VIRT_PTR.is_none();
+                    match soc_aarch64_virt::virtio_input::VirtioInput::init(&id, window, kbd) {
+                        Ok((dev, next)) => {
+                            let (common, notify, mult, isr, dcfg) = dev.debug_bases();
+                            let (qd, qa, qu, qs) = dev.debug_queue();
+                            let _ = writeln!(
+                                console,
+                                "[input] regs common=0x{common:x} dev=0x{dcfg:x} abs={} key={}",
+                                dev.dbg_abs_size, dev.dbg_key_size,
+                            );
+                            let _ = writeln!(
+                                console,
+                                "[input] queue desc=0x{qd:x} avail=0x{qa:x} used=0x{qu:x} size={qs} region=0x{:x}",
+                                dev.region_base(),
+                            );
+                            let _ = writeln!(
+                                console,
+                                "[input] virtio-input {} ({})",
+                                if dev.is_pointer() {
+                                    "pointer"
+                                } else {
+                                    "keyboard"
+                                },
+                                if kbd { "kbd-mem" } else { "ptr-mem" },
+                            );
+                            window = next;
+                            // Slots fill in probe order: pass
+                            // `-device virtio-keyboard-pci` first, tablet
+                            // second. (Role query via device config is
+                            // unreliable here; events self-describe at
+                            // runtime.)
+                            if VIRT_KBD.is_none() {
+                                VIRT_KBD = Some(dev);
+                                SYSVIEW.virt_kbd = true;
+                            } else {
+                                VIRT_PTR = Some(dev);
+                                SYSVIEW.virt_ptr = true;
+                            }
+                        }
+                        Err(stage) => {
+                            let _ = writeln!(console, "[input] virtio-input failed: {stage}");
+                            SYSVIEW.virt_note = stage;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "shell")]
     init_vfs(&mut console);
 
@@ -615,10 +756,8 @@ fn run_net(mut console: Console<soc_aarch64_virt::uart::Pl011>) -> ! {
     let nic = match soc_aarch64_virt::virtio_net::VirtioMmioNet::init() {
         Some(n) => n,
         None => {
-            let _ = writeln!(console, "[net] no virtio-net found; parking");
-            loop {
-                core::hint::spin_loop();
-            }
+            let _ = writeln!(console, "[net] no virtio-net; local UI console");
+            ui_console_loop(console)
         }
     };
 
@@ -679,6 +818,9 @@ fn run_net(mut console: Console<soc_aarch64_virt::uart::Pl011>) -> ! {
         // Poll until a client connects.
         let accepted = loop {
             net_poll();
+            if ui_poll(&mut console) {
+                render_view();
+            }
             if let Some(session) = accepted_session() {
                 break session;
             }
@@ -708,6 +850,118 @@ fn run_net(mut console: Console<soc_aarch64_virt::uart::Pl011>) -> ! {
                 }
             }
         }
+    }
+}
+
+/// Paint one VeeroS frame from a fresh arena. No-op without a display.
+fn render_view() {
+    use arch::DisplayDevice;
+    // SAFETY: the UI loop owns FB/SYSVIEW/ARENA_BUF (single-core).
+    unsafe {
+        let Some(fb) = FB.as_ref() else {
+            return;
+        };
+        let mut arena = veer_ui::Arena::new(&mut *core::ptr::addr_of_mut!(ARENA_BUF));
+        let mut p = veer_ui::Painter::new(
+            fb.framebuffer_base() as *mut u32,
+            fb.width(),
+            fb.height(),
+            fb.width(),
+        );
+        p.fill_rect(0, 0, fb.width(), fb.height(), veer_ui::theme::BG);
+        veer_ui::render(&SYSVIEW, &mut arena, &mut p);
+    }
+}
+
+/// Handle one decoded input event from any source. Returns `true` when
+/// the view needs repaint (keypresses only for now — no cursor yet).
+#[cfg(feature = "net")]
+fn handle_event(
+    ev: arch::InputEvent,
+    console: &mut Console<soc_aarch64_virt::uart::Pl011>,
+) -> bool {
+    use arch::InputEvent;
+    // SAFETY: the UI loop owns INPUT/SYSVIEW (single-core, no preemption).
+    unsafe {
+        match ev {
+            InputEvent::None => false,
+            InputEvent::KeyPress(b) => {
+                if (0x20..0x7F).contains(&b) {
+                    let _ = writeln!(console, "[input] key '{}' 0x{b:02x}", b as char);
+                } else {
+                    let _ = writeln!(console, "[input] key 0x{b:02x}");
+                }
+                SYSVIEW.on_key(b);
+                INPUT.feed_event(ev);
+                true
+            }
+            InputEvent::KeyRelease(_) => {
+                INPUT.feed_event(ev);
+                false
+            }
+            InputEvent::MouseMove { dx, dy } => {
+                let _ = writeln!(console, "[input] mouse {dx:+} {dy:+}");
+                INPUT.feed_event(ev);
+                false
+            }
+            InputEvent::MouseButton { button, pressed } => {
+                let _ = writeln!(
+                    console,
+                    "[input] button{button} {}",
+                    if pressed { "down" } else { "up" }
+                );
+                INPUT.feed_event(ev);
+                false
+            }
+        }
+    }
+}
+
+/// Drain UART keys into the [`InputSubsystem`], echoing decoded events.
+/// Returns `true` when at least one key arrived so the caller repaints
+/// once per drain — repainting per key starves the 16-byte UART FIFO
+/// mid-burst and drops pasted input.
+#[cfg(feature = "net")]
+fn ui_poll(console: &mut Console<soc_aarch64_virt::uart::Pl011>) -> bool {
+    use arch::{InputDevice, InputEvent};
+    let mut dirty = false;
+    // SAFETY: the UI loop owns INPUT/UI_KBD (single-core, no preemption).
+    unsafe {
+        loop {
+            match UI_KBD.poll_event() {
+                InputEvent::None => break,
+                ev => dirty |= handle_event(ev, console),
+            }
+        }
+        // VNC keyboard + tablet.
+        let mut evts = [InputEvent::None; 16];
+        if let Some(k) = VIRT_KBD.as_mut() {
+            let m = k.poll_into(&mut evts);
+            SYSVIEW.vq0 = k.queue_pos();
+            for i in 0..m {
+                dirty |= handle_event(evts[i], console);
+            }
+        }
+        if let Some(p) = VIRT_PTR.as_mut() {
+            let m = p.poll_into(&mut evts);
+            SYSVIEW.vq1 = p.queue_pos();
+            for i in 0..m {
+                dirty |= handle_event(evts[i], console);
+            }
+        }
+    }
+    dirty
+}
+
+/// Local console loop when no NIC is present: the serial line is the UI.
+#[cfg(feature = "net")]
+fn ui_console_loop(mut console: Console<soc_aarch64_virt::uart::Pl011>) -> ! {
+    let _ = writeln!(console, "[ui] local console — type keys (arrows work)");
+    loop {
+        if ui_poll(&mut console) {
+            render_view();
+        }
+        core::hint::spin_loop();
     }
 }
 

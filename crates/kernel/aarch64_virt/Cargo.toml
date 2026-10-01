@@ -22,4 +22,4 @@ shell            = { path = "../../shell", optional = true, features = ["full-vi
 ssh              = { path = "../../ssh", optional = true }
 crypto           = { path = "../../crypto", features = ["sha256", "sha512", "chacha20", "x25519", "ed25519"], optional = true }
 microkernel      = { path = "../../microkernel", default-features = false, features = ["dist-full", "multi-user"] }
-panic-halt       = "1.0"
+veer_ui          = { path = "../../veer_ui" }

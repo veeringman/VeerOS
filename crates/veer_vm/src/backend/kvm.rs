@@ -51,6 +51,8 @@ pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// (just below the 1 MiB kernel load address; outside any PT_LOAD).
 const MBINFO_GPA: u64 = 0x9_F000;
 const RISCV32_GPA_BASE: u64 = 0x8000_0000;
+/// KVM AArch64 guest RAM base (QEMU `virt` machine convention).
+const AARCH64_GPA_BASE: u64 = 0x4000_0000;
 
 struct KvmIrqLine {
     vm: Arc<VmFd>,
@@ -127,6 +129,7 @@ pub fn run(cfg: VmConfig) -> Result<()> {
     let guest_base = match cfg.guest_arch {
         GuestArch::X86_64 => 0,
         GuestArch::Riscv32 => RISCV32_GPA_BASE,
+        GuestArch::Aarch64 => AARCH64_GPA_BASE,
     };
     let guest = Arc::new(GuestMem::new_with_base(guest_base, memory_bytes)?);
     let region = kvm_userspace_memory_region {

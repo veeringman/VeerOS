@@ -821,11 +821,11 @@ dependencies = [
  "crypto",
  "microkernel",
  "net",
- "panic-halt",
  "shell",
  "smoltcp",
  "soc-aarch64-virt",
  "ssh",
+ "veer_ui",
 ]
 
 [[package]]
@@ -1948,6 +1948,10 @@ dependencies = [
  "veer_aura",
  "veer_resolve",
 ]
+
+[[package]]
+name = "veer_ui"
+version = "0.1.0"
 
 [[package]]
 name = "veer_vm"

@@ -2,6 +2,64 @@
 
 This file is the persistent progress tracker for VeerOS and should be updated in every development session.
 
+## [2026-10-01] Session Sync — VeeroS native UI on AArch64 (pixels + keys + palette)
+
+Target decision: ARM64 first (MacBook + Mac Mini dev machines, QEMU `virt` + HVF);
+x86-64 later for EC2/Ubuntu deploy. `veer-vm` x86_64 cannot run on arm64 Macs
+(no VMX) and has no display device — local verification is QEMU-direct
+(`-kernel` ELF, no ISO needed). One shared Bochs-dispi driver design covers
+both arches later.
+
+### Closed in this session
+- [x] Bochs pixel framebuffer on QEMU `virt` (`soc/aarch64_virt/{pcie,bochs}.rs`:
+  ECAM @ `0x4010000000`, BAR assignment, dispi 1024×768×32, `DisplayDevice`
+  impl; MMU off so LFB is directly accessible). Screendump-verified.
+- [x] UART command-palette keyboard (`soc/aarch64_virt/uart_kbd.rs`: arrows →
+  `0x81..0x84`) feeding kernel `InputSubsystem`; net-absent parking replaced
+  with `ui_console_loop`. `scripts/run-aarch64-virt-qemu.sh` added.
+- [x] `veer_ui` crate (no_std, zero-alloc): widget IR, bump-arena frames,
+  software painter (rects/lines/circles/8×16 text/12 icons), dark theme,
+  `View` trait. 7 host tests pass; builds for `aarch64-unknown-none-softfloat`.
+  Font table ported from `soc/raspi5/src/font.rs`.
+- [x] First VeeroS view (`kernel/aarch64_virt/sysview.rs`): live status +
+  command palette (`help status fabric intent echo keys clear`, history,
+  4-line severity log). Keys→state→repaint verified via screenshots.
+- [x] Virtio-PCI modern transport + virtio-keyboard/tablet-pci drivers
+  (`virtio_pci.rs`, `virtio_input.rs`: cap walk incl. MSI-X skip, per-BAR-once
+  assignment, DRIVER_OK, 64-entry eventq). Keyboard proven E2E
+  (`sendkey` → Linux keycode → palette).
+- [x] Serial-port panic handler (file/line) replacing silent `panic-halt`.
+- [x] Fixed: arena base-address alignment panic (regression test added);
+  fixed: per-key repaint starving the 16-byte UART FIFO (repaint once/drain).
+
+### Still open (next session)
+- [ ] Verify real VNC-client typing lands in the palette (monitor `sendkey`
+  works; live client unproven). Guest: rebuild + run with unix serial,
+  set VNC password via monitor (`change vnc password veer`).
+- [ ] Tablet ABS/config query returns zeros (`abs=0 key=0` even on keyboard):
+  transport+queues proven good by readback, so the input device-config
+  select mechanism needs a second look. Slots currently fill by probe
+  order (keyboard `-device` first). Tablet `mouse_move` unproven.
+- [ ] VNC window is display-only until tablet works (no PS/2 on `virt`).
+- [ ] x86-64 deploy track: Bochs port-I/O variant of the dispi driver.
+
+### Resume commands
+```sh
+./scripts/build-aarch64-virt.sh
+# interactive (unix serial + VNC + monitor):
+qemu-system-aarch64 -M virt -cpu host -accel hvf -m 512 \
+  -kernel build/veer-vm/kernel-aarch64-debug.elf \
+  -serial unix:/tmp/veeros-serial.sock,server,nowait -display none \
+  -vnc :0,password=on -device bochs-display \
+  -device virtio-keyboard-pci -device virtio-tablet-pci \
+  -device virtio-net-device,netdev=n0 -netdev user,id=n0 \
+  -monitor telnet:127.0.0.1:4444,server,nowait
+# then: change vnc password; nc -U /tmp/veeros-serial.sock to type
+cargo test -p veer_ui
+```
+
+---
+
 ## [2026-09-18] Session Sync — Persistent Node Identity + Host MeshTransport
 
 ### Closed in this session

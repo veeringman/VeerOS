@@ -29,6 +29,7 @@ members = [
     "crates/net",
     "crates/shell",
     "crates/userlib",
+    "crates/veer_ui",
     # ── Host tools ──────────────────────────────────────────
     "crates/veer-connect",
     "crates/fold_engine",
